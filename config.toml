@@ -1,0 +1,22 @@
+download_dir = "downloads"
+temp_dir = "temp"
+
+[usenet]
+server = "news.example.com"
+username = "YOUR_USERNAME"
+password = "YOUR_PASSWORD"
+port = 443
+ssl = true
+connections = 50
+
+[memory]
+max_segments_in_memory = 200
+stream_to_disk = true
+io_buffer_size = 4194304
+
+[post_processing]
+auto_par2_repair = true
+auto_extract_rar = true
+auto_extract_zip = true
+delete_archives_after_extract = true
+delete_par2_after_repair = true
