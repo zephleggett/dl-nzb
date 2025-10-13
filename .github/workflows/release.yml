@@ -16,9 +16,35 @@ jobs:
       upload_url: ${{ steps.create_release.outputs.upload_url }}
       version: ${{ steps.get_version.outputs.version }}
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
       - name: Get version from tag
         id: get_version
         run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Extract changelog for this version
+        id: changelog
+        run: |
+          VERSION="${{ steps.get_version.outputs.version }}"
+
+          # Extract changelog section for this version
+          CHANGELOG=$(awk "/^## \[${VERSION}\]/{flag=1; next} /^## \[/{flag=0} flag" CHANGELOG.md)
+
+          # If changelog is empty, use a default message
+          if [ -z "$CHANGELOG" ]; then
+            CHANGELOG="See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details."
+          fi
+
+          # Save to file to preserve formatting
+          echo "$CHANGELOG" > /tmp/changelog.txt
+
+          # Set output (escape for GitHub Actions)
+          {
+            echo 'CHANGELOG<<EOF'
+            cat /tmp/changelog.txt
+            echo 'EOF'
+          } >> $GITHUB_OUTPUT
 
       - name: Create Release
         id: create_release
@@ -59,7 +85,7 @@ jobs:
 
             ## Changelog
 
-            See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details.
+            ${{ steps.changelog.outputs.CHANGELOG }}
 
   build-linux:
     name: Build Linux ${{ matrix.arch }}
