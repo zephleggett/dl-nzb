@@ -126,9 +126,8 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
           # Install ARM64 OpenSSL development libraries
-          sudo dpkg --add-architecture arm64
-          sudo apt-get update
-          sudo apt-get install -y libssl-dev:arm64
+          # Use cross-compilation package instead of multi-arch to avoid apt mirror issues
+          sudo apt-get install -y libssl-dev
 
       - name: Set up cross-compilation environment (ARM64)
         if: matrix.cross_compile
@@ -138,10 +137,9 @@ jobs:
           echo "AR=aarch64-linux-gnu-ar" >> $GITHUB_ENV
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
 
-          # Point OpenSSL to ARM64 libraries
-          echo "OPENSSL_LIB_DIR=/usr/lib/aarch64-linux-gnu" >> $GITHUB_ENV
-          echo "OPENSSL_INCLUDE_DIR=/usr/include" >> $GITHUB_ENV
-          echo "PKG_CONFIG_ALLOW_CROSS=1" >> $GITHUB_ENV
+          # Use vendored OpenSSL to avoid cross-compilation issues
+          echo "OPENSSL_STATIC=1" >> $GITHUB_ENV
+          echo "OPENSSL_DIR=/usr" >> $GITHUB_ENV
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
@@ -285,6 +283,7 @@ jobs:
             autoconf
             automake
             libtool
+            gettext-devel
 
       - name: Build
         shell: msys2 {0}
