@@ -1,4 +1,3 @@
-use config::{Config as ConfigLib, Environment, File};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::path::{Path, PathBuf};
@@ -10,9 +9,9 @@ type Result<T> = std::result::Result<T, DlNzbError>;
 /// Expand tilde (~) in paths to the actual home directory
 fn expand_tilde(path: &Path) -> PathBuf {
     if let Some(path_str) = path.to_str() {
-        if path_str.starts_with("~/") {
+        if let Some(stripped) = path_str.strip_prefix("~/") {
             if let Some(home) = dirs::home_dir() {
-                return home.join(&path_str[2..]);
+                return home.join(stripped);
             }
         } else if path_str == "~" {
             if let Some(home) = dirs::home_dir() {
@@ -25,6 +24,7 @@ fn expand_tilde(path: &Path) -> PathBuf {
 
 /// Main configuration structure with builder pattern support
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct Config {
     #[serde(default)]
     pub usenet: UsenetConfig,
@@ -146,71 +146,39 @@ impl Default for LoggingConfig {
     }
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            usenet: UsenetConfig::default(),
-            download: DownloadConfig::default(),
-            memory: MemoryConfig::default(),
-            post_processing: PostProcessingConfig::default(),
-            logging: LoggingConfig::default(),
+
+/// Load configuration from environment variables
+fn load_env_overrides(mut config: Config) -> Config {
+    // Override with DL_NZB_ prefixed environment variables
+    if let Ok(val) = env::var("DL_NZB_USENET_SERVER") {
+        config.usenet.server = val;
+    }
+    if let Ok(val) = env::var("DL_NZB_USENET_PORT") {
+        if let Ok(port) = val.parse() {
+            config.usenet.port = port;
         }
     }
-}
-
-/// Configuration builder for flexible configuration loading
-pub struct ConfigBuilder {
-    config: ConfigLib,
-}
-
-impl ConfigBuilder {
-    /// Create a new configuration builder
-    pub fn new() -> Self {
-        Self {
-            config: ConfigLib::builder().build().unwrap(),
+    if let Ok(val) = env::var("DL_NZB_USENET_USERNAME") {
+        config.usenet.username = val;
+    }
+    if let Ok(val) = env::var("DL_NZB_USENET_PASSWORD") {
+        config.usenet.password = val;
+    }
+    if let Ok(val) = env::var("DL_NZB_USENET_SSL") {
+        if let Ok(ssl) = val.parse() {
+            config.usenet.ssl = ssl;
         }
     }
-
-    /// Add a configuration file
-    pub fn add_file<P: AsRef<Path>>(mut self, path: P) -> Self {
-        self.config = ConfigLib::builder()
-            .add_source(self.config)
-            .add_source(File::from(path.as_ref()))
-            .build()
-            .unwrap();
-        self
-    }
-
-    /// Add environment variables with prefix
-    pub fn add_env_prefix(mut self, prefix: &str) -> Self {
-        self.config = ConfigLib::builder()
-            .add_source(self.config)
-            .add_source(
-                Environment::with_prefix(prefix)
-                    .separator("_")
-                    .try_parsing(true),
-            )
-            .build()
-            .unwrap();
-        self
-    }
-
-    /// Build and validate the configuration
-    pub fn build(self) -> Result<Config> {
-        let mut config: Config = self
-            .config
-            .try_deserialize()
-            .map_err(|e| ConfigError::ParseError(e.to_string()))?;
-
-        // Expand tilde in paths
-        config.download.dir = expand_tilde(&config.download.dir);
-        if let Some(log_file) = config.logging.file.as_ref() {
-            config.logging.file = Some(expand_tilde(log_file));
+    if let Ok(val) = env::var("DL_NZB_USENET_CONNECTIONS") {
+        if let Ok(connections) = val.parse() {
+            config.usenet.connections = connections;
         }
-
-        config.validate()?;
-        Ok(config)
     }
+    if let Ok(val) = env::var("DL_NZB_DOWNLOAD_DIR") {
+        config.download.dir = PathBuf::from(val);
+    }
+
+    config
 }
 
 impl Config {
@@ -259,15 +227,22 @@ impl Config {
             standard_config
         };
 
-        let mut builder = ConfigBuilder::new();
+        // Load and parse TOML file
+        let content = std::fs::read_to_string(&config_path)?;
+        let mut config: Config = toml::from_str(&content)
+            .map_err(|e| ConfigError::ParseError(format!("Failed to parse config: {}", e)))?;
 
-        // Load config file
-        builder = builder.add_file(&config_path);
+        // Apply environment variable overrides
+        config = load_env_overrides(config);
 
-        // Add environment variables (can override file settings)
-        builder = builder.add_env_prefix("DL_NZB");
+        // Expand tilde in paths
+        config.download.dir = expand_tilde(&config.download.dir);
+        if let Some(log_file) = config.logging.file.as_ref() {
+            config.logging.file = Some(expand_tilde(log_file));
+        }
 
-        builder.build()
+        config.validate()?;
+        Ok(config)
     }
 
     /// Create a sample configuration file

@@ -51,8 +51,8 @@ impl PostProcessor {
             let bar = ProgressBar::new(100);
             bar.enable_steady_tick(Duration::from_millis(100));
 
-            let status = self.repair_with_par2(download_dir, &bar).await?;
-            status
+            
+            self.repair_with_par2(download_dir, &bar).await?
         } else {
             Par2Status::NoPar2Files
         };

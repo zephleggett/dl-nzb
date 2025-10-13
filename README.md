@@ -6,7 +6,7 @@ A fast, modern NZB downloader written in Rust. Downloads from Usenet with parall
 
 Most Usenet downloaders are either slow, bloated with unnecessary features, or haven't been updated in years. dl-nzb is built from scratch in Rust to be fast and efficient without the overhead. It does one thing well: download your NZB files as quickly as your connection allows.
 
-The entire downloader is a 3.3MB statically-linked binary with zero runtime dependencies. PAR2 repair and RAR extraction are built directly into the binary using optimized C++ libraries (par2cmdline-turbo), so you don't need to install external tools. Just copy the binary to your server and run it. It uses async I/O and connection pooling to maximize throughput, and it's smart about memory usage so you can run it on servers with limited RAM.
+The entire downloader is a 2.5MB statically-linked binary with zero runtime dependencies. PAR2 repair and RAR extraction are built directly into the binary using optimized C++ libraries (par2cmdline-turbo), so you don't need to install external tools. Just copy the binary to your server and run it. It uses async I/O and connection pooling to maximize throughput, and it's smart about memory usage so you can run it on servers with limited RAM.
 
 ## Features
 
@@ -190,4 +190,4 @@ GPL 2.0
 
 ## Contributing
 
-Pull requests welcome. This is a side project but I'll review contributions when I can.
+Pull requests welcome. This is a side project to get started in rust, but I'll review contributions when I can.

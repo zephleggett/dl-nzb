@@ -60,7 +60,7 @@ impl Manager for NntpConnectionManager {
             DlNzbError::from(NntpError::ConnectionFailed {
                 server: self.config.server.clone(),
                 port: self.config.port,
-                source: std::io::Error::new(std::io::ErrorKind::Other, e),
+                source: std::io::Error::other(e),
             })
         })?;
 
@@ -68,7 +68,7 @@ impl Manager for NntpConnectionManager {
             .await
             .map_err(|e| {
                 tracing::error!("Failed to create NNTP connection: {}", e);
-                e.into()
+                e
             })
     }
 
@@ -105,9 +105,7 @@ impl PooledConnection {
     ) -> Result<Bytes, DlNzbError> {
         self.conn
             .download_segment(message_id, group)
-            .await
-            .map_err(Into::into)
-    }
+            .await}
 }
 
 /// Builder for creating connection pools with configuration
@@ -151,7 +149,7 @@ impl NntpPoolBuilder {
                 NntpError::ConnectionFailed {
                     server: "pool".to_string(),
                     port: 0,
-                    source: std::io::Error::new(std::io::ErrorKind::Other, e),
+                    source: std::io::Error::other(e),
                 }
                 .into()
             })
@@ -173,7 +171,7 @@ impl NntpPoolExt for NntpPool {
             NntpError::ConnectionFailed {
                 server: "pool".to_string(),
                 port: 0,
-                source: std::io::Error::new(std::io::ErrorKind::Other, e),
+                source: std::io::Error::other(e),
             }
         })?;
         Ok(PooledConnection { conn })

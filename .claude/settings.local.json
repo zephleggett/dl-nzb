@@ -3,7 +3,10 @@
     "allow": [
       "Bash(cargo search:*)",
       "Bash(cargo info:*)",
-      "Bash(rm:*)"
+      "Bash(rm:*)",
+      "Bash(awk:*)",
+      "Bash(sort:*)",
+      "Bash(cargo clippy:*)"
     ],
     "deny": []
   }

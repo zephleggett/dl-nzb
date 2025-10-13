@@ -2,9 +2,11 @@ use bytes::Bytes;
 use futures::stream::{self, StreamExt};
 use indicatif::ProgressBar;
 use std::path::PathBuf;
+use std::sync::Arc; // Only for Semaphore
 use std::time::{Duration, Instant};
 use tokio::fs::File;
 use tokio::io::{AsyncWriteExt, BufWriter};
+use tokio::sync::Semaphore;
 
 use super::nzb::{Nzb, NzbFile};
 use crate::config::Config;
@@ -24,17 +26,20 @@ pub struct DownloadResult {
     pub segments_failed: usize,
     pub download_time: Duration,
     pub average_speed: f64, // MB/s
+    pub failed_message_ids: Vec<String>, // Track failed segments for potential retry
 }
 
 /// Result of downloading a single segment
 struct SegmentResult {
     segment_number: u32,
     data: Option<Bytes>,
+    message_id: String, // Track for error reporting
 }
 
 /// Optimized downloader using connection pooling and streaming
 pub struct Downloader {
     pool: NntpPool,
+    segment_semaphore: Arc<Semaphore>,
 }
 
 impl Downloader {
@@ -44,7 +49,14 @@ impl Downloader {
             .max_size(config.usenet.connections as usize)
             .build()?;
 
-        Ok(Self { pool })
+        // Create semaphore to enforce max_segments_in_memory limit
+        // This prevents memory exhaustion on large downloads
+        let segment_semaphore = Arc::new(Semaphore::new(config.memory.max_segments_in_memory));
+
+        Ok(Self {
+            pool,
+            segment_semaphore,
+        })
     }
 
     /// Download all files from an NZB, returns results and progress bar for reuse
@@ -131,14 +143,21 @@ impl Downloader {
 
         let download_futures = files.iter().map(|file| {
             let pool = self.pool.clone();
+            let semaphore = self.segment_semaphore.clone();
             let config = config.clone();
             let file = (*file).clone();
             let progress = progress_bar.clone();
             let completed = completed_count.clone();
 
             async move {
-                let result =
-                    Self::download_file_with_pool(file, config, pool, progress.clone()).await;
+                let result = Self::download_file_with_pool(
+                    file,
+                    config,
+                    pool,
+                    semaphore,
+                    progress.clone(),
+                )
+                .await;
 
                 // Update file counter (only update every 5 files to reduce overhead)
                 let count = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -175,6 +194,7 @@ impl Downloader {
         file: NzbFile,
         config: Config,
         pool: NntpPool,
+        segment_semaphore: Arc<Semaphore>,
         progress_bar: ProgressBar,
     ) -> Result<DownloadResult> {
         let filename = Nzb::get_filename_from_subject(&file.subject)
@@ -191,6 +211,7 @@ impl Downloader {
         let group = &file.groups.group[0].name; // Use first group
         let segment_futures = file.segments.segment.iter().map(|segment| {
             let pool = pool.clone();
+            let semaphore = segment_semaphore.clone();
             let message_id = segment.message_id.clone();
             let group = group.clone();
             let segment_number = segment.number;
@@ -198,6 +219,10 @@ impl Downloader {
             let progress = progress_bar.clone();
 
             async move {
+                // Acquire semaphore permit BEFORE downloading segment
+                // This enforces max_segments_in_memory limit
+                let _permit = semaphore.acquire().await.unwrap();
+
                 // Retry up to 3 times
                 for attempt in 0..3 {
                     // Get connection from pool with timeout
@@ -213,6 +238,7 @@ impl Downloader {
                                     return Ok(SegmentResult {
                                         segment_number,
                                         data: None,
+                                        message_id: message_id.clone(),
                                     });
                                 }
                                 // Small delay before retry to avoid overwhelming server
@@ -235,6 +261,7 @@ impl Downloader {
                             return Ok(SegmentResult {
                                 segment_number,
                                 data: Some(data),
+                                message_id: message_id.clone(),
                             });
                         }
                         Ok(Err(_)) | Err(_) => {
@@ -245,6 +272,7 @@ impl Downloader {
                                 return Ok(SegmentResult {
                                     segment_number,
                                     data: None,
+                                    message_id: message_id.clone(),
                                 });
                             }
                             // Small delay before retry to avoid overwhelming server
@@ -258,7 +286,9 @@ impl Downloader {
                 Ok(SegmentResult {
                     segment_number,
                     data: None,
+                    message_id: message_id.clone(),
                 })
+                // Permit is dropped here, releasing memory slot
             }
         });
 
@@ -275,6 +305,7 @@ impl Downloader {
         let mut segments_downloaded = 0;
         let mut segments_failed = 0;
         let mut actual_size = 0u64;
+        let mut failed_message_ids = Vec::new();
 
         for result in segment_results {
             match result {
@@ -290,6 +321,7 @@ impl Downloader {
                         }
                     } else {
                         segments_failed += 1;
+                        failed_message_ids.push(segment_result.message_id);
                     }
                 }
                 Err(_) => segments_failed += 1,
@@ -320,6 +352,29 @@ impl Downloader {
             segments_failed,
             download_time,
             average_speed,
+            failed_message_ids,
         })
+    }
+
+    /// Clean up partial files after failed download
+    pub async fn cleanup_partial_files(results: &[DownloadResult]) -> Result<usize> {
+        let mut cleaned_count = 0;
+
+        for result in results {
+            // Only clean up files with failed segments
+            if result.segments_failed > 0 && result.path.exists() {
+                match tokio::fs::remove_file(&result.path).await {
+                    Ok(_) => {
+                        tracing::info!("Cleaned up partial file: {}", result.path.display());
+                        cleaned_count += 1;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to clean up {}: {}", result.path.display(), e);
+                    }
+                }
+            }
+        }
+
+        Ok(cleaned_count)
     }
 }

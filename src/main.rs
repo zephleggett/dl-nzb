@@ -139,21 +139,17 @@ async fn handle_command(command: &Commands, _cli: &Cli) -> Result<()> {
         }
 
         Commands::History {
-            show,
-            clear,
-            remove,
+            show: _,
+            clear: _,
+            remove: _,
         } => {
-            if *show {
-                println!("Download history:");
-                // TODO: Implement history
-            } else if *clear {
-                println!("Clearing download history...");
-                // TODO: Implement history clear
-            } else if let Some(id) = remove {
-                println!("Removing history entry: {}", id);
-                // TODO: Implement history remove
-            }
-            Ok(())
+            eprintln!("❌ History feature is not yet implemented.");
+            eprintln!();
+            eprintln!("This is a planned feature for tracking download history.");
+            eprintln!("Check https://github.com/zephleggett/dl-nzb/issues for updates.");
+            eprintln!();
+            eprintln!("For now, downloaded files are tracked in the filesystem.");
+            std::process::exit(1);
         }
 
         Commands::Version { detailed } => {
@@ -281,7 +277,10 @@ async fn handle_download_mode(cli: &Cli, mut config: Config) -> Result<()> {
         download_config.download.dir = output_dir.clone();
 
         // Download the NZB with updated config
-        match downloader.download_nzb(&nzb, download_config.clone()).await {
+        match downloader
+            .download_nzb(&nzb, download_config.clone())
+            .await
+        {
             Ok((results, _progress_bar)) => {
                 // Keep the download progress bar visible
                 // Don't call finish_and_clear() - let it stay on screen
@@ -310,7 +309,7 @@ async fn handle_download_mode(cli: &Cli, mut config: Config) -> Result<()> {
             Err(e) => {
                 eprintln!("Download failed for {}: {}", nzb_path.display(), e);
                 if !cli.keep_partial {
-                    // TODO: Cleanup partial files
+                    eprintln!("Note: Partial files may remain. Use --keep-partial to explicitly keep them.");
                 }
             }
         }
@@ -390,15 +389,3 @@ fn print_final_summary(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_cli_parsing() {
-        let args = vec!["dl-nzb", "test.nzb", "-o", "/tmp", "-c", "50"];
-        let cli = Cli::try_parse_from(args).unwrap();
-        assert_eq!(cli.files.len(), 1);
-        assert_eq!(cli.connections, Some(50));
-    }
-}

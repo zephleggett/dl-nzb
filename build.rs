@@ -67,7 +67,7 @@ fn main() {
 
         let wrapper_obj = build_dir.join("par2repairer_wrapper.o");
         let status = Command::new("g++")
-            .args(&[
+            .args([
                 "-std=c++14",
                 "-DHAVE_CONFIG_H",
                 "-Wall",

@@ -39,17 +39,6 @@ pub struct NzbSegments {
     pub segment: Vec<NzbSegment>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NzbHead {
-    pub meta: Option<NzbMeta>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NzbMeta {
-    pub meta_type: String,
-    pub value: String,
-}
-
 // Wrapper struct that provides the same interface as before
 #[derive(Debug, Clone)]
 pub struct Nzb {
