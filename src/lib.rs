@@ -1,0 +1,44 @@
+//! dl-nzb - High-performance NZB downloader library
+//!
+//! This library provides a robust, async implementation for downloading NZB files from Usenet.
+//!
+//! # Features
+//!
+//! - Async/await support via Tokio
+//! - Connection pooling with automatic health checks
+//! - Optimized yEnc decoding
+//! - Progress reporting
+//! - PAR2 verification and repair
+//! - RAR extraction
+//!
+//! # Example
+//!
+//! ```no_run
+//! use dl_nzb::{config::Config, pool::NntpPoolBuilder};
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let config = Config::load()?;
+//!     let pool = NntpPoolBuilder::new(config.usenet.clone()).build()?;
+//!     // Use the pool for downloading...
+//!     Ok(())
+//! }
+//! ```
+
+// Core modules
+pub mod error;
+pub mod config;
+pub mod progress;
+pub mod cli;
+
+// Feature modules organized by functionality
+pub mod nntp;
+pub mod download;
+pub mod processing;
+
+// Re-export commonly used types
+pub use error::{DlNzbError, Result};
+pub use config::Config;
+pub use nntp::{NntpPool, NntpPoolBuilder, NntpPoolExt};
+pub use download::{Downloader, DownloadResult, Nzb};
+pub use processing::PostProcessor;

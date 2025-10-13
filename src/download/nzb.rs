@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
-use anyhow::Result;
 use std::path::Path;
 pub use nzb_rs::{Nzb as NzbRs};
+
+use crate::error::{DlNzbError, NzbError};
+
+type Result<T> = std::result::Result<T, DlNzbError>;
 
 // Re-export types for compatibility with existing code
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,7 +52,6 @@ pub struct NzbMeta {
 // Wrapper struct that provides the same interface as before
 #[derive(Debug, Clone)]
 pub struct Nzb {
-    inner: NzbRs,
     // Cache converted files for performance
     files: Vec<NzbFile>,
 }
@@ -62,7 +64,7 @@ impl Nzb {
 
     pub fn from_str(content: &str) -> Result<Self> {
         let inner = NzbRs::parse(content)
-            .map_err(|e| anyhow::anyhow!("Failed to parse NZB: {}", e))?;
+            .map_err(|e| NzbError::ParseError(format!("Failed to parse NZB: {}", e)))?;
 
         // Convert nzb-rs structures to our compatible structures
         let files = inner.files.iter().map(|file| {
@@ -89,7 +91,7 @@ impl Nzb {
             }
         }).collect();
 
-        Ok(Nzb { inner, files })
+        Ok(Nzb { files })
     }
 
     pub fn files(&self) -> &Vec<NzbFile> {
@@ -111,75 +113,13 @@ impl Nzb {
 
     pub fn get_filename_from_subject(subject: &str) -> Option<String> {
         // Extract filename from subject line like: [1/9] - "filename.ext" yEnc (1/5202)
-        let re = regex::Regex::new(r#""([^"]+)""#).ok()?;
+        // Handle both regular quotes and HTML entities (&quot;)
+        let re = regex::Regex::new(r#"(?:&quot;|")([^"]+)(?:&quot;|")"#).ok()?;
         re.captures(subject)
             .and_then(|caps| caps.get(1))
             .map(|m| m.as_str().to_string())
     }
 
-    pub fn get_main_files(&self) -> Vec<&NzbFile> {
-        self.files.iter()
-            .filter(|file| {
-                let subject = &file.subject;
-                // Filter out PAR2 files - everything else is considered main content
-                !Self::is_par2_file(subject)
-            })
-            .collect()
-    }
-
-    pub fn get_par2_files(&self) -> Vec<&NzbFile> {
-        self.files.iter()
-            .filter(|file| Self::is_par2_file(&file.subject))
-            .collect()
-    }
-
-    pub fn is_par2_file(subject: &str) -> bool {
-        let subject_lower = subject.to_lowercase();
-        subject_lower.contains(".par2") ||
-        (subject_lower.contains(".par") && !subject_lower.contains(".part"))
-    }
-
-    // Additional methods that leverage nzb-rs capabilities
-    pub fn inner(&self) -> &NzbRs {
-        &self.inner
-    }
-
-    pub fn get_filename(&self) -> Option<String> {
-        // Try to get filename from the first file's subject
-        self.files.first()
-            .and_then(|file| Self::get_filename_from_subject(&file.subject))
-    }
-
-    pub fn get_metadata(&self, key: &str) -> Option<String> {
-        // nzb-rs has structured metadata, let's handle the common cases
-        match key {
-            "title" => self.inner.meta.title.clone(),
-            "category" => self.inner.meta.category.clone(),
-            _ => None,
-        }
-    }
-
-    pub fn get_all_metadata(&self) -> Vec<(String, String)> {
-        let mut metadata = Vec::new();
-
-        if let Some(title) = &self.inner.meta.title {
-            metadata.push(("title".to_string(), title.clone()));
-        }
-
-        if let Some(category) = &self.inner.meta.category {
-            metadata.push(("category".to_string(), category.clone()));
-        }
-
-        for tag in &self.inner.meta.tags {
-            metadata.push(("tag".to_string(), tag.clone()));
-        }
-
-        for password in &self.inner.meta.passwords {
-            metadata.push(("password".to_string(), password.clone()));
-        }
-
-        metadata
-    }
 }
 
 #[cfg(test)]

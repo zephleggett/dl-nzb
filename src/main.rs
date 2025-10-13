@@ -1,347 +1,316 @@
-mod config;
-mod nzb;
-mod nntp;
-mod downloader;
-mod post_process;
+use human_bytes::human_bytes;
+use tracing_subscriber::EnvFilter;
 
-use clap::{Parser, Subcommand};
-use anyhow::Result;
-use std::path::PathBuf;
-use tracing_subscriber;
-use regex;
+use dl_nzb::{
+    cli::{Cli, Commands},
+    config::Config,
+    download::{Downloader, Nzb},
+    processing::PostProcessor,
+    nntp::AsyncNntpConnection,
+    error::{DlNzbError, ConfigError},
+};
 
-use config::Config;
-use nzb::Nzb;
-use downloader::Downloader;
-use post_process::PostProcessor;
-
-#[derive(Parser)]
-#[command(name = "dl-nzb")]
-#[command(about = "A macOS CLI tool to parse and download NZB files from Usenet")]
-#[command(version = "0.1.0")]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-}
-
-#[derive(Subcommand)]
-enum Commands {
-    /// Download files from an NZB file
-    Download {
-        /// Path to the NZB file
-        #[arg(value_name = "NZB_FILE")]
-        nzb_file: PathBuf,
-
-        /// Output directory (overrides config)
-        #[arg(short, long)]
-        output: Option<PathBuf>,
-
-        /// Number of concurrent connections (overrides config)
-        #[arg(short, long)]
-        connections: Option<u8>,
-
-        /// Disable PAR2 repair
-        #[arg(long)]
-        no_par2: bool,
-
-        /// Disable RAR extraction
-        #[arg(long)]
-        no_rar: bool,
-
-        /// Disable ZIP extraction
-        #[arg(long)]
-        no_zip: bool,
-
-        /// Delete archives after extraction
-        #[arg(long)]
-        delete_archives: bool,
-
-        /// Delete PAR2 files after repair
-        #[arg(long)]
-        delete_par2: bool,
-
-        /// Use SSL connection
-        #[arg(long)]
-        ssl: Option<bool>,
-
-        /// Server port (overrides config)
-        #[arg(long)]
-        port: Option<u16>,
-    },
-
-    /// Parse and display information about an NZB file
-    Info {
-        /// Path to the NZB file
-        #[arg(value_name = "NZB_FILE")]
-        nzb_file: PathBuf,
-    },
-
-    /// Show current configuration
-    Config,
-
-    /// Test connection to Usenet server
-    Test,
-}
+type Result<T> = std::result::Result<T, DlNzbError>;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli = Cli::parse_and_validate();
+
     // Initialize logging
-    tracing_subscriber::fmt::init();
+    init_logging(&cli)?;
 
-    let cli = Cli::parse();
+    // Handle special commands first
+    if let Some(command) = &cli.command {
+        return handle_command(command, &cli).await;
+    }
 
-    match cli.command {
-        Commands::Download { nzb_file, output, connections, no_par2, no_rar, no_zip, delete_archives, delete_par2, ssl, port } => {
-            download_command(nzb_file, output, connections, no_par2, no_rar, no_zip, delete_archives, delete_par2, ssl, port).await?;
-        }
-        Commands::Info { nzb_file } => {
-            info_command(nzb_file)?;
-        }
-        Commands::Config => {
-            config_command()?;
-        }
-        Commands::Test => {
-            test_command().await?;
-        }
+    // Load configuration (auto-creates if it doesn't exist)
+    let mut config = Config::load()?;
+
+    // Apply CLI overrides
+    config.apply_overrides(cli.get_config_overrides());
+
+    // Handle username/password from CLI
+    if let Some(username) = &cli.username {
+        config.usenet.username = username.clone();
+    }
+    if let Some(password) = &cli.password {
+        config.usenet.password = password.clone();
+    }
+
+    // Validate configuration
+    config.validate()?;
+
+    // Handle list mode
+    if cli.list {
+        return handle_list_mode(&cli).await;
+    }
+
+    // Check if we have files to download
+    if cli.files.is_empty() {
+        eprintln!("No NZB files specified. Use 'dl-nzb --help' for usage information.");
+        return Ok(());
+    }
+
+    // Download mode
+    handle_download_mode(&cli, config).await
+}
+
+/// Initialize logging based on CLI arguments
+fn init_logging(cli: &Cli) -> Result<()> {
+    let filter = EnvFilter::try_new(cli.get_log_level())
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false);
+
+    if cli.quiet {
+        subscriber.without_time().init();
+    } else if let Some(log_file) = &cli.log_file {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_file)?;
+        subscriber.with_writer(file).init();
+    } else {
+        subscriber.init();
     }
 
     Ok(())
 }
 
-async fn download_command(
-    nzb_file: PathBuf,
-    output: Option<PathBuf>,
-    connections: Option<u8>,
-    no_par2: bool,
-    no_rar: bool,
-    no_zip: bool,
-    delete_archives: bool,
-    delete_par2: bool,
-    ssl: Option<bool>,
-    port: Option<u16>,
-) -> Result<()> {
-    println!("📁 Loading NZB: {}", nzb_file.file_name().unwrap_or_default().to_string_lossy());
-    let nzb = Nzb::from_file(&nzb_file)?;
+/// Handle subcommands
+async fn handle_command(command: &Commands, _cli: &Cli) -> Result<()> {
+    match command {
+        Commands::Test { server } => {
+            println!("Testing connection to Usenet server...");
+            
+            let config = Config::load()?;
+            let test_config = if let Some(server) = server {
+                let mut cfg = config.usenet.clone();
+                cfg.server = server.clone();
+                cfg
+            } else {
+                config.usenet.clone()
+            };
 
-    let mut config = Config::load_or_create()?;
+            // Test connection using async NNTP
+            match AsyncNntpConnection::connect(&test_config).await {
+                Ok(mut conn) => {
+                    println!("✅ Successfully connected to {}", test_config.server);
+                    println!("   Authentication: OK");
+                    
+                    if conn.is_healthy().await {
+                        println!("   Server status: Healthy");
+                    }
+                    
+                    let _ = conn.close().await;
+                    Ok(())
+                }
+                Err(e) => {
+                    eprintln!("❌ Connection failed: {}", e);
+                    Err(e)
+                }
+            }
+        }
 
-    // Override config with command line options
-    if let Some(conn) = connections {
-        config.usenet.connections = conn;
+        Commands::Config => {
+            let config_path = Config::config_path()?;
+
+            println!("Configuration file location:");
+            println!("  {}", config_path.display());
+            println!();
+
+            if config_path.exists() {
+                println!("Current configuration:");
+                println!("{}", "─".repeat(60));
+                let config = Config::load()?;
+                let toml = toml::to_string_pretty(&config)
+                    .map_err(|e| ConfigError::ParseError(format!("Failed to serialize config: {}", e)))?;
+                println!("{}", toml);
+                println!("{}", "─".repeat(60));
+            } else {
+                println!("Configuration file does not exist yet.");
+                println!("Run any command to auto-create it with default values.");
+            }
+
+            Ok(())
+        }
+
+        Commands::History { show, clear, remove } => {
+            if *show {
+                println!("Download history:");
+                // TODO: Implement history
+            } else if *clear {
+                println!("Clearing download history...");
+                // TODO: Implement history clear
+            } else if let Some(id) = remove {
+                println!("Removing history entry: {}", id);
+                // TODO: Implement history remove
+            }
+            Ok(())
+        }
+
+        Commands::Version { detailed } => {
+            println!("dl-nzb {}", env!("CARGO_PKG_VERSION"));
+            
+            if *detailed {
+                println!("Build information:");
+                println!("  Package version: {}", env!("CARGO_PKG_VERSION"));
+                println!("  Features: async, connection-pooling, streaming");
+            }
+            Ok(())
+        }
     }
-    if let Some(use_ssl) = ssl {
-        config.usenet.ssl = use_ssl;
+}
+
+/// Handle list mode
+async fn handle_list_mode(cli: &Cli) -> Result<()> {
+    for nzb_path in &cli.files {
+        println!("\n📄 {}", nzb_path.display());
+        println!("{}", "─".repeat(50));
+
+        let nzb = Nzb::from_file(nzb_path)?;
+        
+        // Display NZB info
+        println!("Total files: {}", nzb.files().len());
+        println!("Total size: {}", human_bytes(nzb.total_size() as f64));
+        println!("Total segments: {}", nzb.total_segments());
+
+        println!("\nFiles:");
+        for file in nzb.files() {
+            let filename = Nzb::get_filename_from_subject(&file.subject)
+                .unwrap_or_else(|| file.subject.clone());
+            let size: u64 = file.segments.segment.iter().map(|s| s.bytes).sum();
+            let file_type = if filename.to_lowercase().ends_with(".par2") { "PAR2" } else { "DATA" };
+            println!("  [{:4}] {} ({})", file_type, filename, human_bytes(size as f64));
+        }
     }
-    if let Some(server_port) = port {
-        config.usenet.port = server_port;
+    
+    Ok(())
+}
+
+/// Handle download mode
+async fn handle_download_mode(cli: &Cli, mut config: Config) -> Result<()> {
+    // Apply CLI settings to config
+    if let Some(_limit) = cli.limit_rate {
+        // TODO: Implement bandwidth limiting
+        tracing::warn!("Bandwidth limiting not yet implemented");
     }
-    if no_par2 {
+
+    if cli.no_directories {
+        config.download.create_subfolders = false;
+    }
+
+    if cli.overwrite {
+        config.download.overwrite_existing = true;
+    }
+
+    if cli.no_par2 {
         config.post_processing.auto_par2_repair = false;
     }
-    if no_rar {
+
+    if cli.no_extract_rar {
         config.post_processing.auto_extract_rar = false;
     }
-    if no_zip {
-        config.post_processing.auto_extract_zip = false;
+
+    if cli.delete_rar_after_extract {
+        config.post_processing.delete_rar_after_extract = true;
     }
-    if delete_archives {
-        config.post_processing.delete_archives_after_extract = true;
-    }
-    if delete_par2 {
+
+    if cli.delete_par2 {
         config.post_processing.delete_par2_after_repair = true;
     }
 
-    // Create a folder name from the NZB file
-    let folder_name = generate_folder_name(&nzb_file, &nzb);
-    let download_dir = if let Some(output_dir) = output {
-        output_dir.join(&folder_name)
-    } else {
-        config.download_dir.join(&folder_name)
-    };
-
-    // Update config to use the specific download directory
-    config.download_dir = download_dir;
-
-    // Show brief info
-    let main_files = nzb.get_main_files();
-    let total_size_mb = nzb.total_size() as f64 / 1024.0 / 1024.0;
-
-    println!("📁 Folder: {}", folder_name);
-    if total_size_mb > 1024.0 {
-        println!("📦 {} files • {:.1} GB • {} connections",
-                main_files.len(), total_size_mb / 1024.0, config.usenet.connections);
-    } else {
-        println!("📦 {} files • {:.0} MB • {} connections",
-                main_files.len(), total_size_mb, config.usenet.connections);
+    // Update memory settings
+    if let Some(memory_mb) = cli.memory_limit {
+        config.memory.max_segments_in_memory = (memory_mb * 1024 * 1024) / 100_000; // Rough estimate
     }
+    config.memory.io_buffer_size = cli.buffer_size * 1024;
+    config.memory.max_concurrent_files = cli.max_concurrent_files;
 
-    let downloader = Downloader::new(config.clone());
-    let results = downloader.download_nzb(&nzb).await?;
+    // Create downloader
+    let downloader = Downloader::new(config.clone()).await?;
 
-    // Run post-processing if enabled
-    let post_processor = PostProcessor::new(config.post_processing.clone());
-    post_processor.process_downloads(&results).await?;
+    // Pre-warm connection pool silently
+    downloader.warm_up().await?;
 
-    // Show summary
-    let total_size: u64 = results.iter().map(|r| r.size).sum();
-    let total_time: f64 = results.iter().map(|r| r.download_time.as_secs_f64()).sum();
-    let overall_speed = if total_time > 0.0 {
-        (total_size as f64 / 1024.0 / 1024.0) / total_time
-    } else {
-        0.0
-    };
+    // Process each NZB file
+    let mut all_results = Vec::new();
 
-    let failed_files = results.iter().filter(|r| r.segments_failed > 0).count();
-    let success_files = results.len() - failed_files;
+    for nzb_path in &cli.files {
 
-    println!("\n🎉 Download Complete!");
-    if failed_files > 0 {
-        println!("✅ {} files successful • ⚠️  {} files with errors", success_files, failed_files);
-    } else {
-        println!("✅ All {} files downloaded successfully", success_files);
-    }
-
-    let size_mb = total_size as f64 / 1024.0 / 1024.0;
-    if size_mb > 1024.0 {
-        println!("📊 {:.1} GB in {:.0}s • {:.1} MB/s average",
-                size_mb / 1024.0, total_time, overall_speed);
-    } else {
-        println!("📊 {:.0} MB in {:.0}s • {:.1} MB/s average",
-                size_mb, total_time, overall_speed);
-    }
-
-    Ok(())
-}
-
-fn info_command(nzb_file: PathBuf) -> Result<()> {
-    println!("📁 Analyzing: {}", nzb_file.file_name().unwrap_or_default().to_string_lossy());
-    let nzb = Nzb::from_file(&nzb_file)?;
-
-    let main_files = nzb.get_main_files();
-    let par2_files = nzb.get_par2_files();
-    let total_size_mb = nzb.total_size() as f64 / 1024.0 / 1024.0;
-
-    println!("\n📊 NZB Summary");
-    if total_size_mb > 1024.0 {
-        println!("📦 {} main files • {:.1} GB total", main_files.len(), total_size_mb / 1024.0);
-    } else {
-        println!("📦 {} main files • {:.0} MB total", main_files.len(), total_size_mb);
-    }
-    println!("🔧 {} PAR2 recovery files", par2_files.len());
-    println!("📡 {} total segments", nzb.total_segments());
-
-    if main_files.len() <= 10 {
-        println!("\n📄 Main Files:");
-        for (i, file) in main_files.iter().enumerate() {
-            let filename = Nzb::get_filename_from_subject(&file.subject)
-                .unwrap_or_else(|| format!("unknown_file_{}", file.date));
-
-            let file_size: u64 = file.segments.segment.iter().map(|s| s.bytes).sum();
-            let size_mb = file_size as f64 / 1024.0 / 1024.0;
-
-            if size_mb > 1024.0 {
-                println!("  {}. {} ({:.1} GB)", i + 1, filename, size_mb / 1024.0);
-            } else {
-                println!("  {}. {} ({:.0} MB)", i + 1, filename, size_mb);
+        let nzb = match Nzb::from_file(nzb_path) {
+            Ok(nzb) => nzb,
+            Err(e) => {
+                eprintln!("Failed to load {}: {}", nzb_path.display(), e);
+                continue;
             }
-        }
-    } else {
-        println!("\n📄 Main Files: {} files (use download command to see details)", main_files.len());
-    }
+        };
 
-    Ok(())
-}
+        // Create output directory based on NZB filename
+        let output_dir = if config.download.create_subfolders {
+            // Use NZB filename (without extension) as folder name
+            let folder_name = nzb_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("download")
+                .to_string();
+            config.download.dir.join(folder_name)
+        } else {
+            config.download.dir.clone()
+        };
 
-fn config_command() -> Result<()> {
-    let config = Config::load_or_create()?;
+        std::fs::create_dir_all(&output_dir)?;
 
-    println!("⚙️  Current Configuration");
-    println!("🌐 Server: {}:{} (SSL: {})", config.usenet.server, config.usenet.port, config.usenet.ssl);
-    println!("👤 User: {} ({})", config.usenet.username, "*".repeat(config.usenet.password.len()));
-    println!("🔗 Connections: {}", config.usenet.connections);
-    println!("📁 Downloads: {}", config.download_dir.display());
-    println!("🔧 Auto-extract: RAR={}, ZIP={}", config.post_processing.auto_extract_rar, config.post_processing.auto_extract_zip);
+        // Update config for this download
+        let mut download_config = config.clone();
+        download_config.download.dir = output_dir.clone();
 
-    Ok(())
-}
+        // Download the NZB with updated config
+        match downloader.download_nzb(&nzb, download_config.clone()).await {
+            Ok((results, progress_bar)) => {
+                // Finish the download progress bar
+                progress_bar.finish_and_clear();
 
-async fn test_command() -> Result<()> {
-    let config = Config::load_or_create()?;
+                if cli.print_names {
+                    for result in &results {
+                        println!("{}", result.path.display());
+                    }
+                }
 
-    println!("🔌 Testing connection to {}:{}...", config.usenet.server, config.usenet.port);
+                // Post-processing - create new progress bars
+                if config.post_processing.auto_par2_repair || config.post_processing.auto_extract_rar {
+                    let processor = PostProcessor::new(download_config.post_processing.clone());
+                    if let Err(e) = processor.process_downloads(&results).await {
+                        eprintln!("Post-processing error: {}", e);
+                    }
+                }
 
-    let result = tokio::task::spawn_blocking(move || {
-        let mut client = nntp::NntpClient::connect(config.usenet)?;
-        client.quit()?;
-        Ok::<(), anyhow::Error>(())
-    }).await?;
-
-    match result {
-        Ok(()) => {
-            println!("✅ Connection successful!");
-        }
-        Err(e) => {
-            println!("❌ Connection failed: {}", e);
-        }
-    }
-
-    Ok(())
-}
-
-fn generate_folder_name(nzb_file: &PathBuf, nzb: &Nzb) -> String {
-    // Try to get a meaningful name from the NZB content
-    let main_files = nzb.get_main_files();
-
-    if let Some(first_file) = main_files.first() {
-        if let Some(filename) = Nzb::get_filename_from_subject(&first_file.subject) {
-            // Extract a clean name from the filename
-            let clean_name = extract_clean_name(&filename);
-            if !clean_name.is_empty() {
-                return clean_name;
+                all_results.extend(results);
+            }
+            Err(e) => {
+                eprintln!("Download failed for {}: {}", nzb_path.display(), e);
+                if !cli.keep_partial {
+                    // TODO: Cleanup partial files
+                }
             }
         }
     }
 
-    // Fallback to NZB filename without extension
-    nzb_file
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("download")
-        .to_string()
+    Ok(())
 }
 
-fn extract_clean_name(filename: &str) -> String {
-    // Remove common file extensions
-    let name = filename
-        .trim_end_matches(".mkv")
-        .trim_end_matches(".mp4")
-        .trim_end_matches(".avi")
-        .trim_end_matches(".mov")
-        .trim_end_matches(".wmv")
-        .trim_end_matches(".flv")
-        .trim_end_matches(".webm")
-        .trim_end_matches(".m4v")
-        .trim_end_matches(".nfo")
-        .trim_end_matches(".txt")
-        .trim_end_matches(".pdf")
-        .trim_end_matches(".epub")
-        .trim_end_matches(".zip")
-        .trim_end_matches(".rar")
-        .trim_end_matches(".7z")
-        .trim_end_matches(".tar")
-        .trim_end_matches(".gz");
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    // Remove common patterns like .part01, .part001, etc.
-    let re = regex::Regex::new(r"\.part\d+$").unwrap();
-    let name = re.replace(name, "");
-
-    // Replace problematic characters for folder names
-    name.chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            c => c,
-        })
-        .collect::<String>()
-        .trim()
-        .to_string()
+    #[test]
+    fn test_cli_parsing() {
+        let args = vec!["dl-nzb", "test.nzb", "-o", "/tmp", "-c", "50"];
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert_eq!(cli.files.len(), 1);
+        assert_eq!(cli.connections, Some(50));
+    }
 }

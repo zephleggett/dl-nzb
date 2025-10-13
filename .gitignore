@@ -1,1 +1,6 @@
 /target
+/.build
+*.a
+*.o
+.DS_Store
+Cargo.lock

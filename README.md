@@ -37,9 +37,11 @@ cargo install --path .
 
 ## Configuration
 
-On first run, the tool will create a template configuration file. If a `config.toml` exists in the current directory, it will use that. Otherwise, it creates one at `~/.config/dl-nzb/config.toml`.
+The tool uses a single configuration file located at `~/.config/dl-nzb/config.toml`.
 
-The template configuration looks like this:
+**On first run, this file will be automatically created with default values.**
+
+The configuration file looks like this:
 
 ```toml
 download_dir = "downloads"
@@ -54,7 +56,28 @@ ssl = false
 connections = 10
 ```
 
-**You must edit this file with your actual Usenet server credentials before using the tool.** The tool will refuse to run with placeholder values for security.
+**You must edit this file with your actual Usenet server credentials before downloading.**
+
+### Editing the configuration
+
+Open the config file in your favorite editor:
+
+```bash
+# macOS
+open ~/.config/dl-nzb/config.toml
+
+# Or use any text editor
+nano ~/.config/dl-nzb/config.toml
+vim ~/.config/dl-nzb/config.toml
+```
+
+### View configuration
+
+To see your current configuration and the file location:
+
+```bash
+dl-nzb config
+```
 
 ## Usage
 
@@ -70,41 +93,38 @@ dl-nzb --help
 dl-nzb test
 ```
 
-### View current configuration
+### List contents of an NZB file (without downloading)
 
 ```bash
-dl-nzb config
-```
-
-### Analyze an NZB file
-
-```bash
-dl-nzb info "RuPauls.Drag.Race.S17E11.Ross.Mathews.vs.The.Ducks.1080p.AMZN.WEB-DL.DDP5.1.H.264-RAWR.nzb"
+dl-nzb -l "nzb-file.nzb"
 ```
 
 This will show:
 - Total files and size
 - Number of segments
 - Individual file information
-- Newsgroup information
+- Main files vs PAR2 files
 
 ### Download files from an NZB
 
 ```bash
-dl-nzb download "RuPauls.Drag.Race.S17E11.Ross.Mathews.vs.The.Ducks.1080p.AMZN.WEB-DL.DDP5.1.H.264-RAWR.nzb"
+dl-nzb download "nzb-file.nzb"
 ```
 
 #### Download options
 
 ```bash
 # Download to a specific directory
-dl-nzb download -o ~/Movies "file.nzb"
+dl-nzb -o ~/Movies "file.nzb"
 
-# Use fewer connections (useful for slower servers)
-dl-nzb download -c 10 "file.nzb"
+# Use more connections for faster downloads
+dl-nzb -c 50 "file.nzb"
 
-# Combine options
-dl-nzb download -o ~/Downloads -c 20 "file.nzb"
+# Skip post-processing (PAR2 repair and extraction)
+dl-nzb --no-par2 --no-extract "file.nzb"
+
+# Override config server settings temporarily
+dl-nzb --server news.example.com --user myuser --password mypass "file.nzb"
 ```
 
 ## How it works
