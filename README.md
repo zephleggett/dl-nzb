@@ -1,20 +1,34 @@
 # dl-nzb
 
-A fast, modern NZB downloader written in Rust. Downloads from Usenet with parallel connections, automatic repair and extraction, and a clean terminal interface.
+A fast, modern NZB downloader written in Rust. 
+Downloads from Usenet with parallel connections, automatic repair and extraction, and a clean terminal interface.
 
 ![CleanShot 2025-10-13 at 23 25 24](https://github.com/user-attachments/assets/34e25e25-6d83-4ffc-a19e-8fb2146792a0)
 
 ## Why dl-nzb?
 
-Most Usenet downloaders are either slow, bloated with unnecessary features, or haven't been updated in years. dl-nzb is built from scratch in Rust to be fast and efficient without the overhead. It does one thing well: download your NZB files as quickly as your connection allows.
+Most Usenet downloaders are either slow, bloated with unnecessary features, or haven't been updated in years. dl-nzb is built from scratch in Rust to be fast and efficient without the overhead. 
+It does one thing well: download your NZB files as quickly as your connection allows.
 
-The entire downloader is a 2.5MB statically-linked binary with zero runtime dependencies. PAR2 repair and RAR extraction are built directly into the binary using optimized C++ libraries (par2cmdline-turbo), so you don't need to install external tools. Just copy the binary to your server and run it. It uses async I/O and connection pooling to maximize throughput, and it's smart about memory usage so you can run it on servers with limited RAM.
+The entire downloader is a 2.5MB statically-linked binary with zero runtime dependencies. 
+PAR2 repair and RAR extraction are built directly into the binary using optimized C++ libraries (par2cmdline-turbo), so you don't need to install external tools. 
+
+It uses async I/O and connection pooling to maximize throughput, and it's smart about memory usage so you can run it on servers with limited RAM.
+
+Just copy the binary to your server and run it.
 
 ## Features
-
-Downloads with parallel connections and automatic retries. Built-in PAR2 verification and repair using par2cmdline-turbo (no external par2 command needed). Built-in RAR extraction (no external unrar needed). Handles obfuscated filenames. Shows real-time progress with speed and ETA. All configurable through a simple TOML file or command-line options.
+- Downloads with parallel connections and automatic retries. 
+- Built-in PAR2 verification and repair using par2cmdline-turbo (no external par2 command needed). 
+- Built-in RAR extraction (no external unrar needed). 
+- Handles obfuscated filenames. 
+- Configurable through a simple TOML file or command-line options.
 
 ## Installation
+
+You may download the latest release here
+
+OR
 
 Build from source with Cargo:
 
@@ -61,11 +75,6 @@ dl-nzb movie.nzb
 Download to a specific directory:
 ```bash
 dl-nzb -o /path/to/downloads movie.nzb
-```
-
-Download multiple files:
-```bash
-dl-nzb file1.nzb file2.nzb file3.nzb
 ```
 
 Use more connections for faster speeds:
@@ -175,16 +184,6 @@ PAR2 repair and RAR extraction are compiled directly into the binary, so there's
 dl-nzb is designed to max out your connection speed. It uses async I/O, connection pooling, and streaming writes to disk. On a gigabit connection with 30-50 connections, you should see speeds close to your line capacity.
 
 Memory usage is configurable but defaults are tuned for typical systems (around 100-200MB during downloads). Increase `max_segments_in_memory` if you have RAM to spare and want slightly better performance.
-
-## Troubleshooting
-
-**Connection errors**: Test your server settings with `dl-nzb test`. Make sure your credentials are correct and your provider allows the port you're using (usually 563 for SSL).
-
-**Slow downloads**: Increase connections with `-c 50` or edit `connections` in your config. Check that SSL is enabled if your provider supports it (it's usually faster).
-
-**Missing segments**: Some Usenet posts are incomplete or expired. dl-nzb will download what's available and use PAR2 to repair if possible. If repair fails, the files are incomplete on Usenet.
-
-**Out of memory**: Lower `max_segments_in_memory` or `max_concurrent_files` in your config.
 
 ## License
 
