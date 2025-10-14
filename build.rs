@@ -62,11 +62,20 @@ fn main() {
 
         // Build libpar2.a
         let num_jobs = env::var("NUM_JOBS").unwrap_or_else(|_| "4".to_string());
-        let status = Command::new("make")
+
+        let mut make_cmd = Command::new("make");
+        make_cmd
             .arg("-j")
             .arg(&num_jobs)
             .arg("libpar2.a")
-            .current_dir(&par2_root)
+            .current_dir(&par2_root);
+
+        // On Windows, pass UNICODE defines to make
+        if cfg!(target_os = "windows") {
+            make_cmd.env("CXXFLAGS", "-DUNICODE -D_UNICODE");
+        }
+
+        let status = make_cmd
             .status()
             .expect("Failed to run make - make sure build tools are installed");
 
@@ -83,24 +92,32 @@ fn main() {
         let cxx = env::var("CXX").unwrap_or_else(|_| "g++".to_string());
 
         let wrapper_obj = build_dir.join("par2repairer_wrapper.o");
-        let status = Command::new(&cxx)
-            .args([
-                "-std=c++14",
-                "-DHAVE_CONFIG_H",
-                "-Wall",
-                "-DNDEBUG",
-                "-DPARPAR_ENABLE_HASHER_MD5CRC",
-                "-DPARPAR_INVERT_SUPPORT",
-                "-DPARPAR_SLIM_GF16",
-                "-g",
-                "-O2",
-                "-c",
-                "-o",
-            ])
+
+        let mut compile_cmd = Command::new(&cxx);
+        compile_cmd.args([
+            "-std=c++14",
+            "-DHAVE_CONFIG_H",
+            "-Wall",
+            "-DNDEBUG",
+            "-DPARPAR_ENABLE_HASHER_MD5CRC",
+            "-DPARPAR_INVERT_SUPPORT",
+            "-DPARPAR_SLIM_GF16",
+            "-g",
+            "-O2",
+        ]);
+
+        // On Windows, define UNICODE for wide character API
+        if cfg!(target_os = "windows") {
+            compile_cmd.args(["-DUNICODE", "-D_UNICODE"]);
+        }
+
+        compile_cmd.args(["-c", "-o"])
             .arg(&wrapper_obj)
             .arg("-I")
             .arg(&par2_root)
-            .arg(&wrapper_path)
+            .arg(&wrapper_path);
+
+        let status = compile_cmd
             .status()
             .expect("Failed to compile C API wrapper");
 
