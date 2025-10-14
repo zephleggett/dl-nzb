@@ -285,6 +285,7 @@ jobs:
             autoconf
             automake
             libtool
+            gettext
             gettext-devel
 
       - name: Build
