@@ -2,6 +2,8 @@
 
 A fast, modern NZB downloader written in Rust. Downloads from Usenet with parallel connections, automatic repair and extraction, and a clean terminal interface.
 
+![dl-nzb-demo](https://github.com/user-attachments/assets/959c3448-b664-4d7c-8526-5ad63b47d094)
+
 ## Why dl-nzb?
 
 Most Usenet downloaders are either slow, bloated with unnecessary features, or haven't been updated in years. dl-nzb is built from scratch in Rust to be fast and efficient without the overhead. It does one thing well: download your NZB files as quickly as your connection allows.
