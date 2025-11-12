@@ -17,7 +17,8 @@
       "Bash(git log:*)",
       "Bash(./target/release/dl-nzb config:*)",
       "Bash(find:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(xargs -I {} sh -c 'echo \"\"\"\"=== {} ===\"\"\"\" && wc -l {}')"
     ],
     "deny": []
   }

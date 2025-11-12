@@ -194,8 +194,9 @@ impl Downloader {
         let output_path = config.download.dir.join(&filename);
 
         // Check if file already exists with correct size (safe resume)
-        let expected_size: u64 = file.segments.segment.iter().map(|s| s.bytes).sum();
+        // Size check is sufficient - corruption will be caught by PAR2 verification
         if !config.download.force_redownload {
+            let expected_size: u64 = file.segments.segment.iter().map(|s| s.bytes).sum();
             if let Ok(metadata) = tokio::fs::metadata(&output_path).await {
                 if metadata.len() == expected_size {
                     tracing::info!("File already complete, skipping: {}", filename);
