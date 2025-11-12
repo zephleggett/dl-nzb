@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use unrar::Archive;
 
-use super::par2_ffi::{Par2Operation, Par2Repairer, ProgressCallback};
+use par2_rs::{Par2Operation, Par2Repairer, ProgressCallback};
 use crate::config::PostProcessingConfig;
 use crate::download::DownloadResult;
 use crate::error::{DlNzbError, PostProcessingError};
@@ -170,14 +170,15 @@ impl PostProcessor {
             par2_files.sort_by_key(|p| p.metadata().ok().map(|m| m.len()).unwrap_or(u64::MAX));
             par2_files
                 .first()
-                .ok_or(PostProcessingError::Par2NotFound)?
+                .ok_or_else(|| PostProcessingError::Par2(par2_rs::Par2Error::NotFound))?
         };
 
         progress_bar.set_position(0);
         progress_bar.set_message("Verifying files...");
 
-        // Use par2cmdline-turbo library via FFI
-        let repairer = Par2Repairer::new(main_par2)?;
+        // Use par2-rs library
+        let repairer = Par2Repairer::new(main_par2)
+            .map_err(PostProcessingError::Par2)?;
 
         // Create progress callback that updates the progress bar with operation-specific styling
         let pb_clone = progress_bar.clone();

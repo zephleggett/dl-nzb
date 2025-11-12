@@ -4,7 +4,6 @@
 
 mod deobfuscate;
 mod file_extension;
-pub mod par2_ffi;
 mod post_process;
 
 pub use post_process::PostProcessor;
