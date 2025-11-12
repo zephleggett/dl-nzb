@@ -154,11 +154,8 @@ pub enum DownloadError {
 /// Post-processing errors (PAR2, RAR extraction)
 #[derive(Error, Debug)]
 pub enum PostProcessingError {
-    #[error("PAR2 repair failed: {0}")]
-    Par2Failed(String),
-
-    #[error("PAR2 file not found")]
-    Par2NotFound,
+    #[error("PAR2 error: {0}")]
+    Par2(#[from] par2_rs::Par2Error),
 
     #[error("RAR extraction failed for {archive}: {reason}")]
     RarFailed { archive: PathBuf, reason: String },

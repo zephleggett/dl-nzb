@@ -106,3 +106,25 @@ The release build uses full LTO by default. This:
 - Increases compile time significantly
 
 For faster iteration, use `release-fast` profile with thin LTO.
+
+## PAR2 SIMD Optimizations
+
+The PAR2 module uses `reed-solomon-simd` for Reed-Solomon repair with runtime CPU detection:
+
+- **x86/x64**: Automatically uses AVX2 or SSSE3 if available
+- **ARM/Apple Silicon**: Automatically uses NEON if available
+- **Fallback**: Pure Rust scalar implementation
+
+No special build flags needed - SIMD is selected at runtime. The `.cargo/config.toml` file enables additional platform-specific optimizations:
+
+```toml
+# Intel/AMD (automatically applied)
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=native", "-C", "target-feature=+avx2,+sse4.2,+pclmulqdq"]
+
+# Apple Silicon (automatically applied)
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "target-cpu=native", "-C", "target-feature=+neon"]
+```
+
+These flags optimize MD5 hashing and CRC32 calculations but may reduce portability. For distribution binaries, remove `target-cpu=native` from `.cargo/config.toml`.

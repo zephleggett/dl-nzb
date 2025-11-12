@@ -14,7 +14,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use dl_nzb::{config::Config, pool::NntpPoolBuilder};
+//! use dl_nzb::{config::Config, nntp::NntpPoolBuilder};
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
