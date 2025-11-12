@@ -67,9 +67,6 @@ pub struct Cli {
     #[arg(long = "output-dir", hide = true)]
     pub output_dir: Option<PathBuf>,
 
-    #[arg(long = "no-resume", hide = true)]
-    pub no_resume: bool,
-
     #[arg(long = "no-directories", hide = true)]
     pub no_directories: bool,
 
@@ -203,7 +200,6 @@ impl Cli {
     pub fn has_deprecated_flags(&self) -> bool {
         self.connections.is_some()
             || self.output_dir.is_some()
-            || self.no_resume
             || self.no_directories
             || self.keep_partial
             || self.no_par2

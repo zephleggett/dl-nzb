@@ -192,6 +192,25 @@ impl Downloader {
             .unwrap_or_else(|| format!("unknown_file_{}", file.date));
 
         let output_path = config.download.dir.join(&filename);
+
+        // Check if file already exists with correct size (safe resume)
+        let expected_size: u64 = file.segments.segment.iter().map(|s| s.bytes).sum();
+        if let Ok(metadata) = tokio::fs::metadata(&output_path).await {
+            if metadata.len() == expected_size {
+                tracing::info!("File already complete, skipping: {}", filename);
+                return Ok(DownloadResult {
+                    filename,
+                    path: output_path,
+                    size: expected_size,
+                    segments_downloaded: file.segments.segment.len(),
+                    segments_failed: 0,
+                    download_time: Duration::from_secs(0),
+                    average_speed: 0.0,
+                    failed_message_ids: Vec::new(),
+                });
+            }
+        }
+
         let start_time = Instant::now();
 
         // Create output file with async I/O
