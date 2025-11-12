@@ -224,7 +224,7 @@ impl Downloader {
         let group = &file.groups.group[0].name; // Use first group
 
         // Create segment requests
-        let mut segment_requests: Vec<SegmentRequest> = file.segments.segment
+        let segment_requests: Vec<SegmentRequest> = file.segments.segment
             .iter()
             .map(|segment| SegmentRequest {
                 message_id: segment.message_id.clone(),
