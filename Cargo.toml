@@ -8,7 +8,7 @@ description = "A fast, modern NZB downloader with built-in PAR2 repair and RAR e
 readme = "README.md"
 homepage = "https://github.com/zephleggett/dl-nzb"
 repository = "https://github.com/zephleggett/dl-nzb"
-license = "GPL-2.0"
+license = "GPL-3.0"
 keywords = ["nzb", "usenet", "downloader", "nntp", "par2"]
 categories = ["command-line-utilities", "network-programming"]
 

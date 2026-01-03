@@ -154,4 +154,4 @@ Usenet provider with NNTP access. Nothing else to install.
 
 ## License
 
-GPL-2.0
+GPL-3.0
