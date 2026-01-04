@@ -2,8 +2,6 @@
 
 NZB downloader written in Rust. Downloads from Usenet with parallel connections, PAR2 repair, and RAR extraction.
 
-Single binary, no external dependencies. PAR2 uses [par2-rs](https://github.com/zephleggett/par2-rs) (pure Rust with SIMD). RAR extraction built in.
-
 ## Install
 
 Download from [releases](https://github.com/zephleggett/dl-nzb/releases) or build from source:
@@ -14,6 +12,21 @@ cd dl-nzb
 cargo build --release
 cp target/release/dl-nzb /usr/local/bin/
 ```
+
+### PAR2 Support
+
+PAR2 verification uses [par2cmdline-turbo](https://github.com/animetosho/par2cmdline-turbo) (source included in `vendor/`).
+
+**Option 1: Download pre-built binary** from [releases](https://github.com/animetosho/par2cmdline-turbo/releases) and place alongside `dl-nzb`.
+
+**Option 2: Build from source** (requires C++ compiler):
+```bash
+cd vendor/par2cmdline-turbo
+./automake.sh && ./configure && make
+cp par2 /usr/local/bin/
+```
+
+See [vendor/BUILD.md](vendor/BUILD.md) for detailed instructions.
 
 ## Setup
 

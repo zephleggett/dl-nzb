@@ -40,7 +40,7 @@ lto = "thin"        # Faster LTO, good balance
 
 [dependencies]
 # Async runtime and networking
-tokio = { version = "1.45", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros", "fs"] }
+tokio = { version = "1.45", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros", "fs", "process"] }
 tokio-util = { version = "0.7", features = ["io", "codec"] }
 tokio-native-tls = "0.3"
 native-tls = "0.2"
@@ -74,6 +74,7 @@ human_bytes = "0.4"
 dirs = "5.0"
 once_cell = "1.19"
 regex = "1.11"
+which = "7.0"
 
 # Logging and tracing
 tracing = "0.1"
@@ -83,8 +84,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tempfile = "3.20"
 unrar = "0.5"
 
-# PAR2 support (pure Rust with SIMD optimizations)
-par2-rs = { package = "par2rs", path = "../par2rs-local" }
+# PAR2 support (via par2cmdline-turbo CLI - bundled as submodule in vendor/)
+# Build with: cd vendor/par2cmdline-turbo && cmake . && cmake --build .
 
 [target.'cfg(not(windows))'.dependencies]
 openssl = { version = "0.10", features = ["vendored"] }
