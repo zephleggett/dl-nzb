@@ -155,7 +155,7 @@ pub enum DownloadError {
 #[derive(Error, Debug)]
 pub enum PostProcessingError {
     #[error("PAR2 error: {0}")]
-    Par2(#[from] par2_rs::Par2Error),
+    Par2Error(String),
 
     #[error("RAR extraction failed for {archive}: {reason}")]
     RarFailed { archive: PathBuf, reason: String },

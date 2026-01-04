@@ -94,10 +94,7 @@ async fn run(cli: Cli) -> Result<()> {
 
 /// Initialize logging based on CLI arguments
 fn init_logging(cli: &Cli) -> Result<()> {
-    // Base filter from CLI, but suppress par2-rs logs (they break progress bars)
-    let filter = EnvFilter::try_new(cli.get_log_level())
-        .unwrap_or_else(|_| EnvFilter::new("info"))
-        .add_directive("par2_rs=off".parse().unwrap());
+    let filter = EnvFilter::try_new(cli.get_log_level()).unwrap_or_else(|_| EnvFilter::new("info"));
 
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -289,6 +286,9 @@ async fn handle_list_mode(cli: &Cli) -> Result<()> {
 
 /// Handle download mode
 async fn handle_download_mode(cli: &Cli, mut config: Config) -> Result<()> {
+    // Validate server credentials before attempting download
+    config.validate_for_download()?;
+
     // Apply CLI settings to config
     if cli.no_directories {
         config.download.create_subfolders = false;
