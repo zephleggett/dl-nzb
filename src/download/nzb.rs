@@ -53,7 +53,10 @@ impl Nzb {
     }
 
     fn parse_content(content: &str) -> Result<Self> {
-        let inner = NzbRs::parse(content)
+        // Strip DOCTYPE declaration if present (nzb-rs doesn't handle it)
+        let content = Self::strip_doctype(content);
+
+        let inner = NzbRs::parse(&content)
             .map_err(|e| NzbError::ParseError(format!("Failed to parse NZB: {}", e)))?;
 
         // Convert nzb-rs structures to our compatible structures
@@ -118,6 +121,20 @@ impl Nzb {
         re.captures(subject)
             .and_then(|caps| caps.get(1))
             .map(|m| m.as_str().to_string())
+    }
+
+    /// Strip DOCTYPE declaration from NZB content (nzb-rs doesn't handle DTDs)
+    fn strip_doctype(content: &str) -> String {
+        // Find and remove <!DOCTYPE ... > which can span multiple lines
+        if let Some(start) = content.find("<!DOCTYPE") {
+            if let Some(end) = content[start..].find('>') {
+                let mut result = String::with_capacity(content.len());
+                result.push_str(&content[..start]);
+                result.push_str(&content[start + end + 1..]);
+                return result;
+            }
+        }
+        content.to_string()
     }
 }
 

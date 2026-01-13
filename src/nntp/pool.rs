@@ -122,7 +122,7 @@ impl PooledConnection {
     pub async fn check_articles_exist(
         &mut self,
         requests: &[crate::nntp::SegmentRequest],
-    ) -> Result<Vec<(u32, bool)>, DlNzbError> {
+    ) -> Result<Vec<(String, bool)>, DlNzbError> {
         self.conn.check_articles_exist(requests).await
     }
 }

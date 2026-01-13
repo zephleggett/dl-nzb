@@ -60,15 +60,14 @@ impl Downloader {
             return Ok((0, 0, 0, HashSet::new()));
         }
 
-        let group = &all_files[0].groups.group[0].name;
-
-        // Collect first segment from ALL files for checking
+        // Collect first segment from ALL files for checking, using each file's own group
         let sample_requests: Vec<SegmentRequest> = all_files
             .iter()
             .filter_map(|file| {
+                let group = file.groups.group.first().map(|g| g.name.clone())?;
                 file.segments.segment.first().map(|segment| SegmentRequest {
                     message_id: segment.message_id.clone(),
-                    group: group.clone(),
+                    group,
                     segment_number: segment.number,
                 })
             })
@@ -78,9 +77,10 @@ impl Downloader {
             return Ok((0, 0, 0, HashSet::new()));
         }
 
-        // Split into batches and check in parallel using multiple connections
-        let batch_size = 50; // Pipeline 50 STAT commands per connection
-        let num_connections = 4; // Use up to 4 connections for checking
+        // Split into batches and check in parallel using available connections
+        // Smaller batches = more parallelism for faster results
+        let batch_size = 5; // Small batches for maximum parallelism
+        let num_connections = self.pool.status().max_size; // Use all available connections
 
         let batches: Vec<Vec<SegmentRequest>> = sample_requests
             .chunks(batch_size)
@@ -99,7 +99,7 @@ impl Downloader {
         });
 
         // Process batches in parallel
-        let all_results: Vec<Vec<(u32, bool)>> = stream::iter(batch_futures)
+        let all_results: Vec<Vec<(String, bool)>> = stream::iter(batch_futures)
             .buffer_unordered(num_connections)
             .collect()
             .await;
@@ -108,18 +108,12 @@ impl Downloader {
         let mut available = 0;
         let mut missing_first_segments: HashSet<String> = HashSet::new();
 
-        // Build a lookup from segment_number to message_id
-        let seg_to_msg: std::collections::HashMap<u32, &str> = sample_requests
-            .iter()
-            .map(|r| (r.segment_number, r.message_id.as_str()))
-            .collect();
-
         for results in all_results {
-            for (seg_num, exists) in results {
+            for (msg_id, exists) in results {
                 if exists {
                     available += 1;
-                } else if let Some(&msg_id) = seg_to_msg.get(&seg_num) {
-                    missing_first_segments.insert(msg_id.to_string());
+                } else {
+                    missing_first_segments.insert(msg_id);
                 }
             }
         }
@@ -131,29 +125,16 @@ impl Downloader {
     }
 
     /// Download all files from an NZB, returns results and progress bar for reuse
-    /// `missing_first_segments` contains first segment IDs of files to skip entirely
+    /// Starts downloading immediately - 430 responses are handled inline during download
     pub async fn download_nzb(
         &self,
         nzb: &Nzb,
         config: Config,
-        missing_first_segments: std::collections::HashSet<String>,
     ) -> Result<(Vec<DownloadResult>, ProgressBar)> {
         config.ensure_dirs()?;
 
-        // Filter out files whose first segment is missing (whole file likely expired)
-        let all_files: Vec<&NzbFile> = nzb
-            .files()
-            .iter()
-            .filter(|f| {
-                f.segments
-                    .segment
-                    .first()
-                    .map(|s| !missing_first_segments.contains(&s.message_id))
-                    .unwrap_or(false)
-            })
-            .collect();
-
-        let skipped_files = nzb.files().len() - all_files.len();
+        // Download all files - no pre-filtering, handle 430s inline
+        let all_files: Vec<&NzbFile> = nzb.files().iter().collect();
 
         if all_files.is_empty() {
             return Err(DownloadError::InsufficientSegments {
@@ -173,14 +154,6 @@ impl Downloader {
         let total_files = all_files.len();
         let progress_bar =
             progress::create_progress_bar(total_bytes, progress::ProgressStyle::Download);
-
-        if skipped_files > 0 {
-            progress_bar.println(format!(
-                "  \x1b[33m↳ Skipping {} unavailable file{}\x1b[0m",
-                skipped_files,
-                if skipped_files == 1 { "" } else { "s" }
-            ));
-        }
         progress_bar.set_message(format!("({}/{})", 0, total_files));
 
         // Download available files concurrently
@@ -532,12 +505,13 @@ impl Downloader {
         };
 
         // Extract failed message IDs
-        let failed_ids = Arc::try_unwrap(failed_message_ids)
-            .map(|mutex| mutex.into_inner())
-            .unwrap_or_else(|arc| {
-                // If we can't unwrap (other references exist), block to get the data
-                futures::executor::block_on(async { arc.lock().await.clone() })
-            });
+        let failed_ids = match Arc::try_unwrap(failed_message_ids) {
+            Ok(mutex) => mutex.into_inner(),
+            Err(arc) => {
+                // If we can't unwrap (other references exist), get the data asynchronously
+                arc.lock().await.clone()
+            }
+        };
 
         Ok(DownloadResult {
             filename,
