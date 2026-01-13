@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 permissions:
   contents: write
@@ -17,7 +17,7 @@ jobs:
       version: ${{ steps.get_version.outputs.version }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Get version from tag
         id: get_version
@@ -106,9 +106,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
-        with:
-          submodules: recursive
+        uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -186,28 +184,24 @@ jobs:
   build-macos:
     name: Build macOS ${{ matrix.arch }}
     needs: create-release
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-14
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Use macos-13 (Intel) for x86_64 builds
+          # Cross-compile for Intel Macs from ARM64 runner
           - arch: x86_64
-            os: macos-13
             target: x86_64-apple-darwin
             name: dl-nzb-macos-x86_64
 
-          # Use macos-latest (M1) for ARM64 builds
+          # Native build for Apple Silicon
           - arch: aarch64
-            os: macos-latest
             target: aarch64-apple-darwin
             name: dl-nzb-macos-aarch64
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
-        with:
-          submodules: recursive
+        uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -264,9 +258,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
-        with:
-          submodules: recursive
+        uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
