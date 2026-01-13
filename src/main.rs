@@ -357,10 +357,24 @@ async fn handle_download_mode(cli: &Cli, mut config: Config) -> Result<()> {
             }
         };
 
-        // Pre-flight availability check
-        if !cli.json {
-            match downloader.check_availability(&nzb).await {
-                Ok((available, _missing, total)) if total > 0 => {
+        // Pre-flight availability check with spinner
+        let missing_articles = if !cli.json {
+            use indicatif::{ProgressBar, ProgressStyle};
+
+            let spinner = ProgressBar::new_spinner();
+            spinner.set_style(
+                ProgressStyle::with_template("{spinner:.cyan} {msg}")
+                    .unwrap()
+                    .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+            );
+            spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+            spinner.set_message("Checking article availability...");
+
+            let result = downloader.check_availability(&nzb).await;
+            spinner.finish_and_clear();
+
+            match result {
+                Ok((available, _missing, total, missing_ids)) if total > 0 => {
                     let pct = (available as f64 / total as f64) * 100.0;
                     if available == 0 {
                         eprintln!("\x1b[31m✗ No articles found. Content may have expired.\x1b[0m");
@@ -371,13 +385,17 @@ async fn handle_download_mode(cli: &Cli, mut config: Config) -> Result<()> {
                             pct
                         );
                     }
+                    missing_ids
                 }
                 Err(e) => {
                     tracing::debug!("Availability check failed: {}", e);
+                    std::collections::HashSet::new()
                 }
-                _ => {}
+                _ => std::collections::HashSet::new(),
             }
-        }
+        } else {
+            std::collections::HashSet::new()
+        };
 
         // Create output directory based on NZB filename
         let output_dir = if config.download.create_subfolders {
@@ -402,8 +420,11 @@ async fn handle_download_mode(cli: &Cli, mut config: Config) -> Result<()> {
         // Track timing for JSON output
         let download_start = std::time::Instant::now();
 
-        // Download the NZB with updated config
-        match downloader.download_nzb(&nzb, download_config.clone()).await {
+        // Download the NZB with updated config, passing missing articles to skip
+        match downloader
+            .download_nzb(&nzb, download_config.clone(), missing_articles)
+            .await
+        {
             Ok((results, _progress_bar)) => {
                 let download_time = download_start.elapsed();
 

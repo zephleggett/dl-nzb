@@ -1,5 +1,6 @@
 use futures::stream::{self, StreamExt};
 use indicatif::ProgressBar;
+
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -44,37 +45,87 @@ impl Downloader {
         Ok(Self { pool })
     }
 
-    /// Check article availability before downloading
-    /// Returns (available_count, missing_count, sample_size)
-    pub async fn check_availability(&self, nzb: &Nzb) -> Result<(usize, usize, usize)> {
+    /// Check article availability before downloading using parallel connections
+    /// Returns (available_count, missing_count, sample_size, missing_message_ids)
+    pub async fn check_availability(
+        &self,
+        nzb: &Nzb,
+    ) -> Result<(usize, usize, usize, std::collections::HashSet<String>)> {
+        use std::collections::HashSet;
+
         let all_files: Vec<&NzbFile> = nzb.files().iter().collect();
         if all_files.is_empty() {
-            return Ok((0, 0, 0));
+            return Ok((0, 0, 0, HashSet::new()));
         }
 
-        // Get a connection for checking
-        let mut conn = self.pool.get_connection().await?;
-
-        // Sample segments from files to check availability
-        let mut sample_requests: Vec<SegmentRequest> = Vec::new();
         let group = &all_files[0].groups.group[0].name;
 
-        // Sample first segment from each file (up to 20 files)
-        for file in all_files.iter().take(20) {
-            if let Some(segment) = file.segments.segment.first() {
-                sample_requests.push(SegmentRequest {
+        // Collect first segment from ALL files for checking
+        let sample_requests: Vec<SegmentRequest> = all_files
+            .iter()
+            .filter_map(|file| {
+                file.segments.segment.first().map(|segment| SegmentRequest {
                     message_id: segment.message_id.clone(),
                     group: group.clone(),
                     segment_number: segment.number,
-                });
+                })
+            })
+            .collect();
+
+        if sample_requests.is_empty() {
+            return Ok((0, 0, 0, HashSet::new()));
+        }
+
+        // Split into batches and check in parallel using multiple connections
+        let batch_size = 50; // Pipeline 50 STAT commands per connection
+        let num_connections = 4; // Use up to 4 connections for checking
+
+        let batches: Vec<Vec<SegmentRequest>> = sample_requests
+            .chunks(batch_size)
+            .map(|c| c.to_vec())
+            .collect();
+
+        let pool = self.pool.clone();
+        let batch_futures = batches.into_iter().map(|batch| {
+            let pool = pool.clone();
+            async move {
+                match pool.get_connection().await {
+                    Ok(mut conn) => conn.check_articles_exist(&batch).await.unwrap_or_default(),
+                    Err(_) => Vec::new(),
+                }
+            }
+        });
+
+        // Process batches in parallel
+        let all_results: Vec<Vec<(u32, bool)>> = stream::iter(batch_futures)
+            .buffer_unordered(num_connections)
+            .collect()
+            .await;
+
+        // Flatten results and collect missing message IDs
+        let mut available = 0;
+        let mut missing_ids: HashSet<String> = HashSet::new();
+
+        // Build a lookup from segment_number to message_id
+        let seg_to_msg: std::collections::HashMap<u32, &str> = sample_requests
+            .iter()
+            .map(|r| (r.segment_number, r.message_id.as_str()))
+            .collect();
+
+        for results in all_results {
+            for (seg_num, exists) in results {
+                if exists {
+                    available += 1;
+                } else if let Some(&msg_id) = seg_to_msg.get(&seg_num) {
+                    missing_ids.insert(msg_id.to_string());
+                }
             }
         }
 
-        let results = conn.check_articles_exist(&sample_requests).await?;
-        let available = results.iter().filter(|(_, exists)| *exists).count();
-        let missing = results.len() - available;
+        let total = sample_requests.len();
+        let missing = total - available;
 
-        Ok((available, missing, results.len()))
+        Ok((available, missing, total, missing_ids))
     }
 
     /// Download all files from an NZB, returns results and progress bar for reuse
@@ -82,6 +133,7 @@ impl Downloader {
         &self,
         nzb: &Nzb,
         config: Config,
+        missing_articles: std::collections::HashSet<String>,
     ) -> Result<(Vec<DownloadResult>, ProgressBar)> {
         config.ensure_dirs()?;
 
@@ -96,10 +148,11 @@ impl Downloader {
             .into());
         }
 
-        // Create clean progress bar using centralized progress module
+        // Calculate total bytes excluding known-missing articles
         let total_bytes: u64 = all_files
             .iter()
             .flat_map(|f| &f.segments.segment)
+            .filter(|s| !missing_articles.contains(&s.message_id))
             .map(|s| s.bytes)
             .sum();
 
@@ -108,9 +161,15 @@ impl Downloader {
             progress::create_progress_bar(total_bytes, progress::ProgressStyle::Download);
         progress_bar.set_message(format!("({}/{})", 0, total_files));
 
-        // Download all files concurrently
+        // Download all files concurrently, passing missing articles to skip
+        let missing_articles = Arc::new(missing_articles);
         let results = self
-            .download_files_concurrent_with_config(&all_files, progress_bar.clone(), config)
+            .download_files_concurrent_with_config(
+                &all_files,
+                progress_bar.clone(),
+                config,
+                missing_articles,
+            )
             .await?;
 
         // Finish the progress bar with clean formatting
@@ -155,6 +214,7 @@ impl Downloader {
         files: &[&NzbFile],
         progress_bar: ProgressBar,
         config: Config,
+        missing_articles: Arc<std::collections::HashSet<String>>,
     ) -> Result<Vec<DownloadResult>> {
         let total_files = files.len();
         let completed_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -168,14 +228,16 @@ impl Downloader {
 
         let download_futures = sorted_files.iter().map(|file| {
             let pool = self.pool.clone();
-            let config = config.clone(); // Now clones Arc, not Config
+            let config = config.clone();
             let file = (*file).clone();
             let progress = progress_bar.clone();
             let completed = completed_count.clone();
+            let missing = missing_articles.clone();
 
             async move {
                 let result =
-                    Self::download_file_with_pool(file, &config, pool, progress.clone()).await;
+                    Self::download_file_with_pool(file, &config, pool, progress.clone(), &missing)
+                        .await;
 
                 // Update file counter (only update every 5 files to reduce overhead)
                 let count = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -215,13 +277,14 @@ impl Downloader {
         config: &Config,
         pool: NntpPool,
         progress_bar: ProgressBar,
+        missing_articles: &std::collections::HashSet<String>,
     ) -> Result<DownloadResult> {
         let filename = Nzb::get_filename_from_subject(&file.subject)
             .unwrap_or_else(|| format!("unknown_file_{}", file.date));
 
         let output_path = config.download.dir.join(&filename);
 
-        // Calculate expected size and segment offsets
+        // Calculate expected size and segment offsets (for ALL segments, including missing)
         let segment_sizes: Vec<u64> = file.segments.segment.iter().map(|s| s.bytes).collect();
         let expected_size: u64 = segment_sizes.iter().sum();
 
@@ -238,10 +301,9 @@ impl Downloader {
             if let Ok(metadata) = tokio::fs::metadata(&output_path).await {
                 if metadata.len() == expected_size {
                     // Verify file has real content (not zero-filled from pre-allocation)
-                    let is_valid = match Self::verify_file_not_empty(&output_path).await {
-                        Ok(valid) => valid,
-                        Err(_) => false,
-                    };
+                    let is_valid = Self::verify_file_has_content(&output_path)
+                        .await
+                        .unwrap_or(false);
 
                     if is_valid {
                         if progress_bar.is_hidden() {
@@ -283,12 +345,13 @@ impl Downloader {
         // Prepare segment downloads using pipelining
         let group = &file.groups.group[0].name;
 
-        // Create segment requests with their offsets
+        // Create segment requests with their offsets, FILTERING OUT known-missing articles
         let segment_requests: Vec<(SegmentRequest, u64)> = file
             .segments
             .segment
             .iter()
             .enumerate()
+            .filter(|(_, segment)| !missing_articles.contains(&segment.message_id))
             .map(|(idx, segment)| {
                 (
                     SegmentRequest {
@@ -300,6 +363,9 @@ impl Downloader {
                 )
             })
             .collect();
+
+        // Count how many segments we're skipping
+        let skipped_segments = file.segments.segment.len() - segment_requests.len();
 
         // Pipeline size: how many segments to request per connection
         let pipeline_size = config.tuning.pipeline_size;
@@ -321,7 +387,6 @@ impl Downloader {
             let segments_failed = segments_failed.clone();
             let actual_size = actual_size.clone();
             let failed_message_ids = failed_message_ids.clone();
-            let segment_sizes = segment_sizes.clone();
 
             async move {
                 // Get connection from pool with patient retry
@@ -363,14 +428,9 @@ impl Downloader {
                                 "  \x1b[33m⚠ Connection unavailable, batch skipped\x1b[0m"
                             ));
                         }
-                        // Mark all segments in batch as failed
+                        // Mark all segments in batch as failed, don't increment progress
                         for (req, _) in &batch {
                             segments_failed.fetch_add(1, Ordering::Relaxed);
-                            if let Some(idx) = (req.segment_number as usize).checked_sub(1) {
-                                if idx < segment_sizes.len() {
-                                    progress.inc(segment_sizes[idx]);
-                                }
-                            }
                             failed_message_ids.lock().await.push(req.message_id.clone());
                         }
                         return;
@@ -391,10 +451,6 @@ impl Downloader {
                 match conn.download_segments_pipelined(&requests).await {
                     Ok(results) => {
                         for (seg_num, data) in results {
-                            let idx = (seg_num as usize).saturating_sub(1);
-                            let seg_expected_size =
-                                segment_sizes.get(idx).copied().unwrap_or_default();
-
                             if let Some(bytes) = data {
                                 // Write directly to file at the correct offset
                                 if let Some(&file_offset) = offset_map.get(&seg_num) {
@@ -408,6 +464,7 @@ impl Downloader {
                                             e
                                         );
                                         segments_failed.fetch_add(1, Ordering::Relaxed);
+                                        // Don't increment progress for failed writes
                                     } else if let Err(e) = file.write_all(&bytes).await {
                                         tracing::debug!(
                                             "Write failed for segment {}: {}",
@@ -415,13 +472,17 @@ impl Downloader {
                                             e
                                         );
                                         segments_failed.fetch_add(1, Ordering::Relaxed);
+                                        // Don't increment progress for failed writes
                                     } else {
                                         segments_downloaded.fetch_add(1, Ordering::Relaxed);
                                         actual_size
                                             .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                                        // Only increment progress for successful downloads
+                                        progress.inc(bytes.len() as u64);
                                     }
                                 }
                             } else {
+                                // Article missing from server - don't increment progress
                                 segments_failed.fetch_add(1, Ordering::Relaxed);
                                 if let Some(req) =
                                     requests.iter().find(|r| r.segment_number == seg_num)
@@ -429,18 +490,12 @@ impl Downloader {
                                     failed_message_ids.lock().await.push(req.message_id.clone());
                                 }
                             }
-                            progress.inc(seg_expected_size);
                         }
                     }
                     Err(_) => {
-                        // Failed - mark all as failed
+                        // Failed - mark all as failed, don't increment progress
                         for (req, _) in &batch {
                             segments_failed.fetch_add(1, Ordering::Relaxed);
-                            if let Some(idx) = (req.segment_number as usize).checked_sub(1) {
-                                if idx < segment_sizes.len() {
-                                    progress.inc(segment_sizes[idx]);
-                                }
-                            }
                             failed_message_ids.lock().await.push(req.message_id.clone());
                         }
                     }
@@ -481,7 +536,7 @@ impl Downloader {
             path: output_path,
             size: final_size,
             segments_downloaded: segments_downloaded.load(Ordering::Relaxed),
-            segments_failed: segments_failed.load(Ordering::Relaxed),
+            segments_failed: segments_failed.load(Ordering::Relaxed) + skipped_segments,
             download_time,
             average_speed,
             failed_message_ids: failed_ids,
@@ -510,34 +565,33 @@ impl Downloader {
         Ok(cleaned_count)
     }
 
-    /// Verify a file has real content (not all zeros from pre-allocation)
-    /// Samples start, middle, and end positions to detect zero-filled files
-    async fn verify_file_not_empty(path: &std::path::Path) -> Result<bool> {
+    /// Verify file has real content (not zero-filled from pre-allocation)
+    /// Samples start, middle, and end to detect empty files quickly
+    async fn verify_file_has_content(path: &std::path::Path) -> Result<bool> {
         use tokio::io::AsyncReadExt;
 
         let mut file = tokio::fs::File::open(path).await?;
         let metadata = file.metadata().await?;
         let file_size = metadata.len();
 
-        // For very small files, just check if any byte is non-zero
-        if file_size < 1024 {
-            let mut buf = vec![0u8; file_size as usize];
-            file.read_exact(&mut buf).await?;
-            return Ok(buf.iter().any(|&b| b != 0));
+        if file_size == 0 {
+            return Ok(false);
         }
 
-        // Sample start, middle, and end of file
-        let positions = [0, file_size / 2, file_size.saturating_sub(1024)];
-        let mut buf = [0u8; 1024];
+        // Sample 3 positions: start, middle, end
+        let positions = [0, file_size / 2, file_size.saturating_sub(4096)];
+        let mut buf = [0u8; 4096];
 
         for pos in positions {
             file.seek(std::io::SeekFrom::Start(pos)).await?;
             let n = file.read(&mut buf).await?;
+            // If any sampled region has non-zero bytes, file has content
             if n > 0 && buf[..n].iter().any(|&b| b != 0) {
                 return Ok(true);
             }
         }
 
+        // All samples were zeros - file is likely pre-allocated but not written
         Ok(false)
     }
 }
