@@ -289,6 +289,9 @@ async fn handle_list_mode(cli: &Cli) -> Result<()> {
 
 /// Handle download mode
 async fn handle_download_mode(cli: &Cli, mut config: Config) -> Result<()> {
+    // Validate download-specific configuration (server credentials)
+    config.validate_for_download()?;
+
     // Apply CLI settings to config
     if cli.no_directories {
         config.download.create_subfolders = false;
@@ -377,7 +380,119 @@ async fn handle_download_mode(cli: &Cli, mut config: Config) -> Result<()> {
         // Track timing for JSON output
         let download_start = std::time::Instant::now();
 
-        // Download the NZB with updated config
+        // Quick availability check (unless JSON mode or quiet)
+        if !cli.json && !cli.quiet {
+            use indicatif::{ProgressBar, ProgressStyle};
+            let spinner = ProgressBar::new_spinner();
+            spinner.set_style(
+                ProgressStyle::with_template("{spinner:.cyan} {msg}")
+                    .unwrap()
+                    .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+            );
+            spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+            spinner.set_message("Checking article availability...");
+
+            match downloader.check_availability(&nzb).await {
+                Ok((available, missing, total, missing_ids)) => {
+                    spinner.finish_and_clear();
+
+                    if missing > 0 {
+                        let percent = (available as f64 / total as f64) * 100.0;
+
+                        // Check which files are missing by looking up the missing message IDs
+                        let missing_files: Vec<String> = nzb
+                            .files()
+                            .iter()
+                            .filter(|f| {
+                                f.segments
+                                    .segment
+                                    .first()
+                                    .map(|s| missing_ids.contains(&s.message_id))
+                                    .unwrap_or(false)
+                            })
+                            .filter_map(|f| Nzb::get_filename_from_subject(&f.subject))
+                            .collect();
+
+                        // Check if only non-essential files are missing (.nfo, .sfv, .srr)
+                        let only_nonessential = missing_files.iter().all(|name| {
+                            let lower = name.to_lowercase();
+                            lower.ends_with(".nfo")
+                                || lower.ends_with(".sfv")
+                                || lower.ends_with(".srr")
+                        });
+
+                        // Check if PAR2 files are available
+                        let has_par2 = nzb.files().iter().any(|f| {
+                            Nzb::get_filename_from_subject(&f.subject)
+                                .map(|n| n.to_lowercase().ends_with(".par2"))
+                                .unwrap_or(false)
+                        });
+
+                        // PAR2 typically provides 10% redundancy
+                        let missing_percent = 100.0 - percent;
+                        let can_likely_repair = has_par2 && missing_percent <= 10.0;
+
+                        if only_nonessential {
+                            // Just info, non-essential files missing
+                            println!(
+                                "\x1b[90mℹ {:.0}% available ({} missing: {})\x1b[0m",
+                                percent,
+                                missing,
+                                missing_files.join(", ")
+                            );
+                            // Continue without prompting
+                        } else if can_likely_repair {
+                            println!(
+                                "\x1b[33m⚠ {:.0}% available ({} of {} files). PAR2 repair likely.\x1b[0m",
+                                percent, available, total
+                            );
+                            // Continue without prompting
+                        } else {
+                            // Significant missing files - prompt user
+                            if has_par2 {
+                                println!(
+                                    "\x1b[31m✗ Only {:.0}% available ({} of {} files). PAR2 repair unlikely.\x1b[0m",
+                                    percent, available, total
+                                );
+                            } else {
+                                println!(
+                                    "\x1b[31m✗ Only {:.0}% available ({} of {} files). No PAR2 for repair.\x1b[0m",
+                                    percent, available, total
+                                );
+                            }
+
+                            // Prompt user
+                            eprint!("  Continue anyway? [y/N] ");
+                            use std::io::{self, BufRead, Write};
+                            io::stderr().flush().ok();
+
+                            let stdin = io::stdin();
+                            let response = stdin.lock().lines().next();
+                            match response {
+                                Some(Ok(line)) => {
+                                    let answer = line.trim().to_lowercase();
+                                    if answer != "y" && answer != "yes" {
+                                        println!("  Aborted.");
+                                        continue; // Skip to next NZB
+                                    }
+                                }
+                                _ => {
+                                    println!("  Aborted.");
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    spinner.finish_and_clear();
+                    eprintln!("Warning: Could not check availability: {}", e);
+                    // Continue with download anyway
+                }
+            }
+        }
+
+        // Download the NZB - handle 430s inline
         match downloader.download_nzb(&nzb, download_config.clone()).await {
             Ok((results, _progress_bar)) => {
                 let download_time = download_start.elapsed();
