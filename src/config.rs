@@ -345,18 +345,13 @@ impl Config {
         Ok(())
     }
 
-    /// Validate configuration
+    /// Validate basic configuration (always run)
+    /// Does not require server credentials - use validate_for_download() before downloading
     pub fn validate(&self) -> Result<()> {
-        // Validate Usenet settings
-        if self.usenet.server.is_empty() {
-            return Err(ConfigError::NoServer.into());
-        }
-
-        if self.usenet.username.is_empty() || self.usenet.password.is_empty() {
-            return Err(ConfigError::NoCredentials.into());
-        }
-
-        if self.usenet.connections == 0 || self.usenet.connections > 100 {
+        // Validate connection count only if server is configured
+        if !self.usenet.server.is_empty()
+            && (self.usenet.connections == 0 || self.usenet.connections > 100)
+        {
             return Err(ConfigError::InvalidConnections {
                 count: self.usenet.connections,
             }
@@ -385,6 +380,27 @@ impl Config {
             return Err(ConfigError::InvalidPath {
                 path: self.download.dir.clone(),
                 reason: "Download directory not specified".to_string(),
+            }
+            .into());
+        }
+
+        Ok(())
+    }
+
+    /// Validate configuration for download operations
+    /// Call this before starting any downloads to ensure server credentials are set
+    pub fn validate_for_download(&self) -> Result<()> {
+        if self.usenet.server.is_empty() {
+            return Err(ConfigError::NoServer.into());
+        }
+
+        if self.usenet.username.is_empty() || self.usenet.password.is_empty() {
+            return Err(ConfigError::NoCredentials.into());
+        }
+
+        if self.usenet.connections == 0 || self.usenet.connections > 100 {
+            return Err(ConfigError::InvalidConnections {
+                count: self.usenet.connections,
             }
             .into());
         }
@@ -452,14 +468,24 @@ mod tests {
 
     #[test]
     fn test_config_validation() {
-        let mut config = Config::default();
-        // Default config should fail validation (no server)
-        assert!(config.validate().is_err());
+        let config = Config::default();
+        // Basic validation should pass without server credentials
+        assert!(config.validate().is_ok());
 
-        // Set required fields
+        // But download validation should fail without credentials
+        assert!(config.validate_for_download().is_err());
+    }
+
+    #[test]
+    fn test_config_validation_for_download() {
+        let mut config = Config::default();
+
+        // Set required fields for download
         config.usenet.server = "news.example.org".to_string();
         config.usenet.username = "user".to_string();
         config.usenet.password = "pass".to_string();
+
         assert!(config.validate().is_ok());
+        assert!(config.validate_for_download().is_ok());
     }
 }

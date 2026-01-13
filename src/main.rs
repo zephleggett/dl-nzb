@@ -289,6 +289,9 @@ async fn handle_list_mode(cli: &Cli) -> Result<()> {
 
 /// Handle download mode
 async fn handle_download_mode(cli: &Cli, mut config: Config) -> Result<()> {
+    // Validate download-specific configuration (server credentials)
+    config.validate_for_download()?;
+
     // Apply CLI settings to config
     if cli.no_directories {
         config.download.create_subfolders = false;

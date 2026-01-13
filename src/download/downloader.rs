@@ -1,10 +1,12 @@
-use bytes::Bytes;
 use futures::stream::{self, StreamExt};
 use indicatif::ProgressBar;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::fs::File;
-use tokio::io::{AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::sync::Mutex;
 
 use super::nzb::{Nzb, NzbFile};
 use crate::config::Config;
@@ -27,14 +29,7 @@ pub struct DownloadResult {
     pub failed_message_ids: Vec<String>, // Track failed segments for potential retry
 }
 
-/// Result of downloading a single segment
-struct SegmentResult {
-    segment_number: u32,
-    data: Option<Bytes>,
-    message_id: String, // Track for error reporting
-}
-
-/// Optimized downloader using connection pooling and streaming
+/// Optimized downloader using connection pooling and direct file writes
 pub struct Downloader {
     pool: NntpPool,
 }
@@ -181,6 +176,7 @@ impl Downloader {
     }
 
     /// Download a single file using the connection pool
+    /// Uses direct file writes with seek to avoid buffering all segments in memory
     async fn download_file_with_pool(
         file: NzbFile,
         config: &Config,
@@ -192,13 +188,22 @@ impl Downloader {
 
         let output_path = config.download.dir.join(&filename);
 
+        // Calculate expected size and segment offsets
+        let segment_sizes: Vec<u64> = file.segments.segment.iter().map(|s| s.bytes).collect();
+        let expected_size: u64 = segment_sizes.iter().sum();
+
+        // Pre-calculate byte offsets for each segment
+        let mut segment_offsets: Vec<u64> = Vec::with_capacity(segment_sizes.len());
+        let mut offset = 0u64;
+        for &size in &segment_sizes {
+            segment_offsets.push(offset);
+            offset += size;
+        }
+
         // Check if file already exists with correct size (safe resume)
-        // Size check is sufficient - corruption will be caught by PAR2 verification
         if !config.download.force_redownload {
-            let expected_size: u64 = file.segments.segment.iter().map(|s| s.bytes).sum();
             if let Ok(metadata) = tokio::fs::metadata(&output_path).await {
                 if metadata.len() == expected_size {
-                    // Log skip using progress bar for clean output
                     if progress_bar.is_hidden() {
                         eprintln!("  Skipping complete: {}", filename);
                     } else {
@@ -220,45 +225,64 @@ impl Downloader {
 
         let start_time = Instant::now();
 
-        // Create output file with async I/O
+        // Create and pre-allocate output file
         let output_file = File::create(&output_path).await?;
-        let mut writer = BufWriter::with_capacity(config.memory.io_buffer_size, output_file);
+        output_file.set_len(expected_size).await?;
+
+        // Shared file handle for concurrent writes
+        let shared_file = Arc::new(Mutex::new(output_file));
+
+        // Shared statistics using atomics
+        let segments_downloaded = Arc::new(AtomicUsize::new(0));
+        let segments_failed = Arc::new(AtomicUsize::new(0));
+        let actual_size = Arc::new(AtomicU64::new(0));
+        let failed_message_ids = Arc::new(Mutex::new(Vec::new()));
 
         // Prepare segment downloads using pipelining
-        let group = &file.groups.group[0].name; // Use first group
+        let group = &file.groups.group[0].name;
 
-        // Create segment requests
-        let segment_requests: Vec<SegmentRequest> = file
+        // Create segment requests with their offsets
+        let segment_requests: Vec<(SegmentRequest, u64)> = file
             .segments
             .segment
             .iter()
-            .map(|segment| SegmentRequest {
-                message_id: segment.message_id.clone(),
-                group: group.clone(),
-                segment_number: segment.number,
+            .enumerate()
+            .map(|(idx, segment)| {
+                (
+                    SegmentRequest {
+                        message_id: segment.message_id.clone(),
+                        group: group.clone(),
+                        segment_number: segment.number,
+                    },
+                    segment_offsets[idx],
+                )
             })
             .collect();
 
         // Pipeline size: how many segments to request per connection
         let pipeline_size = config.tuning.pipeline_size;
+        let num_connections = config.usenet.connections as usize;
+        let connection_wait_timeout = config.tuning.connection_wait_timeout;
 
         // Split into batches for pipelining
-        let num_connections = config.usenet.connections as usize;
-        let batches: Vec<Vec<SegmentRequest>> = segment_requests
+        let batches: Vec<Vec<(SegmentRequest, u64)>> = segment_requests
             .chunks(pipeline_size)
             .map(|chunk| chunk.to_vec())
             .collect();
 
-        // Download batches in parallel using connection pool
-        let connection_wait_timeout = config.tuning.connection_wait_timeout;
+        // Download batches in parallel and write directly to file
         let batch_futures = batches.into_iter().map(|batch| {
             let pool = pool.clone();
             let progress = progress_bar.clone();
-            let segment_bytes: Vec<u64> = file.segments.segment.iter().map(|s| s.bytes).collect();
+            let shared_file = shared_file.clone();
+            let segments_downloaded = segments_downloaded.clone();
+            let segments_failed = segments_failed.clone();
+            let actual_size = actual_size.clone();
+            let failed_message_ids = failed_message_ids.clone();
+            let segment_sizes = segment_sizes.clone();
 
             async move {
                 // Get connection from pool with patient retry
-                // Keep trying until we get a connection - don't fail segments due to pool contention
                 let mut conn = None;
                 let mut attempt = 0u32;
                 let start = Instant::now();
@@ -266,11 +290,9 @@ impl Downloader {
 
                 while conn.is_none() && start.elapsed() < max_wait {
                     if attempt > 0 {
-                        // Exponential backoff: 500ms, 1s, 2s, 4s, 8s (capped)
                         let delay = Duration::from_millis(500) * (1 << attempt.min(4));
                         tokio::time::sleep(delay).await;
 
-                        // Show feedback after several retries (every ~15s)
                         if attempt % 5 == 0 && !progress.is_hidden() {
                             progress.println(format!(
                                 "  \x1b[90m⏳ Waiting for connection... ({:.0}s)\x1b[0m",
@@ -281,20 +303,14 @@ impl Downloader {
 
                     match tokio::time::timeout(Duration::from_secs(60), pool.get_connection()).await
                     {
-                        Ok(Ok(c)) => {
-                            conn = Some(c);
-                        }
-                        Ok(Err(_)) | Err(_) => {
-                            // Connection failed or timed out, will retry
-                            attempt += 1;
-                        }
+                        Ok(Ok(c)) => conn = Some(c),
+                        Ok(Err(_)) | Err(_) => attempt += 1,
                     }
                 }
 
                 let mut conn = match conn {
                     Some(c) => c,
                     None => {
-                        // Only warn after exhausting retries
                         if progress.is_hidden() {
                             eprintln!(
                                 "  Warning: Could not get connection after {:?}",
@@ -305,126 +321,128 @@ impl Downloader {
                                 "  \x1b[33m⚠ Connection unavailable, batch skipped\x1b[0m"
                             ));
                         }
-                        return batch.iter().map(|req| (req.segment_number, None)).collect();
+                        // Mark all segments in batch as failed
+                        for (req, _) in &batch {
+                            segments_failed.fetch_add(1, Ordering::Relaxed);
+                            if let Some(idx) = (req.segment_number as usize).checked_sub(1) {
+                                if idx < segment_sizes.len() {
+                                    progress.inc(segment_sizes[idx]);
+                                }
+                            }
+                            failed_message_ids.lock().await.push(req.message_id.clone());
+                        }
+                        return;
                     }
                 };
 
+                // Extract just the requests for pipelining
+                let requests: Vec<SegmentRequest> =
+                    batch.iter().map(|(req, _)| req.clone()).collect();
+
+                // Build offset lookup
+                let offset_map: std::collections::HashMap<u32, u64> = batch
+                    .iter()
+                    .map(|(req, offset)| (req.segment_number, *offset))
+                    .collect();
+
                 // Download pipelined batch
-                match conn.download_segments_pipelined(&batch).await {
+                match conn.download_segments_pipelined(&requests).await {
                     Ok(results) => {
-                        // Update progress for all segments
-                        for (seg_num, _) in &results {
-                            if let Some(idx) = (*seg_num as usize).checked_sub(1) {
-                                if idx < segment_bytes.len() {
-                                    progress.inc(segment_bytes[idx]);
+                        for (seg_num, data) in results {
+                            let idx = (seg_num as usize).saturating_sub(1);
+                            let seg_expected_size =
+                                segment_sizes.get(idx).copied().unwrap_or_default();
+
+                            if let Some(bytes) = data {
+                                // Write directly to file at the correct offset
+                                if let Some(&file_offset) = offset_map.get(&seg_num) {
+                                    let mut file = shared_file.lock().await;
+                                    if let Err(e) =
+                                        file.seek(std::io::SeekFrom::Start(file_offset)).await
+                                    {
+                                        tracing::debug!(
+                                            "Seek failed for segment {}: {}",
+                                            seg_num,
+                                            e
+                                        );
+                                        segments_failed.fetch_add(1, Ordering::Relaxed);
+                                    } else if let Err(e) = file.write_all(&bytes).await {
+                                        tracing::debug!(
+                                            "Write failed for segment {}: {}",
+                                            seg_num,
+                                            e
+                                        );
+                                        segments_failed.fetch_add(1, Ordering::Relaxed);
+                                    } else {
+                                        segments_downloaded.fetch_add(1, Ordering::Relaxed);
+                                        actual_size
+                                            .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                                    }
+                                }
+                            } else {
+                                segments_failed.fetch_add(1, Ordering::Relaxed);
+                                if let Some(req) =
+                                    requests.iter().find(|r| r.segment_number == seg_num)
+                                {
+                                    failed_message_ids.lock().await.push(req.message_id.clone());
                                 }
                             }
+                            progress.inc(seg_expected_size);
                         }
-                        results
                     }
                     Err(_) => {
-                        // Failed - update progress anyway
-                        for req in &batch {
+                        // Failed - mark all as failed
+                        for (req, _) in &batch {
+                            segments_failed.fetch_add(1, Ordering::Relaxed);
                             if let Some(idx) = (req.segment_number as usize).checked_sub(1) {
-                                if idx < segment_bytes.len() {
-                                    progress.inc(segment_bytes[idx]);
+                                if idx < segment_sizes.len() {
+                                    progress.inc(segment_sizes[idx]);
                                 }
                             }
+                            failed_message_ids.lock().await.push(req.message_id.clone());
                         }
-                        Vec::new()
                     }
                 }
             }
         });
 
-        // Execute batches matching connection pool size exactly
-        // This prevents timeout errors from queuing too many requests
-        let batch_results: Vec<Vec<(u32, Option<Bytes>)>> = stream::iter(batch_futures)
+        // Execute all batches concurrently
+        stream::iter(batch_futures)
             .buffer_unordered(num_connections)
-            .collect()
+            .collect::<Vec<()>>()
             .await;
 
-        // Flatten results into segment_results format
-        let segment_results: Vec<Result<SegmentResult>> = batch_results
-            .into_iter()
-            .flatten()
-            .map(|(segment_number, data)| {
-                let message_id = file
-                    .segments
-                    .segment
-                    .iter()
-                    .find(|s| s.number == segment_number)
-                    .map(|s| s.message_id.clone())
-                    .unwrap_or_default();
-
-                Ok(SegmentResult {
-                    segment_number,
-                    data,
-                    message_id,
-                })
-            })
-            .collect();
-
-        // Process results and write to file
-        // Pre-allocate Vec for segment data (faster than HashMap)
-        let total_segments = file.segments.segment.len();
-        let mut segment_data: Vec<Option<Bytes>> = vec![None; total_segments];
-        let mut segments_downloaded = 0;
-        let mut segments_failed = 0;
-        let mut actual_size = 0u64;
-        let mut failed_message_ids = Vec::new();
-
-        for result in segment_results {
-            match result {
-                Ok(segment_result) => {
-                    if let Some(data) = segment_result.data {
-                        segments_downloaded += 1;
-                        actual_size += data.len() as u64;
-                        // Segments are 1-indexed, Vec is 0-indexed
-                        let index = segment_result.segment_number.saturating_sub(1) as usize;
-                        if index < total_segments {
-                            segment_data[index] = Some(data);
-                        } else {
-                            tracing::debug!(
-                                "Invalid segment number: {} (expected 1-{})",
-                                segment_result.segment_number,
-                                total_segments
-                            );
-                        }
-                    } else {
-                        segments_failed += 1;
-                        failed_message_ids.push(segment_result.message_id);
-                    }
-                }
-                Err(_) => segments_failed += 1,
-            }
+        // Ensure file is synced to disk
+        {
+            let file = shared_file.lock().await;
+            file.sync_all().await?;
         }
-
-        // Write segments in order (Vec iteration is faster than HashMap lookups)
-        for data in segment_data.into_iter().flatten() {
-            writer.write_all(&data).await?;
-        }
-
-        // Ensure all data is written
-        writer.flush().await?;
-        writer.shutdown().await?;
 
         let download_time = start_time.elapsed();
+        let final_size = actual_size.load(Ordering::Relaxed);
         let average_speed = if download_time.as_secs() > 0 {
-            (actual_size as f64 / 1024.0 / 1024.0) / download_time.as_secs_f64()
+            (final_size as f64 / 1024.0 / 1024.0) / download_time.as_secs_f64()
         } else {
             0.0
         };
 
+        // Extract failed message IDs
+        let failed_ids = Arc::try_unwrap(failed_message_ids)
+            .map(|mutex| mutex.into_inner())
+            .unwrap_or_else(|arc| {
+                // If we can't unwrap (other references exist), block to get the data
+                futures::executor::block_on(async { arc.lock().await.clone() })
+            });
+
         Ok(DownloadResult {
             filename,
             path: output_path,
-            size: actual_size,
-            segments_downloaded,
-            segments_failed,
+            size: final_size,
+            segments_downloaded: segments_downloaded.load(Ordering::Relaxed),
+            segments_failed: segments_failed.load(Ordering::Relaxed),
             download_time,
             average_speed,
-            failed_message_ids,
+            failed_message_ids: failed_ids,
         })
     }
 

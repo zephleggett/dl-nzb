@@ -226,7 +226,7 @@ impl AsyncNntpConnection {
         Ok(body)
     }
 
-    /// Optimized yEnc decoder with pre-allocation and efficient iteration
+    /// Optimized yEnc decoder with SIMD acceleration
     fn decode_yenc_simple(&self, data: &[u8]) -> Result<Vec<u8>> {
         // Pre-allocate based on expected output size (roughly same as input)
         let mut decoded = Vec::with_capacity(data.len());
@@ -247,25 +247,145 @@ impl AsyncNntpConnection {
             }
 
             if in_data && !line.is_empty() {
-                // Decode the line using iterator for better performance
-                let mut iter = line.iter().copied();
-                while let Some(byte) = iter.next() {
-                    if byte == b'=' {
-                        // Escaped character
-                        if let Some(next_byte) = iter.next() {
-                            decoded.push(next_byte.wrapping_sub(64).wrapping_sub(42));
-                        }
-                    } else if byte != b'\r' {
-                        // Normal character (skip carriage returns)
-                        decoded.push(byte.wrapping_sub(42));
-                    }
-                }
+                Self::decode_yenc_line_simd(line, &mut decoded);
             }
         }
 
         // Shrink to actual size if we over-allocated
         decoded.shrink_to_fit();
         Ok(decoded)
+    }
+
+    /// Decode a single yEnc line, using SIMD when possible
+    #[inline]
+    fn decode_yenc_line_simd(line: &[u8], output: &mut Vec<u8>) {
+        // Check for escape characters or carriage returns that require scalar handling
+        let has_special = line.iter().any(|&b| b == b'=' || b == b'\r');
+        if has_special {
+            Self::decode_yenc_scalar(line, output);
+        } else {
+            Self::decode_yenc_fast(line, output);
+        }
+    }
+
+    /// Scalar yEnc decoder for lines with escape sequences
+    #[inline]
+    fn decode_yenc_scalar(line: &[u8], output: &mut Vec<u8>) {
+        let mut iter = line.iter().copied();
+        while let Some(byte) = iter.next() {
+            if byte == b'=' {
+                // Escaped character
+                if let Some(next_byte) = iter.next() {
+                    output.push(next_byte.wrapping_sub(64).wrapping_sub(42));
+                }
+            } else if byte != b'\r' {
+                // Normal character (skip carriage returns)
+                output.push(byte.wrapping_sub(42));
+            }
+        }
+    }
+
+    /// SIMD-accelerated yEnc decoder for lines without escape sequences
+    /// Uses SSE2 on x86_64, NEON on aarch64, scalar fallback otherwise
+    #[inline]
+    fn decode_yenc_fast(line: &[u8], output: &mut Vec<u8>) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            Self::decode_yenc_sse2(line, output);
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            Self::decode_yenc_neon(line, output);
+        }
+
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            // Scalar fallback for other architectures
+            output.extend(line.iter().map(|&b| b.wrapping_sub(42)));
+        }
+    }
+
+    /// SSE2 implementation for x86_64
+    #[cfg(target_arch = "x86_64")]
+    #[inline]
+    fn decode_yenc_sse2(line: &[u8], output: &mut Vec<u8>) {
+        use std::arch::x86_64::*;
+
+        let len = line.len();
+        let start_len = output.len();
+        output.reserve(len);
+
+        // Process 16 bytes at a time with SSE2
+        let mut i = 0;
+        let chunks = len / 16;
+
+        if chunks > 0 {
+            // SAFETY: We check that we have at least 16 bytes to process,
+            // and SSE2 is always available on x86_64
+            unsafe {
+                let sub_val = _mm_set1_epi8(42);
+
+                for _ in 0..chunks {
+                    let input = _mm_loadu_si128(line.as_ptr().add(i) as *const __m128i);
+                    let result = _mm_sub_epi8(input, sub_val);
+
+                    // Extend output and copy result
+                    let out_ptr = output.as_mut_ptr().add(start_len + i);
+                    _mm_storeu_si128(out_ptr as *mut __m128i, result);
+                    i += 16;
+                }
+
+                // Update length for the SIMD-processed portion
+                output.set_len(start_len + i);
+            }
+        }
+
+        // Handle remaining bytes with scalar code
+        for &byte in &line[i..] {
+            output.push(byte.wrapping_sub(42));
+        }
+    }
+
+    /// NEON implementation for aarch64
+    #[cfg(target_arch = "aarch64")]
+    #[inline]
+    fn decode_yenc_neon(line: &[u8], output: &mut Vec<u8>) {
+        use std::arch::aarch64::*;
+
+        let len = line.len();
+        let start_len = output.len();
+        output.reserve(len);
+
+        // Process 16 bytes at a time with NEON
+        let mut i = 0;
+        let chunks = len / 16;
+
+        if chunks > 0 {
+            // SAFETY: We check that we have at least 16 bytes to process,
+            // and NEON is always available on aarch64
+            unsafe {
+                let sub_val = vdupq_n_u8(42);
+
+                for _ in 0..chunks {
+                    let input = vld1q_u8(line.as_ptr().add(i));
+                    let result = vsubq_u8(input, sub_val);
+
+                    // Extend output and copy result
+                    let out_ptr = output.as_mut_ptr().add(start_len + i);
+                    vst1q_u8(out_ptr, result);
+                    i += 16;
+                }
+
+                // Update length for the SIMD-processed portion
+                output.set_len(start_len + i);
+            }
+        }
+
+        // Handle remaining bytes with scalar code
+        for &byte in &line[i..] {
+            output.push(byte.wrapping_sub(42));
+        }
     }
 
     async fn send_command(&mut self, command: &str) -> Result<()> {
