@@ -46,7 +46,9 @@ impl Downloader {
     }
 
     /// Check article availability before downloading using parallel connections
-    /// Returns (available_count, missing_count, sample_size, missing_message_ids)
+    /// Returns (available_count, missing_count, sample_size, missing_first_segment_ids)
+    /// The missing set contains first segment message IDs - if first segment is missing,
+    /// the whole file should be skipped (all segments likely expired together)
     pub async fn check_availability(
         &self,
         nzb: &Nzb,
@@ -102,9 +104,9 @@ impl Downloader {
             .collect()
             .await;
 
-        // Flatten results and collect missing message IDs
+        // Flatten results and collect missing first-segment message IDs
         let mut available = 0;
-        let mut missing_ids: HashSet<String> = HashSet::new();
+        let mut missing_first_segments: HashSet<String> = HashSet::new();
 
         // Build a lookup from segment_number to message_id
         let seg_to_msg: std::collections::HashMap<u32, &str> = sample_requests
@@ -117,7 +119,7 @@ impl Downloader {
                 if exists {
                     available += 1;
                 } else if let Some(&msg_id) = seg_to_msg.get(&seg_num) {
-                    missing_ids.insert(msg_id.to_string());
+                    missing_first_segments.insert(msg_id.to_string());
                 }
             }
         }
@@ -125,20 +127,33 @@ impl Downloader {
         let total = sample_requests.len();
         let missing = total - available;
 
-        Ok((available, missing, total, missing_ids))
+        Ok((available, missing, total, missing_first_segments))
     }
 
     /// Download all files from an NZB, returns results and progress bar for reuse
+    /// `missing_first_segments` contains first segment IDs of files to skip entirely
     pub async fn download_nzb(
         &self,
         nzb: &Nzb,
         config: Config,
-        missing_articles: std::collections::HashSet<String>,
+        missing_first_segments: std::collections::HashSet<String>,
     ) -> Result<(Vec<DownloadResult>, ProgressBar)> {
         config.ensure_dirs()?;
 
-        // Get all files to download (no separation between main and PAR2)
-        let all_files: Vec<&NzbFile> = nzb.files().iter().collect();
+        // Filter out files whose first segment is missing (whole file likely expired)
+        let all_files: Vec<&NzbFile> = nzb
+            .files()
+            .iter()
+            .filter(|f| {
+                f.segments
+                    .segment
+                    .first()
+                    .map(|s| !missing_first_segments.contains(&s.message_id))
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        let skipped_files = nzb.files().len() - all_files.len();
 
         if all_files.is_empty() {
             return Err(DownloadError::InsufficientSegments {
@@ -148,28 +163,29 @@ impl Downloader {
             .into());
         }
 
-        // Calculate total bytes excluding known-missing articles
+        // Calculate total bytes for available files only
         let total_bytes: u64 = all_files
             .iter()
             .flat_map(|f| &f.segments.segment)
-            .filter(|s| !missing_articles.contains(&s.message_id))
             .map(|s| s.bytes)
             .sum();
 
         let total_files = all_files.len();
         let progress_bar =
             progress::create_progress_bar(total_bytes, progress::ProgressStyle::Download);
+
+        if skipped_files > 0 {
+            progress_bar.println(format!(
+                "  \x1b[33m↳ Skipping {} unavailable file{}\x1b[0m",
+                skipped_files,
+                if skipped_files == 1 { "" } else { "s" }
+            ));
+        }
         progress_bar.set_message(format!("({}/{})", 0, total_files));
 
-        // Download all files concurrently, passing missing articles to skip
-        let missing_articles = Arc::new(missing_articles);
+        // Download available files concurrently
         let results = self
-            .download_files_concurrent_with_config(
-                &all_files,
-                progress_bar.clone(),
-                config,
-                missing_articles,
-            )
+            .download_files_concurrent_with_config(&all_files, progress_bar.clone(), config)
             .await?;
 
         // Finish the progress bar with clean formatting
@@ -214,7 +230,6 @@ impl Downloader {
         files: &[&NzbFile],
         progress_bar: ProgressBar,
         config: Config,
-        missing_articles: Arc<std::collections::HashSet<String>>,
     ) -> Result<Vec<DownloadResult>> {
         let total_files = files.len();
         let completed_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -232,12 +247,10 @@ impl Downloader {
             let file = (*file).clone();
             let progress = progress_bar.clone();
             let completed = completed_count.clone();
-            let missing = missing_articles.clone();
 
             async move {
                 let result =
-                    Self::download_file_with_pool(file, &config, pool, progress.clone(), &missing)
-                        .await;
+                    Self::download_file_with_pool(file, &config, pool, progress.clone()).await;
 
                 // Update file counter (only update every 5 files to reduce overhead)
                 let count = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -277,14 +290,13 @@ impl Downloader {
         config: &Config,
         pool: NntpPool,
         progress_bar: ProgressBar,
-        missing_articles: &std::collections::HashSet<String>,
     ) -> Result<DownloadResult> {
         let filename = Nzb::get_filename_from_subject(&file.subject)
             .unwrap_or_else(|| format!("unknown_file_{}", file.date));
 
         let output_path = config.download.dir.join(&filename);
 
-        // Calculate expected size and segment offsets (for ALL segments, including missing)
+        // Calculate expected size and segment offsets
         let segment_sizes: Vec<u64> = file.segments.segment.iter().map(|s| s.bytes).collect();
         let expected_size: u64 = segment_sizes.iter().sum();
 
@@ -306,9 +318,9 @@ impl Downloader {
                         .unwrap_or(false);
 
                     if is_valid {
-                        if progress_bar.is_hidden() {
-                            eprintln!("  Skipping complete: {}", filename);
-                        } else {
+                        // File is complete - add its size to progress
+                        progress_bar.inc(expected_size);
+                        if !progress_bar.is_hidden() {
                             progress_bar
                                 .println(format!("  \x1b[90m↳ Skipping: {}\x1b[0m", filename));
                         }
@@ -345,13 +357,12 @@ impl Downloader {
         // Prepare segment downloads using pipelining
         let group = &file.groups.group[0].name;
 
-        // Create segment requests with their offsets, FILTERING OUT known-missing articles
+        // Create segment requests with their offsets
         let segment_requests: Vec<(SegmentRequest, u64)> = file
             .segments
             .segment
             .iter()
             .enumerate()
-            .filter(|(_, segment)| !missing_articles.contains(&segment.message_id))
             .map(|(idx, segment)| {
                 (
                     SegmentRequest {
@@ -363,9 +374,6 @@ impl Downloader {
                 )
             })
             .collect();
-
-        // Count how many segments we're skipping
-        let skipped_segments = file.segments.segment.len() - segment_requests.len();
 
         // Pipeline size: how many segments to request per connection
         let pipeline_size = config.tuning.pipeline_size;
@@ -536,7 +544,7 @@ impl Downloader {
             path: output_path,
             size: final_size,
             segments_downloaded: segments_downloaded.load(Ordering::Relaxed),
-            segments_failed: segments_failed.load(Ordering::Relaxed) + skipped_segments,
+            segments_failed: segments_failed.load(Ordering::Relaxed),
             download_time,
             average_speed,
             failed_message_ids: failed_ids,
