@@ -168,19 +168,6 @@ jobs:
           asset_name: ${{ matrix.name }}
           asset_content_type: application/octet-stream
 
-      - name: Calculate SHA256
-        run: shasum -a 256 ${{ matrix.name }} > ${{ matrix.name }}.sha256
-
-      - name: Upload SHA256 checksum
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./${{ matrix.name }}.sha256
-          asset_name: ${{ matrix.name }}.sha256
-          asset_content_type: text/plain
-
   build-macos:
     name: Build macOS ${{ matrix.arch }}
     needs: create-release
@@ -245,19 +232,6 @@ jobs:
           asset_name: ${{ matrix.name }}
           asset_content_type: application/octet-stream
 
-      - name: Calculate SHA256
-        run: shasum -a 256 ${{ matrix.name }} > ${{ matrix.name }}.sha256
-
-      - name: Upload SHA256 checksum
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./${{ matrix.name }}.sha256
-          asset_name: ${{ matrix.name }}.sha256
-          asset_content_type: text/plain
-
   build-windows:
     name: Build Windows x86_64
     needs: create-release
@@ -307,17 +281,3 @@ jobs:
           asset_path: ./dl-nzb-windows-x86_64.exe
           asset_name: dl-nzb-windows-x86_64.exe
           asset_content_type: application/octet-stream
-
-      - name: Calculate SHA256
-        shell: bash
-        run: sha256sum dl-nzb-windows-x86_64.exe > dl-nzb-windows-x86_64.exe.sha256
-
-      - name: Upload SHA256 checksum
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./dl-nzb-windows-x86_64.exe.sha256
-          asset_name: dl-nzb-windows-x86_64.exe.sha256
-          asset_content_type: text/plain
