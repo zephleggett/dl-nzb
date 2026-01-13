@@ -184,20 +184,18 @@ jobs:
   build-macos:
     name: Build macOS ${{ matrix.arch }}
     needs: create-release
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-15
     strategy:
       fail-fast: false
       matrix:
         include:
-          # macOS 15 (Intel) for x86_64 native builds
+          # Cross-compile for Intel Macs from ARM64 runner
           - arch: x86_64
-            os: macos-15-large
             target: x86_64-apple-darwin
             name: dl-nzb-macos-x86_64
 
-          # macOS 26 (ARM64) for Apple Silicon native builds
+          # Native build for Apple Silicon
           - arch: aarch64
-            os: macos-26
             target: aarch64-apple-darwin
             name: dl-nzb-macos-aarch64
 
