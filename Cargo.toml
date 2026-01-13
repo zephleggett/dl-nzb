@@ -89,4 +89,4 @@ tempfile = "3.20"
 unrar = "0.5"
 
 # PAR2 support (pure Rust with SIMD optimizations)
-par2-rs = { path = "../par2-rs" }
+par2-rs = { git = "https://github.com/zephleggett/par2-rs.git" }
