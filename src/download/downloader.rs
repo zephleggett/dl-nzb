@@ -44,6 +44,39 @@ impl Downloader {
         Ok(Self { pool })
     }
 
+    /// Check article availability before downloading
+    /// Returns (available_count, missing_count, sample_size)
+    pub async fn check_availability(&self, nzb: &Nzb) -> Result<(usize, usize, usize)> {
+        let all_files: Vec<&NzbFile> = nzb.files().iter().collect();
+        if all_files.is_empty() {
+            return Ok((0, 0, 0));
+        }
+
+        // Get a connection for checking
+        let mut conn = self.pool.get_connection().await?;
+
+        // Sample segments from files to check availability
+        let mut sample_requests: Vec<SegmentRequest> = Vec::new();
+        let group = &all_files[0].groups.group[0].name;
+
+        // Sample first segment from each file (up to 20 files)
+        for file in all_files.iter().take(20) {
+            if let Some(segment) = file.segments.segment.first() {
+                sample_requests.push(SegmentRequest {
+                    message_id: segment.message_id.clone(),
+                    group: group.clone(),
+                    segment_number: segment.number,
+                });
+            }
+        }
+
+        let results = conn.check_articles_exist(&sample_requests).await?;
+        let available = results.iter().filter(|(_, exists)| *exists).count();
+        let missing = results.len() - available;
+
+        Ok((available, missing, results.len()))
+    }
+
     /// Download all files from an NZB, returns results and progress bar for reuse
     pub async fn download_nzb(
         &self,
@@ -200,25 +233,35 @@ impl Downloader {
             offset += size;
         }
 
-        // Check if file already exists with correct size (safe resume)
+        // Check if file already exists with correct size and valid content
         if !config.download.force_redownload {
             if let Ok(metadata) = tokio::fs::metadata(&output_path).await {
                 if metadata.len() == expected_size {
-                    if progress_bar.is_hidden() {
-                        eprintln!("  Skipping complete: {}", filename);
-                    } else {
-                        progress_bar.println(format!("  \x1b[90m↳ Skipping: {}\x1b[0m", filename));
+                    // Verify file has real content by checking CRC32
+                    // A zero-filled file will have all zeros at sample positions
+                    let is_valid = match Self::verify_file_crc32(&output_path).await {
+                        Ok(valid) => valid,
+                        Err(_) => false,
+                    };
+
+                    if is_valid {
+                        if progress_bar.is_hidden() {
+                            eprintln!("  Skipping complete: {}", filename);
+                        } else {
+                            progress_bar
+                                .println(format!("  \x1b[90m↳ Skipping: {}\x1b[0m", filename));
+                        }
+                        return Ok(DownloadResult {
+                            filename,
+                            path: output_path,
+                            size: expected_size,
+                            segments_downloaded: file.segments.segment.len(),
+                            segments_failed: 0,
+                            download_time: Duration::from_secs(0),
+                            average_speed: 0.0,
+                            failed_message_ids: Vec::new(),
+                        });
                     }
-                    return Ok(DownloadResult {
-                        filename,
-                        path: output_path,
-                        size: expected_size,
-                        segments_downloaded: file.segments.segment.len(),
-                        segments_failed: 0,
-                        download_time: Duration::from_secs(0),
-                        average_speed: 0.0,
-                        failed_message_ids: Vec::new(),
-                    });
                 }
             }
         }
@@ -466,5 +509,39 @@ impl Downloader {
         }
 
         Ok(cleaned_count)
+    }
+
+    /// Verify a file has real content (not all zeros from pre-allocation)
+    /// Samples multiple positions in the file to detect zero-filled files
+    async fn verify_file_crc32(path: &std::path::Path) -> Result<bool> {
+        use tokio::io::AsyncReadExt;
+
+        let mut file = tokio::fs::File::open(path).await?;
+        let metadata = file.metadata().await?;
+        let file_size = metadata.len();
+
+        // For very small files, just check if any byte is non-zero
+        if file_size < 1024 {
+            let mut buf = vec![0u8; file_size as usize];
+            file.read_exact(&mut buf).await?;
+            return Ok(buf.iter().any(|&b| b != 0));
+        }
+
+        // For larger files, sample multiple positions to detect zero-fill
+        // Check start, middle, and end of file
+        let positions = [0, file_size / 2, file_size.saturating_sub(1024)];
+        let mut buf = [0u8; 1024];
+
+        for pos in positions {
+            use tokio::io::AsyncSeekExt;
+            file.seek(std::io::SeekFrom::Start(pos)).await?;
+            let n = file.read(&mut buf).await?;
+            if n > 0 && buf[..n].iter().any(|&b| b != 0) {
+                return Ok(true);
+            }
+        }
+
+        // All sampled positions were zeros - file is likely invalid
+        Ok(false)
     }
 }

@@ -357,6 +357,34 @@ async fn handle_download_mode(cli: &Cli, mut config: Config) -> Result<()> {
             }
         };
 
+        // Pre-flight availability check
+        if !cli.json {
+            match downloader.check_availability(&nzb).await {
+                Ok((available, missing, total)) => {
+                    if missing > 0 {
+                        let pct_available = if total > 0 {
+                            (available as f64 / total as f64) * 100.0
+                        } else {
+                            0.0
+                        };
+                        eprintln!(
+                            "\x1b[33m⚠ Warning:\x1b[0m {}/{} sampled articles available ({:.0}%)",
+                            available, total, pct_available
+                        );
+                        if missing == total {
+                            eprintln!(
+                                "\x1b[31m✗ No articles found on server. Content may have expired.\x1b[0m"
+                            );
+                            continue;
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Warning: Could not check availability: {}", e);
+                }
+            }
+        }
+
         // Create output directory based on NZB filename
         let output_dir = if config.download.create_subfolders {
             // Use NZB filename (without extension) as folder name

@@ -117,6 +117,14 @@ impl PooledConnection {
     ) -> Result<Vec<(u32, Option<Bytes>)>, DlNzbError> {
         self.conn.download_segments_pipelined(requests).await
     }
+
+    /// Check if articles exist on the server using STAT command (no download)
+    pub async fn check_articles_exist(
+        &mut self,
+        requests: &[crate::nntp::SegmentRequest],
+    ) -> Result<Vec<(u32, bool)>, DlNzbError> {
+        self.conn.check_articles_exist(requests).await
+    }
 }
 
 /// Builder for creating connection pools with configuration
