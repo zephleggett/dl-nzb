@@ -193,6 +193,7 @@ jobs:
           - arch: x86_64
             target: x86_64-apple-darwin
             name: dl-nzb-macos-x86_64
+            cross_compile: true
 
           # Native build for Apple Silicon
           - arch: aarch64
@@ -217,7 +218,12 @@ jobs:
           rm -rf target
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: |
+          if [ "${{ matrix.cross_compile }}" = "true" ]; then
+            cargo build --release --target ${{ matrix.target }} --features vendored-openssl
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
 
       - name: Strip binary
         run: strip target/${{ matrix.target }}/release/dl-nzb || true
