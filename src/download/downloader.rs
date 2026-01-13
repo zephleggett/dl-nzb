@@ -237,9 +237,8 @@ impl Downloader {
         if !config.download.force_redownload {
             if let Ok(metadata) = tokio::fs::metadata(&output_path).await {
                 if metadata.len() == expected_size {
-                    // Verify file has real content by checking CRC32
-                    // A zero-filled file will have all zeros at sample positions
-                    let is_valid = match Self::verify_file_crc32(&output_path).await {
+                    // Verify file has real content (not zero-filled from pre-allocation)
+                    let is_valid = match Self::verify_file_not_empty(&output_path).await {
                         Ok(valid) => valid,
                         Err(_) => false,
                     };
@@ -512,8 +511,8 @@ impl Downloader {
     }
 
     /// Verify a file has real content (not all zeros from pre-allocation)
-    /// Samples multiple positions in the file to detect zero-filled files
-    async fn verify_file_crc32(path: &std::path::Path) -> Result<bool> {
+    /// Samples start, middle, and end positions to detect zero-filled files
+    async fn verify_file_not_empty(path: &std::path::Path) -> Result<bool> {
         use tokio::io::AsyncReadExt;
 
         let mut file = tokio::fs::File::open(path).await?;
