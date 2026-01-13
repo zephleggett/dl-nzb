@@ -527,13 +527,11 @@ impl Downloader {
             return Ok(buf.iter().any(|&b| b != 0));
         }
 
-        // For larger files, sample multiple positions to detect zero-fill
-        // Check start, middle, and end of file
+        // Sample start, middle, and end of file
         let positions = [0, file_size / 2, file_size.saturating_sub(1024)];
         let mut buf = [0u8; 1024];
 
         for pos in positions {
-            use tokio::io::AsyncSeekExt;
             file.seek(std::io::SeekFrom::Start(pos)).await?;
             let n = file.read(&mut buf).await?;
             if n > 0 && buf[..n].iter().any(|&b| b != 0) {
@@ -541,7 +539,6 @@ impl Downloader {
             }
         }
 
-        // All sampled positions were zeros - file is likely invalid
         Ok(false)
     }
 }
