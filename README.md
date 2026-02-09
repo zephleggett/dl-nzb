@@ -23,7 +23,8 @@ First run creates a config file. Add your Usenet credentials:
 dl-nzb config  # shows config path
 ```
 
-Config locations:
+Config locations (checked in order):
+- Local: `./dl-nzb.toml` (project-local override)
 - Linux: `~/.config/dl-nzb/config.toml`
 - macOS: `~/Library/Application Support/dl-nzb/config.toml`
 - Windows: `%APPDATA%\dl-nzb\config.toml`
@@ -91,6 +92,7 @@ large_file_threshold = 10485760  # 10MB, for progress display
 [logging]
 level = "info"
 format = "pretty"
+# file = "/path/to/dl-nzb.log"  # optional log file
 ```
 
 Environment variables override config with `DL_NZB_` prefix:
@@ -101,7 +103,7 @@ DL_NZB_USENET_SERVER=news.example.com dl-nzb file.nzb
 ## CLI Options
 
 ```
-dl-nzb [OPTIONS] [FILES]...
+dl-nzb [OPTIONS] [FILE]...
 dl-nzb <COMMAND>
 
 Commands:
