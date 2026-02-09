@@ -156,8 +156,8 @@ pub async fn repair_with_par2(
     });
 
     match repairer.repair_with_callbacks(
-        true,
-        false,
+        true,                            // do_repair
+        config.delete_par2_after_repair, // purge_files — par2-rs deletes only same recovery set
         Some(progress_callback),
         Some(message_callback),
     ) {
@@ -171,15 +171,6 @@ pub async fn repair_with_par2(
                 .collect();
 
             let renamed_count = files_before.symmetric_difference(&files_after).count() / 2;
-
-            // Delete PAR2 files if configured
-            if config.delete_par2_after_repair {
-                for par2_path in downloaded_par2_files {
-                    if par2_path.exists() {
-                        let _ = std::fs::remove_file(par2_path);
-                    }
-                }
-            }
 
             progress_bar.finish_with_message("  ");
 

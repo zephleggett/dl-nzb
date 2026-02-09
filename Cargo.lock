@@ -918,8 +918,8 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "par2-rs"
-version = "0.1.0"
-source = "git+https://github.com/zephleggett/par2-rs.git?tag=v0.1.0#e23dc85a7ca3fb4cf59da2ad46ceef4378565e73"
+version = "0.2.0"
+source = "git+https://github.com/zephleggett/par2-rs.git?tag=v0.2.0#9f36de080d9132270503760b2bfc2bbd4b59d838"
 dependencies = [
  "crc32fast",
  "md-5",
