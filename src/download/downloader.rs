@@ -19,6 +19,25 @@ use crate::progress;
 
 type Result<T> = std::result::Result<T, DlNzbError>;
 
+// Configuration constants
+/// Number of articles to check per batch during availability checking
+const AVAILABILITY_BATCH_SIZE: usize = 5;
+
+/// Minimum retry delay in milliseconds
+const MIN_RETRY_DELAY_MS: u64 = 100;
+
+/// Base connection retry delay in milliseconds
+const CONNECTION_RETRY_BASE_DELAY_MS: u64 = 200;
+
+/// Maximum filename length in bytes (accounts for filesystem limits)
+const MAX_FILENAME_LENGTH: usize = 240;
+
+/// How often to print connection wait status (every N attempts)
+const CONNECTION_WAIT_STATUS_INTERVAL: u32 = 5;
+
+/// How often to update file progress message (every N files)
+const FILE_PROGRESS_UPDATE_INTERVAL: usize = 5;
+
 /// Result of downloading a file
 #[derive(Debug)]
 pub struct DownloadResult {
@@ -40,8 +59,11 @@ pub struct Downloader {
 impl Downloader {
     /// Create a new downloader with connection pool
     pub async fn new(config: Config) -> Result<Self> {
+        // Convert connections count to usize, clamping to reasonable limits
+        let max_connections = (config.usenet.connections as usize).min(usize::MAX);
+
         let pool = NntpPoolBuilder::new(config.usenet.clone())
-            .max_size(config.usenet.connections as usize)
+            .max_size(max_connections)
             .max_concurrent_connections(config.tuning.max_concurrent_connections)
             .build()?;
 
@@ -82,11 +104,10 @@ impl Downloader {
 
         // Split into batches and check in parallel using available connections
         // Smaller batches = more parallelism for faster results
-        let batch_size = 5; // Small batches for maximum parallelism
         let num_connections = self.pool.status().max_size; // Use all available connections
 
         let batches: Vec<Vec<SegmentRequest>> = sample_requests
-            .chunks(batch_size)
+            .chunks(AVAILABILITY_BATCH_SIZE)
             .map(|c| c.to_vec())
             .collect();
 
@@ -95,8 +116,14 @@ impl Downloader {
             let pool = pool.clone();
             async move {
                 match pool.get_connection().await {
-                    Ok(mut conn) => conn.check_articles_exist(&batch).await.unwrap_or_default(),
-                    Err(_) => Vec::new(),
+                    Ok(mut conn) => conn.check_articles_exist(&batch).await.unwrap_or_else(|e| {
+                        eprintln!("  \x1b[33m⚠ Article check failed: {}\x1b[0m", e);
+                        Vec::new()
+                    }),
+                    Err(e) => {
+                        eprintln!("  \x1b[33m⚠ Connection failed during availability check: {}\x1b[0m", e);
+                        Vec::new()
+                    }
                 }
             }
         });
@@ -174,7 +201,7 @@ impl Downloader {
 
         if failed_files == 0 {
             progress_bar.finish_with_message(format!(
-                "({}/{})  ",
+                "({}/{})",
                 all_files.len(),
                 all_files.len()
             ));
@@ -186,7 +213,7 @@ impl Downloader {
             );
         } else {
             progress_bar.finish_with_message(format!(
-                "({}/{})  ",
+                "({}/{})",
                 all_files.len(),
                 all_files.len()
             ));
@@ -202,6 +229,19 @@ impl Downloader {
         Ok((results, progress_bar))
     }
 
+    /// Download multiple files using a worker pool architecture
+    ///
+    /// This implements a three-stage pipeline:
+    /// 1. Main task: Prepares segment batches and sends to workers
+    /// 2. Download workers: Fetch segments from NNTP servers in parallel
+    /// 3. Writer task: Writes downloaded segments to disk
+    ///
+    /// The pipeline uses channels for communication:
+    /// - batch_tx → workers: Segment batches to download
+    /// - write_tx → writer: Downloaded data or failure notifications
+    ///
+    /// Memory is controlled by channel capacities to prevent unbounded growth.
+    /// Files are processed largest-first to maximize initial throughput.
     async fn download_files_with_workers(
         &self,
         files: &[&NzbFile],
@@ -238,7 +278,8 @@ impl Downloader {
             total_files,
         ));
 
-        let worker_count = config.usenet.connections as usize;
+        // Create worker pool - one worker per connection
+        let worker_count = (config.usenet.connections as usize).min(usize::MAX);
         let shared_rx = Arc::new(tokio::sync::Mutex::new(batch_rx));
         let mut worker_handles = Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
@@ -288,7 +329,7 @@ impl Downloader {
                         failed_message_ids: Vec::new(),
                     });
                     let count = completed_count.fetch_add(1, Ordering::Relaxed) + 1;
-                    if count % 5 == 0 || count == total_files {
+                    if count % FILE_PROGRESS_UPDATE_INTERVAL == 0 || count == total_files {
                         progress_bar.set_message(format!("({}/{})", count, total_files));
                     }
                     continue;
@@ -316,7 +357,7 @@ impl Downloader {
                         failed_message_ids: Vec::new(),
                     });
                     let count = completed_count.fetch_add(1, Ordering::Relaxed) + 1;
-                    if count % 5 == 0 || count == total_files {
+                    if count % FILE_PROGRESS_UPDATE_INTERVAL == 0 || count == total_files {
                         progress_bar.set_message(format!("({}/{})", count, total_files));
                     }
                     continue;
@@ -404,10 +445,17 @@ impl Downloader {
 
         drop(batch_tx);
 
-        for handle in worker_handles {
-            let _ = handle.await;
+        // Wait for all workers to complete
+        for (idx, handle) in worker_handles.into_iter().enumerate() {
+            if let Err(e) = handle.await {
+                eprintln!("  \x1b[33m⚠ Worker {} failed: {}\x1b[0m", idx, e);
+            }
         }
-        let _ = writer_handle.await;
+
+        // Wait for writer to complete
+        if let Err(e) = writer_handle.await {
+            eprintln!("  \x1b[33m⚠ Writer task failed: {}\x1b[0m", e);
+        }
 
         for state in file_states {
             let end_time = state
@@ -519,6 +567,35 @@ impl FileState {
         }
         false
     }
+
+    /// Finalize file download and truncate to actual written size
+    /// Returns true if this was the final segment and file was finalized
+    fn finalize_if_done(
+        &self,
+        file_handle: Arc<std::fs::File>,
+        completed_files: &AtomicUsize,
+        total_files: usize,
+        progress_bar: &ProgressBar,
+    ) -> bool {
+        if !self.mark_done() {
+            return false;
+        }
+
+        // Truncate file to the highest written byte position
+        // (segments are written at offsets based on encoded sizes,
+        // so max_byte_position tracks the actual extent of written data)
+        let final_size = self.max_byte_position.load(Ordering::Relaxed);
+        if final_size > 0 {
+            let _ = tokio::task::spawn_blocking(move || file_handle.set_len(final_size));
+        }
+
+        let count = completed_files.fetch_add(1, Ordering::Relaxed) + 1;
+        if count % FILE_PROGRESS_UPDATE_INTERVAL == 0 || count == total_files {
+            progress_bar.set_message(format!("({}/{})", count, total_files));
+        }
+
+        true
+    }
 }
 
 enum WriteJob {
@@ -534,6 +611,25 @@ enum WriteJob {
     },
 }
 
+/// Calculate exponential backoff delay with a minimum floor
+fn calculate_backoff(base_delay: Duration, attempt: usize) -> Duration {
+    let delay = base_delay.max(Duration::from_millis(MIN_RETRY_DELAY_MS));
+    delay.checked_mul(1 << attempt.min(4)).unwrap_or(delay)
+}
+
+/// Worker task that downloads segment batches from NNTP server
+///
+/// Each worker:
+/// - Maintains a single persistent NNTP connection (reused across batches)
+/// - Receives SegmentBatch messages from a shared channel
+/// - Downloads segments using pipelined NNTP commands for efficiency
+/// - Sends results (WriteJob) to the writer task
+/// - Implements retry logic with exponential backoff on failures
+///
+/// Connection management:
+/// - Connections are lazily acquired and reused
+/// - Failed connections are dropped and re-acquired on next batch
+/// - Implements timeout-based waiting when pool is exhausted
 async fn download_worker(
     rx: Arc<tokio::sync::Mutex<mpsc::Receiver<SegmentBatch>>>,
     pool: NntpPool,
@@ -597,9 +693,7 @@ async fn download_worker(
                     break;
                 }
 
-                let delay = retry_delay.max(Duration::from_millis(100));
-                let backoff = delay.checked_mul(1 << attempt.min(4)).unwrap_or(delay);
-                tokio::time::sleep(backoff).await;
+                tokio::time::sleep(calculate_backoff(retry_delay, attempt)).await;
                 continue;
             };
 
@@ -682,7 +776,7 @@ async fn download_worker(
                         break;
                     }
 
-                    let delay = retry_delay.max(Duration::from_millis(100));
+                    let delay = retry_delay.max(Duration::from_millis(MIN_RETRY_DELAY_MS));
                     let backoff = delay.checked_mul(1 << attempt.min(4)).unwrap_or(delay);
                     tokio::time::sleep(backoff).await;
                 }
@@ -691,6 +785,11 @@ async fn download_worker(
     }
 }
 
+/// Attempt to acquire a connection from the pool with retry logic
+///
+/// Retries with exponential backoff up to the specified timeout.
+/// Prints status messages periodically to inform user of delays.
+/// Returns None if connection cannot be acquired within timeout.
 async fn get_connection_with_retry(
     pool: &NntpPool,
     wait_timeout: Duration,
@@ -704,10 +803,11 @@ async fn get_connection_with_retry(
             Ok(conn) => return Some(conn),
             Err(_) => {
                 attempt = attempt.saturating_add(1);
-                let delay = Duration::from_millis(200) * (1 << attempt.min(4));
+                let delay = Duration::from_millis(CONNECTION_RETRY_BASE_DELAY_MS)
+                    * (1 << attempt.min(4));
                 tokio::time::sleep(delay).await;
 
-                if attempt % 5 == 0 && !progress.is_hidden() {
+                if attempt % CONNECTION_WAIT_STATUS_INTERVAL == 0 && !progress.is_hidden() {
                     progress.println(format!(
                         "  \x1b[90m⏳ Waiting for connection... ({:.0}s)\x1b[0m",
                         start.elapsed().as_secs_f64()
@@ -720,6 +820,17 @@ async fn get_connection_with_retry(
     None
 }
 
+/// Writer task that handles all disk I/O operations
+///
+/// This task:
+/// - Receives WriteJob messages from download workers
+/// - Performs blocking writes using spawn_blocking to avoid blocking async runtime
+/// - Tracks download progress and updates progress bar
+/// - Truncates files to actual written size when complete
+/// - Releases file semaphore permits when files complete
+///
+/// All writes use positioned I/O (pwrite/seek_write) to write segments
+/// at specific offsets, allowing out-of-order segment completion.
 async fn run_writer(
     mut rx: mpsc::Receiver<WriteJob>,
     progress_bar: ProgressBar,
@@ -768,23 +879,12 @@ async fn run_writer(
                     }
                 }
 
-                if file.state.mark_done() {
-                    // Truncate file to the highest written byte position
-                    // (segments are written at offsets based on encoded sizes,
-                    // so max_byte_position tracks the actual extent of written data)
-                    let final_size = file.state.max_byte_position.load(Ordering::Relaxed);
-                    if final_size > 0 {
-                        let file_handle = file.file.clone();
-                        let _ =
-                            tokio::task::spawn_blocking(move || file_handle.set_len(final_size))
-                                .await;
-                    }
-
-                    let count = completed_files.fetch_add(1, Ordering::Relaxed) + 1;
-                    if count % 5 == 0 || count == total_files {
-                        progress_bar.set_message(format!("({}/{})", count, total_files));
-                    }
-                }
+                file.state.finalize_if_done(
+                    file.file.clone(),
+                    &completed_files,
+                    total_files,
+                    &progress_bar,
+                );
             }
             WriteJob::Failed { file, message_id } => {
                 file.state.segments_failed.fetch_add(1, Ordering::Relaxed);
@@ -792,23 +892,12 @@ async fn run_writer(
                     ids.push(message_id);
                 }
 
-                if file.state.mark_done() {
-                    // Truncate file to the highest written byte position
-                    // (segments are written at offsets based on encoded sizes,
-                    // so max_byte_position tracks the actual extent of written data)
-                    let final_size = file.state.max_byte_position.load(Ordering::Relaxed);
-                    if final_size > 0 {
-                        let file_handle = file.file.clone();
-                        let _ =
-                            tokio::task::spawn_blocking(move || file_handle.set_len(final_size))
-                                .await;
-                    }
-
-                    let count = completed_files.fetch_add(1, Ordering::Relaxed) + 1;
-                    if count % 5 == 0 || count == total_files {
-                        progress_bar.set_message(format!("({}/{})", count, total_files));
-                    }
-                }
+                file.state.finalize_if_done(
+                    file.file.clone(),
+                    &completed_files,
+                    total_files,
+                    &progress_bar,
+                );
             }
         }
     }
@@ -853,17 +942,15 @@ fn sanitize_filename(raw: &str, fallback: &str) -> String {
         trimmed.to_string()
     };
 
-    let max_len = 240usize;
-    if result.len() > max_len {
-        let mut end = 0usize;
-        for (idx, _) in result.char_indices() {
-            if idx > max_len {
-                break;
-            }
-            end = idx;
+    // Safely truncate to max length without breaking UTF-8 character boundaries
+    if result.len() > MAX_FILENAME_LENGTH {
+        // Find the character boundary at or before MAX_FILENAME_LENGTH
+        let mut truncate_at = MAX_FILENAME_LENGTH;
+        while truncate_at > 0 && !result.is_char_boundary(truncate_at) {
+            truncate_at -= 1;
         }
-        if end > 0 {
-            result.truncate(end);
+        if truncate_at > 0 {
+            result.truncate(truncate_at);
         }
     }
 
