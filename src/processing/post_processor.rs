@@ -20,6 +20,14 @@ pub struct PostProcessor {
     large_file_threshold: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct PostProcessingOutcome {
+    pub par2_status: Par2Status,
+    pub rar_extracted: bool,
+    pub files_renamed: usize,
+    pub extensions_fixed: usize,
+}
+
 impl PostProcessor {
     pub fn new(config: PostProcessingConfig, large_file_threshold: u64) -> Self {
         Self {
@@ -28,9 +36,17 @@ impl PostProcessor {
         }
     }
 
-    pub async fn process_downloads(&self, results: &[DownloadResult]) -> Result<()> {
+    pub async fn process_downloads(
+        &self,
+        results: &[DownloadResult],
+    ) -> Result<PostProcessingOutcome> {
         if results.is_empty() {
-            return Ok(());
+            return Ok(PostProcessingOutcome {
+                par2_status: Par2Status::NoPar2Files,
+                rar_extracted: false,
+                files_renamed: 0,
+                extensions_fixed: 0,
+            });
         }
 
         let download_dir = results[0].path.parent().unwrap_or(Path::new("."));
@@ -65,20 +81,31 @@ impl PostProcessor {
             && ((archive_files_with_failures.is_empty() && par2_status == Par2Status::NoPar2Files)
                 || par2_status == Par2Status::Success);
 
+        let mut rar_extracted = false;
         if should_extract {
             let bar = ProgressBar::new(100);
             bar.enable_steady_tick(Duration::from_millis(100));
 
             let extractor = RarExtractor::new(self.config.clone(), self.large_file_threshold);
-            extractor.extract_archives(download_dir, &bar).await?;
+            let extracted_count = extractor.extract_archives(download_dir, &bar).await?;
+            rar_extracted = extracted_count > 0;
         }
 
         // Deobfuscate file names if configured
+        let mut files_renamed = 0;
+        let mut extensions_fixed = 0;
         if self.config.deobfuscate_file_names {
-            self.run_deobfuscation(download_dir, useful_name)?;
+            let result = self.run_deobfuscation(download_dir, useful_name)?;
+            files_renamed = result.files_renamed;
+            extensions_fixed = result.extensions_fixed;
         }
 
-        Ok(())
+        Ok(PostProcessingOutcome {
+            par2_status,
+            rar_extracted,
+            files_renamed,
+            extensions_fixed,
+        })
     }
 
     /// Check if any RAR files have failed segments
@@ -118,7 +145,11 @@ impl PostProcessor {
     }
 
     /// Run deobfuscation on extracted files
-    fn run_deobfuscation(&self, download_dir: &Path, useful_name: &str) -> Result<()> {
+    fn run_deobfuscation(
+        &self,
+        download_dir: &Path,
+        useful_name: &str,
+    ) -> Result<super::deobfuscate::DeobfuscateResult> {
         use indicatif::ProgressStyle as IndicatifStyle;
 
         let spinner = ProgressBar::new_spinner();
@@ -145,13 +176,16 @@ impl PostProcessor {
                 } else {
                     spinner.finish_and_clear();
                 }
+                Ok(result)
             }
             Err(e) => {
                 tracing::debug!("Deobfuscation failed: {}", e);
                 spinner.finish_and_clear();
+                Ok(super::deobfuscate::DeobfuscateResult {
+                    files_renamed: 0,
+                    extensions_fixed: 0,
+                })
             }
         }
-
-        Ok(())
     }
 }

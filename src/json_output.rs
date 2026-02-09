@@ -62,15 +62,6 @@ pub struct TestResult {
     pub error: Option<String>,
 }
 
-/// JSON output for config command
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ConfigInfo {
-    pub path: PathBuf,
-    pub exists: bool,
-    pub server: Option<String>,
-    pub connections: Option<u16>,
-}
-
 /// JSON output for errors
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ErrorOutput {

@@ -207,7 +207,7 @@ impl AsyncNntpConnection {
         // Read responses - STAT responses are instant (no body data)
         let mut results = Vec::with_capacity(requests.len());
         for req in requests {
-            let response = match timeout(Duration::from_secs(2), self.read_response()).await {
+            let response = match timeout(Duration::from_secs(10), self.read_response()).await {
                 Ok(Ok(r)) => r,
                 _ => {
                     results.push((req.message_id.clone(), false));
@@ -223,12 +223,15 @@ impl AsyncNntpConnection {
         Ok(results)
     }
 
+    const MAX_ARTICLE_BODY_SIZE: usize = 16 * 1024 * 1024; // 16MB
+
     /// Read article body until termination
     async fn read_article_body(&mut self) -> Result<Vec<u8>> {
         use tokio::io::AsyncBufReadExt;
 
         let mut body = Vec::with_capacity(1024 * 1024); // Pre-allocate 1MB for larger segments
         let mut line = Vec::new();
+        let mut terminated = false;
 
         loop {
             line.clear();
@@ -241,6 +244,7 @@ impl AsyncNntpConnection {
 
             // Check for termination (single dot followed by newline)
             if line == b".\r\n" || line == b".\n" {
+                terminated = true;
                 break;
             }
 
@@ -259,6 +263,21 @@ impl AsyncNntpConnection {
             }
 
             body.push(b'\n'); // Add newline back for yenc decoder
+
+            if body.len() > Self::MAX_ARTICLE_BODY_SIZE {
+                return Err(NntpError::ProtocolError(format!(
+                    "Article body exceeds maximum size of {} bytes",
+                    Self::MAX_ARTICLE_BODY_SIZE
+                ))
+                .into());
+            }
+        }
+
+        if !terminated {
+            return Err(NntpError::ProtocolError(
+                "Article body terminated unexpectedly".to_string(),
+            )
+            .into());
         }
 
         Ok(body)
@@ -435,6 +454,13 @@ impl AsyncNntpConnection {
         let mut response = String::new();
         self.reader.read_line(&mut response).await?;
 
+        if response.len() > 8192 {
+            return Err(NntpError::ProtocolError(
+                "Response line exceeds maximum length".to_string(),
+            )
+            .into());
+        }
+
         // Remove CRLF
         if response.ends_with("\r\n") {
             response.truncate(response.len() - 2);
@@ -510,12 +536,17 @@ impl AsyncNntpConnection {
                     // These don't send a body, safe to skip
                     results.push((req.segment_number, None));
                     continue;
-                } else {
-                    // Unknown response code - try to read body to stay in sync
-                    let _ = timeout(Duration::from_secs(30), self.read_article_body()).await;
-                    results.push((req.segment_number, None));
-                    continue;
                 }
+
+                let code = response
+                    .get(0..3)
+                    .and_then(|s| s.parse::<u16>().ok())
+                    .unwrap_or(0);
+                return Err(NntpError::ServerError {
+                    code,
+                    message: response,
+                }
+                .into());
             }
 
             // Read and decode the body

@@ -180,39 +180,6 @@ pub enum PostProcessingError {
 /// Result type alias using DlNzbError
 pub type Result<T> = std::result::Result<T, DlNzbError>;
 
-/// Helper trait for adding context to errors
-pub trait ErrorContext<T> {
-    fn context(self, msg: impl Into<String>) -> Result<T>;
-    fn with_context<F>(self, f: F) -> Result<T>
-    where
-        F: FnOnce() -> String;
-}
-
-impl<T, E> ErrorContext<T> for std::result::Result<T, E>
-where
-    E: Into<DlNzbError>,
-{
-    fn context(self, msg: impl Into<String>) -> Result<T> {
-        self.map_err(|e| {
-            let error: DlNzbError = e.into();
-            // Log the context
-            tracing::error!("{}: {}", msg.into(), error);
-            error
-        })
-    }
-
-    fn with_context<F>(self, f: F) -> Result<T>
-    where
-        F: FnOnce() -> String,
-    {
-        self.map_err(|e| {
-            let error: DlNzbError = e.into();
-            tracing::error!("{}: {}", f(), error);
-            error
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

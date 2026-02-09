@@ -6,13 +6,13 @@ use dl_nzb::{
     cli::{Cli, Commands},
     config::Config,
     download::{Downloader, Nzb},
-    error::{ConfigError, DlNzbError},
+    error::DlNzbError,
     json_output::{
         DownloadFileResult, DownloadSummary, ErrorOutput, FileInfo, NzbInfo, PostProcessingResult,
         TestResult,
     },
     nntp::AsyncNntpConnection,
-    processing::PostProcessor,
+    processing::{Par2Status, PostProcessingOutcome, PostProcessor},
     serde_json,
 };
 
@@ -32,7 +32,7 @@ async fn main() {
             eprintln!(
                 "{}",
                 serde_json::to_string_pretty(&error_output)
-                    .unwrap_or_else(|_| { format!(r#"{{"error": "Failed to serialize error"}}"#) })
+                    .unwrap_or_else(|_| r#"{"error": "Failed to serialize error"}"#.to_string())
             );
         } else {
             eprintln!("Error: {}", e);
@@ -50,6 +50,13 @@ async fn run(cli: Cli) -> Result<()> {
     // Initialize logging
     init_logging(&cli)?;
 
+    // Handle Ctrl+C gracefully
+    tokio::spawn(async {
+        let _ = tokio::signal::ctrl_c().await;
+        eprintln!("\nInterrupted.");
+        std::process::exit(130); // Standard Ctrl+C exit code
+    });
+
     // Handle special commands first
     if let Some(command) = &cli.command {
         return handle_command(command, &cli).await;
@@ -60,19 +67,6 @@ async fn run(cli: Cli) -> Result<()> {
 
     // Apply CLI overrides
     config.apply_overrides(cli.get_config_overrides());
-
-    // Handle deprecated flags for backwards compatibility
-    if cli.has_deprecated_flags() {
-        eprintln!("Note: Some flags used are deprecated. See --help for current usage.");
-    }
-
-    // Handle username/password from CLI
-    if let Some(username) = &cli.username {
-        config.usenet.username = username.clone();
-    }
-    if let Some(password) = &cli.password {
-        config.usenet.password = password.clone();
-    }
 
     // Validate configuration
     config.validate()?;
@@ -105,12 +99,6 @@ fn init_logging(cli: &Cli) -> Result<()> {
 
     if cli.quiet {
         subscriber.without_time().init();
-    } else if let Some(log_file) = &cli.log_file {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log_file)?;
-        subscriber.with_writer(file).init();
     } else {
         subscriber.init();
     }
@@ -185,10 +173,12 @@ async fn handle_command(command: &Commands, cli: &Cli) -> Result<()> {
             if config_path.exists() {
                 println!("Current configuration:");
                 println!("{}", "─".repeat(60));
-                let config = Config::load()?;
-                let toml = toml::to_string_pretty(&config).map_err(|e| {
-                    ConfigError::ParseError(format!("Failed to serialize config: {}", e))
-                })?;
+                let mut config = Config::load()?;
+                // Redact password before display
+                if !config.usenet.password.is_empty() {
+                    config.usenet.password = "********".to_string();
+                }
+                let toml = config.display_toml()?;
                 println!("{}", toml);
                 println!("{}", "─".repeat(60));
             } else {
@@ -207,7 +197,6 @@ async fn handle_command(command: &Commands, cli: &Cli) -> Result<()> {
             println!("  • Parallel segment downloads");
             println!("  • Built-in PAR2 repair");
             println!("  • Automatic RAR extraction");
-            println!("  • Resume support");
             println!("  • JSON output for scripting");
             Ok(())
         }
@@ -268,6 +257,7 @@ async fn handle_list_mode(cli: &Cli) -> Result<()> {
             for file in nzb.files() {
                 let filename = Nzb::get_filename_from_subject(&file.subject)
                     .unwrap_or_else(|| file.subject.clone());
+                let display_name = sanitize_display(&filename);
                 let size: u64 = file.segments.segment.iter().map(|s| s.bytes).sum();
                 let file_type = if filename.to_lowercase().ends_with(".par2") {
                     "PAR2"
@@ -277,7 +267,7 @@ async fn handle_list_mode(cli: &Cli) -> Result<()> {
                 println!(
                     "  [{:4}] {} ({})",
                     file_type,
-                    filename,
+                    display_name,
                     human_bytes(size as f64)
                 );
             }
@@ -287,57 +277,30 @@ async fn handle_list_mode(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
+/// Create a styled spinner with the given message
+fn create_spinner(msg: &str) -> indicatif::ProgressBar {
+    use indicatif::{ProgressBar, ProgressStyle};
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::with_template("{spinner:.cyan} {msg}")
+            .unwrap()
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+    );
+    spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+    spinner.set_message(msg.to_string());
+    spinner
+}
+
 /// Handle download mode
-async fn handle_download_mode(cli: &Cli, mut config: Config) -> Result<()> {
+async fn handle_download_mode(cli: &Cli, config: Config) -> Result<()> {
     // Validate download-specific configuration (server credentials)
     config.validate_for_download()?;
-
-    // Apply CLI settings to config
-    if cli.no_directories {
-        config.download.create_subfolders = false;
-    }
-
-    if cli.no_par2 {
-        config.post_processing.auto_par2_repair = false;
-    }
-
-    if cli.no_extract_rar {
-        config.post_processing.auto_extract_rar = false;
-    }
-
-    if cli.delete_rar_after_extract {
-        config.post_processing.delete_rar_after_extract = true;
-    }
-
-    if cli.delete_par2 {
-        config.post_processing.delete_par2_after_repair = true;
-    }
-
-    // Update memory settings (from deprecated flags if present)
-    if let Some(memory_mb) = cli.memory_limit {
-        config.memory.max_segments_in_memory = (memory_mb * 1024 * 1024) / 100_000;
-        // Rough estimate
-    }
-    if let Some(buffer_kb) = cli.buffer_size {
-        config.memory.io_buffer_size = buffer_kb * 1024;
-    }
-    if let Some(concurrent) = cli.max_concurrent_files {
-        config.memory.max_concurrent_files = concurrent;
-    }
 
     // Create downloader with spinner (unless JSON output)
     let downloader = if cli.json {
         Downloader::new(config.clone()).await?
     } else {
-        use indicatif::{ProgressBar, ProgressStyle};
-        let spinner = ProgressBar::new_spinner();
-        spinner.set_style(
-            ProgressStyle::with_template("{spinner:.cyan} {msg}")
-                .unwrap()
-                .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
-        );
-        spinner.enable_steady_tick(std::time::Duration::from_millis(80));
-        spinner.set_message("Connecting to server...");
+        let spinner = create_spinner("Connecting to server...");
 
         let downloader = Downloader::new(config.clone()).await?;
 
@@ -381,20 +344,17 @@ async fn handle_download_mode(cli: &Cli, mut config: Config) -> Result<()> {
         let download_start = std::time::Instant::now();
 
         // Quick availability check (unless JSON mode or quiet)
+        let mut skip_message_ids: Option<std::collections::HashSet<String>> = None;
         if !cli.json && !cli.quiet {
-            use indicatif::{ProgressBar, ProgressStyle};
-            let spinner = ProgressBar::new_spinner();
-            spinner.set_style(
-                ProgressStyle::with_template("{spinner:.cyan} {msg}")
-                    .unwrap()
-                    .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
-            );
-            spinner.enable_steady_tick(std::time::Duration::from_millis(80));
-            spinner.set_message("Checking article availability...");
+            let spinner = create_spinner("Checking article availability...");
 
             match downloader.check_availability(&nzb).await {
                 Ok((available, missing, total, missing_ids)) => {
                     spinner.finish_and_clear();
+
+                    if !missing_ids.is_empty() {
+                        skip_message_ids = Some(missing_ids.clone());
+                    }
 
                     if missing > 0 {
                         let percent = (available as f64 / total as f64) * 100.0;
@@ -412,6 +372,8 @@ async fn handle_download_mode(cli: &Cli, mut config: Config) -> Result<()> {
                             })
                             .filter_map(|f| Nzb::get_filename_from_subject(&f.subject))
                             .collect();
+                        let missing_display: Vec<String> =
+                            missing_files.iter().map(|n| sanitize_display(n)).collect();
 
                         // Check if only non-essential files are missing (.nfo, .sfv, .srr)
                         let only_nonessential = missing_files.iter().all(|name| {
@@ -438,7 +400,7 @@ async fn handle_download_mode(cli: &Cli, mut config: Config) -> Result<()> {
                                 "\x1b[90mℹ {:.0}% available ({} missing: {})\x1b[0m",
                                 percent,
                                 missing,
-                                missing_files.join(", ")
+                                missing_display.join(", ")
                             );
                             // Continue without prompting
                         } else if can_likely_repair {
@@ -493,15 +455,12 @@ async fn handle_download_mode(cli: &Cli, mut config: Config) -> Result<()> {
         }
 
         // Download the NZB - handle 430s inline
-        match downloader.download_nzb(&nzb, download_config.clone()).await {
+        match downloader
+            .download_nzb(&nzb, download_config.clone(), skip_message_ids.as_ref())
+            .await
+        {
             Ok((results, _progress_bar)) => {
                 let download_time = download_start.elapsed();
-
-                if cli.print_names {
-                    for result in &results {
-                        println!("{}", result.path.display());
-                    }
-                }
 
                 // Post-processing
                 let mut post_result = PostProcessingResult {
@@ -510,6 +469,8 @@ async fn handle_download_mode(cli: &Cli, mut config: Config) -> Result<()> {
                     rar_extracted: false,
                     files_renamed: 0,
                 };
+                let mut post_outcome: Option<PostProcessingOutcome> = None;
+                let mut post_failed = false;
 
                 if config.post_processing.auto_par2_repair
                     || config.post_processing.auto_extract_rar
@@ -518,15 +479,33 @@ async fn handle_download_mode(cli: &Cli, mut config: Config) -> Result<()> {
                         download_config.post_processing.clone(),
                         download_config.tuning.large_file_threshold,
                     );
-                    if let Err(e) = processor.process_downloads(&results).await {
-                        if !cli.json {
-                            eprintln!("Post-processing error: {}", e);
+                    match processor.process_downloads(&results).await {
+                        Ok(outcome) => {
+                            post_result.par2_verified = outcome.par2_status == Par2Status::Success;
+                            post_result.par2_repaired = post_result.par2_verified;
+                            post_result.rar_extracted = outcome.rar_extracted;
+                            post_result.files_renamed = outcome.files_renamed;
+                            post_outcome = Some(outcome);
                         }
-                    } else {
-                        post_result.par2_verified = config.post_processing.auto_par2_repair;
-                        post_result.rar_extracted = config.post_processing.auto_extract_rar;
+                        Err(e) => {
+                            post_failed = true;
+                            if !cli.json {
+                                eprintln!("Post-processing error: {}", e);
+                            }
+                        }
                     }
                 }
+
+                let download_ok = results.iter().all(|r| r.segments_failed == 0);
+                let post_ok = if post_failed {
+                    false
+                } else if let Some(outcome) = post_outcome.as_ref() {
+                    outcome.par2_status != Par2Status::Failed
+                } else {
+                    true
+                };
+
+                let success = download_ok && post_ok;
 
                 // Output results
                 if cli.json {
@@ -534,7 +513,7 @@ async fn handle_download_mode(cli: &Cli, mut config: Config) -> Result<()> {
                     let summary = DownloadSummary {
                         nzb: nzb_path.clone(),
                         output_dir: output_dir.clone(),
-                        success: results.iter().all(|r| r.segments_failed == 0),
+                        success,
                         total_size,
                         download_time_seconds: download_time.as_secs_f64(),
                         average_speed_mbps: if download_time.as_secs() > 0 {
@@ -557,7 +536,13 @@ async fn handle_download_mode(cli: &Cli, mut config: Config) -> Result<()> {
                     };
                     println!("{}", serde_json::to_string_pretty(&summary)?);
                 } else {
-                    print_final_summary(&nzb, &results, &output_dir);
+                    print_final_summary(
+                        &nzb,
+                        &results,
+                        &output_dir,
+                        post_outcome.as_ref(),
+                        post_failed,
+                    );
                 }
 
                 all_results.extend(results);
@@ -568,9 +553,6 @@ async fn handle_download_mode(cli: &Cli, mut config: Config) -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&error_output)?);
                 } else {
                     eprintln!("Download failed for {}: {}", nzb_path.display(), e);
-                    if !cli.keep_partial {
-                        eprintln!("Note: Partial files may remain. Use --keep-partial to explicitly keep them.");
-                    }
                 }
             }
         }
@@ -589,6 +571,8 @@ fn print_final_summary(
     _nzb: &Nzb,
     results: &[dl_nzb::download::DownloadResult],
     output_dir: &std::path::Path,
+    post_outcome: Option<&PostProcessingOutcome>,
+    post_failed: bool,
 ) {
     use std::time::Duration;
 
@@ -614,12 +598,28 @@ fn print_final_summary(
 
     println!();
 
-    if failed_count == 0 {
+    let mut post_issue = false;
+    let mut post_issue_msg = None;
+    if post_failed {
+        post_issue = true;
+        post_issue_msg = Some("Post-processing failed");
+    } else if let Some(outcome) = post_outcome {
+        if outcome.par2_status == Par2Status::Failed {
+            post_issue = true;
+            post_issue_msg = Some("PAR2 verification failed");
+        }
+    }
+
+    if failed_count == 0 && !post_issue {
         if let Some(file) = main_file {
             let filename = file.file_name().to_string_lossy().to_string();
+            let display_name = sanitize_display(&filename);
             let file_size = file.metadata().ok().map(|m| m.len()).unwrap_or(0);
 
-            println!("\x1b[1;32m✓ Complete:\x1b[0m \x1b[37m{}\x1b[0m", filename);
+            println!(
+                "\x1b[1;32m✓ Complete:\x1b[0m \x1b[37m{}\x1b[0m",
+                display_name
+            );
             println!(
                 "  \x1b[90m└─\x1b[0m \x1b[34m{}\x1b[0m",
                 output_dir.display()
@@ -642,6 +642,16 @@ fn print_final_summary(
                 total_time.as_secs_f64()
             );
         }
+    } else if failed_count == 0 {
+        let issue = post_issue_msg.unwrap_or("Post-processing issues");
+        println!(
+            "\x1b[1;33m⚠ Completed with issues:\x1b[0m \x1b[37m{}\x1b[0m",
+            issue
+        );
+        println!(
+            "  \x1b[90m└─\x1b[0m \x1b[34m{}\x1b[0m",
+            output_dir.display()
+        );
     } else {
         println!(
             "\x1b[1;33m! Completed with {} file{} having errors\x1b[0m",
@@ -653,4 +663,8 @@ fn print_final_summary(
             output_dir.display()
         );
     }
+}
+
+fn sanitize_display(input: &str) -> String {
+    input.chars().filter(|c| !c.is_ascii_control()).collect()
 }

@@ -2,7 +2,7 @@
 name = "dl-nzb"
 version = "0.2.0"
 edition = "2021"
-rust-version = "1.75.0"
+rust-version = "1.85.0"
 authors = ["Zeph <zeph@example.com>"]
 description = "A fast, modern NZB downloader with built-in PAR2 repair and RAR extraction"
 readme = "README.md"
@@ -43,9 +43,9 @@ vendored-openssl = ["openssl/vendored"]
 
 [dependencies]
 # OpenSSL (explicit dependency for vendored feature support)
-openssl = { version = "0.10", optional = false }
+openssl = { version = "0.10", optional = true }
 # Async runtime and networking
-tokio = { version = "1.45", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros", "fs"] }
+tokio = { version = "1.45", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros", "fs", "signal"] }
 tokio-util = { version = "0.7", features = ["io", "codec"] }
 tokio-native-tls = "0.3"
 native-tls = "0.2"

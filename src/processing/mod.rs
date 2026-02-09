@@ -8,4 +8,5 @@ mod par2;
 mod post_processor;
 mod rar;
 
-pub use post_processor::PostProcessor;
+pub use par2::Par2Status;
+pub use post_processor::{PostProcessingOutcome, PostProcessor};

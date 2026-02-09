@@ -80,7 +80,6 @@ impl std::fmt::Debug for UsenetConfig {
 pub struct DownloadConfig {
     pub dir: PathBuf,
     pub create_subfolders: bool,
-    pub user_agent: String,
     #[serde(default)]
     pub force_redownload: bool,
 }
@@ -88,7 +87,6 @@ pub struct DownloadConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryConfig {
     pub max_segments_in_memory: usize,
-    pub io_buffer_size: usize,
     pub max_concurrent_files: usize,
 }
 
@@ -145,7 +143,6 @@ impl Default for DownloadConfig {
         Self {
             dir: PathBuf::from("downloads"),
             create_subfolders: true,
-            user_agent: format!("dl-nzb/{}", env!("CARGO_PKG_VERSION")),
             force_redownload: false,
         }
     }
@@ -155,8 +152,7 @@ impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
             max_segments_in_memory: 800, // Conservative: 800 concurrent segments (~20 per connection)
-            io_buffer_size: 8 * 1024 * 1024, // 8MB buffer (reduced from 16MB)
-            max_concurrent_files: 100,   // No longer throttles (downloader ignores this)
+            max_concurrent_files: 100,   // Max files downloading simultaneously
         }
     }
 }
@@ -188,7 +184,7 @@ impl Default for TuningConfig {
         Self {
             pipeline_size: 50,                      // Segments per connection batch
             connection_wait_timeout: 300,           // 5 minutes max wait
-            max_concurrent_connections: 10,         // Concurrent connection creation limit
+            max_concurrent_connections: 20,         // Concurrent connection creation limit
             large_file_threshold: 10 * 1024 * 1024, // 10MB for progress monitoring
         }
     }
@@ -328,7 +324,6 @@ impl Config {
 #
 # [memory]
 # max_segments_in_memory - How many segments to buffer (affects memory usage)
-# io_buffer_size        - Buffer size in bytes (8MB recommended for performance)
 # max_concurrent_files  - How many files to download simultaneously
 #
 # [post_processing]
@@ -359,17 +354,33 @@ impl Config {
         }
 
         // Validate memory settings
-        if self.memory.io_buffer_size < 1024 {
+        if self.memory.max_segments_in_memory == 0 {
             return Err(ConfigError::Invalid {
-                field: "io_buffer_size".to_string(),
-                reason: "Must be at least 1KB".to_string(),
+                field: "max_segments_in_memory".to_string(),
+                reason: "Must be at least 1".to_string(),
             }
             .into());
         }
 
-        if self.memory.max_segments_in_memory == 0 {
+        if self.memory.max_concurrent_files == 0 {
             return Err(ConfigError::Invalid {
-                field: "max_segments_in_memory".to_string(),
+                field: "max_concurrent_files".to_string(),
+                reason: "Must be at least 1".to_string(),
+            }
+            .into());
+        }
+
+        if self.tuning.pipeline_size == 0 {
+            return Err(ConfigError::Invalid {
+                field: "pipeline_size".to_string(),
+                reason: "Must be at least 1".to_string(),
+            }
+            .into());
+        }
+
+        if self.tuning.max_concurrent_connections == 0 {
+            return Err(ConfigError::Invalid {
+                field: "max_concurrent_connections".to_string(),
                 reason: "Must be at least 1".to_string(),
             }
             .into());
@@ -421,25 +432,17 @@ impl Config {
         Ok(())
     }
 
+    /// Display the configuration as TOML
+    pub fn display_toml(&self) -> Result<String> {
+        toml::to_string_pretty(self).map_err(|e| {
+            ConfigError::ParseError(format!("Failed to serialize config: {}", e)).into()
+        })
+    }
+
     /// Apply command-line overrides
     pub fn apply_overrides(&mut self, overrides: ConfigOverrides) {
-        if let Some(server) = overrides.server {
-            self.usenet.server = server;
-        }
-        if let Some(port) = overrides.port {
-            self.usenet.port = port;
-        }
-        if let Some(connections) = overrides.connections {
-            self.usenet.connections = connections;
-        }
-        if let Some(ssl) = overrides.ssl {
-            self.usenet.ssl = ssl;
-        }
         if let Some(dir) = overrides.download_dir {
             self.download.dir = dir;
-        }
-        if let Some(level) = overrides.log_level {
-            self.logging.level = level;
         }
     }
 }
@@ -447,12 +450,7 @@ impl Config {
 /// Command-line configuration overrides
 #[derive(Debug, Default)]
 pub struct ConfigOverrides {
-    pub server: Option<String>,
-    pub port: Option<u16>,
-    pub connections: Option<u16>,
-    pub ssl: Option<bool>,
     pub download_dir: Option<PathBuf>,
-    pub log_level: Option<String>,
 }
 
 #[cfg(test)]
@@ -463,7 +461,7 @@ mod tests {
     fn test_default_config() {
         let config = Config::default();
         assert_eq!(config.usenet.connections, 20); // Conservative default
-        assert_eq!(config.memory.io_buffer_size, 8 * 1024 * 1024);
+        assert_eq!(config.memory.max_concurrent_files, 100);
     }
 
     #[test]

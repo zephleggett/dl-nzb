@@ -12,9 +12,6 @@ use deadpool::managed::{Manager, Pool, RecycleResult};
 use std::sync::Arc;
 use tokio::time::Duration;
 
-/// Maximum concurrent connection creation attempts to avoid overwhelming the server
-const MAX_CONCURRENT_CONNECTION_CREATION: usize = 10;
-
 /// Connection manager for deadpool with rate-limited creation
 pub struct NntpConnectionManager {
     config: Arc<UsenetConfig>,
@@ -23,7 +20,10 @@ pub struct NntpConnectionManager {
 }
 
 impl NntpConnectionManager {
-    pub fn new(config: UsenetConfig) -> Result<Self, DlNzbError> {
+    pub fn new(
+        config: UsenetConfig,
+        max_concurrent_connections: usize,
+    ) -> Result<Self, DlNzbError> {
         // Create shared TLS connector for session reuse
         let tls_connector = if config.ssl {
             let mut tls_builder = native_tls::TlsConnector::builder();
@@ -42,9 +42,8 @@ impl NntpConnectionManager {
         };
 
         // Rate limit connection creation to avoid overwhelming server
-        let creation_semaphore = Arc::new(tokio::sync::Semaphore::new(
-            MAX_CONCURRENT_CONNECTION_CREATION,
-        ));
+        let limit = max_concurrent_connections.max(1);
+        let creation_semaphore = Arc::new(tokio::sync::Semaphore::new(limit));
 
         Ok(Self {
             config: Arc::new(config),
@@ -132,18 +131,21 @@ pub struct NntpPoolBuilder {
     config: UsenetConfig,
     max_size: usize,
     timeouts: deadpool::managed::Timeouts,
+    max_concurrent_connections: usize,
 }
 
 impl NntpPoolBuilder {
     pub fn new(config: UsenetConfig) -> Self {
+        let max_size = config.connections as usize;
         Self {
-            max_size: config.connections as usize,
+            max_size,
             config,
             timeouts: deadpool::managed::Timeouts {
                 wait: Some(Duration::from_secs(30)), // Reduced from 120s for faster failure
                 create: Some(Duration::from_secs(30)),
                 recycle: Some(Duration::from_secs(5)),
             },
+            max_concurrent_connections: max_size,
         }
     }
 
@@ -157,8 +159,13 @@ impl NntpPoolBuilder {
         self
     }
 
+    pub fn max_concurrent_connections(mut self, limit: usize) -> Self {
+        self.max_concurrent_connections = limit.max(1);
+        self
+    }
+
     pub fn build(self) -> Result<NntpPool, DlNzbError> {
-        let manager = NntpConnectionManager::new(self.config)?;
+        let manager = NntpConnectionManager::new(self.config, self.max_concurrent_connections)?;
         Pool::builder(manager)
             .max_size(self.max_size)
             .runtime(deadpool::Runtime::Tokio1)
@@ -194,19 +201,5 @@ impl NntpPoolExt for NntpPool {
             }
         })?;
         Ok(PooledConnection { conn })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::UsenetConfig;
-
-    #[tokio::test]
-    async fn test_pool_builder() {
-        let config = UsenetConfig::default();
-        let result = NntpPoolBuilder::new(config).max_size(10).build();
-        // Pool creation should succeed even if we can't connect
-        assert!(result.is_ok() || result.is_err());
     }
 }

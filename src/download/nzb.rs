@@ -1,9 +1,14 @@
 pub use nzb_rs::Nzb as NzbRs;
+use once_cell::sync::Lazy;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::str::FromStr;
 
 use crate::error::{DlNzbError, NzbError};
+
+static SUBJECT_FILENAME_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"(?:&quot;|")([^"]+)(?:&quot;|")"#).expect("valid regex"));
 
 type Result<T> = std::result::Result<T, DlNzbError>;
 
@@ -84,7 +89,7 @@ impl Nzb {
 
                 NzbFile {
                     poster: file.poster.clone(),
-                    date: file.posted_at.timestamp() as u64,
+                    date: file.posted_at.timestamp().max(0) as u64,
                     subject: file.subject.clone(),
                     groups: NzbGroups { group: groups },
                     segments: NzbSegments { segment: segments },
@@ -95,7 +100,7 @@ impl Nzb {
         Ok(Nzb { files })
     }
 
-    pub fn files(&self) -> &Vec<NzbFile> {
+    pub fn files(&self) -> &[NzbFile] {
         &self.files
     }
 
@@ -115,10 +120,8 @@ impl Nzb {
     }
 
     pub fn get_filename_from_subject(subject: &str) -> Option<String> {
-        // Extract filename from subject line like: [1/9] - "filename.ext" yEnc (1/5202)
-        // Handle both regular quotes and HTML entities (&quot;)
-        let re = regex::Regex::new(r#"(?:&quot;|")([^"]+)(?:&quot;|")"#).ok()?;
-        re.captures(subject)
+        SUBJECT_FILENAME_REGEX
+            .captures(subject)
             .and_then(|caps| caps.get(1))
             .map(|m| m.as_str().to_string())
     }

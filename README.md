@@ -2,7 +2,7 @@
 
 NZB downloader written in Rust. Downloads from Usenet with parallel connections, PAR2 repair, and RAR extraction.
 
-Single binary, no external dependencies. PAR2 uses [par2-rs](https://github.com/zephleggett/par2-rs) (pure Rust with SIMD). RAR extraction built in.
+PAR2 uses [par2-rs](https://github.com/zephleggett/par2-rs) (pure Rust with SIMD). RAR extraction built in.
 
 ## Install
 
@@ -44,20 +44,11 @@ connections = 20
 ```bash
 dl-nzb file.nzb                    # download
 dl-nzb -o /path/to/dir file.nzb   # custom output dir
-dl-nzb -c 50 file.nzb             # more connections
 dl-nzb -l file.nzb                # list contents only
+dl-nzb -f file.nzb                # force re-download
 dl-nzb test                        # test server connection
+dl-nzb config                      # show config location and values
 dl-nzb --json file.nzb            # JSON output for scripting
-```
-
-Skip post-processing:
-```bash
-dl-nzb --no-par2 --no-extract-rar file.nzb
-```
-
-Clean up after extraction:
-```bash
-dl-nzb --delete-rar-after-extract --delete-par2 file.nzb
 ```
 
 ## Config Reference
@@ -89,12 +80,12 @@ deobfuscate_file_names = true
 
 [memory]
 max_segments_in_memory = 800
-io_buffer_size = 8388608      # 8MB
 max_concurrent_files = 100
 
 [tuning]
 pipeline_size = 50            # segments per batch
 connection_wait_timeout = 300 # seconds
+max_concurrent_connections = 20 # parallel connection creation (raise for faster ramp)
 large_file_threshold = 10485760  # 10MB, for progress display
 
 [logging]
@@ -110,32 +101,21 @@ DL_NZB_USENET_SERVER=news.example.com dl-nzb file.nzb
 ## CLI Options
 
 ```
-dl-nzb [OPTIONS] <FILES>...
+dl-nzb [OPTIONS] [FILES]...
 dl-nzb <COMMAND>
 
 Commands:
-  test    Test server connection
-  config  Show config location
+  test     Test server connection
+  config   Show configuration
+  version  Show version information
 
 Options:
-  -o, --output-dir <DIR>       Output directory
-  -c, --connections <NUM>      Connection count
-  -l, --list                   List NZB contents
-  -q, --quiet                  Suppress output
-  -v, --verbose                Verbose (-vv for trace)
-  --json                       JSON output
-  --no-par2                    Skip PAR2 repair
-  --no-extract-rar             Skip RAR extraction
-  --delete-rar-after-extract   Delete RARs after extract
-  --delete-par2                Delete PAR2 after repair
-  --no-directories             No subfolders
-  --force                      Re-download existing files
-  --keep-partial               Keep partial files on error
-  --print-names                Print filenames to stdout
-  --server <HOST>              Override server
-  --port <PORT>                Override port
-  -u, --user <USER>            Override username
-  -p, --password <PASS>        Override password
+  -o, --output <DIR>    Output directory
+  -l, --list            List NZB contents
+  -q, --quiet           Suppress output
+  -v, --verbose         Verbose (-vv for debug)
+  -f, --force           Force re-download (overwrite existing)
+  --json                JSON output for scripting
 ```
 
 ## JSON Output

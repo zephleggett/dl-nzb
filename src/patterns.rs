@@ -28,7 +28,7 @@ pub mod rar {
     /// Returns true for:
     /// - Single RAR files (archive.rar)
     /// - First part of multi-part archives (archive.part01.rar, archive.part001.rar)
-    /// Does NOT return true for:
+    ///   Does NOT return true for:
     /// - Later parts (.part02.rar, .part003.rar, etc.)
     /// - Old-style splits (.r00, .r01, etc.) - these are handled via the main .rar
     pub fn is_extractable_archive(path: &Path) -> bool {

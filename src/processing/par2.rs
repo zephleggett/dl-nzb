@@ -46,9 +46,9 @@ pub async fn repair_with_par2(
 
     let mut par2_files = downloaded_par2_files.to_vec();
 
-    // Count total files to scan for progress tracking
-    let total_files = files_before.len() as u64;
-    progress_bar.set_length(total_files);
+    // Use a fixed scale to keep progress monotonic across PAR2 stages
+    let progress_scale = 1000u64;
+    progress_bar.set_length(progress_scale);
     progress::apply_style(progress_bar, progress::ProgressStyle::Par2);
 
     // Find the main PAR2 file (index file without .vol)
@@ -59,7 +59,7 @@ pub async fn repair_with_par2(
         par2_files.sort_by_key(|p| p.metadata().ok().map(|m| m.len()).unwrap_or(u64::MAX));
         par2_files
             .first()
-            .ok_or_else(|| PostProcessingError::Par2(par2_rs::Par2Error::NotFound))?
+            .ok_or(PostProcessingError::Par2(par2_rs::Par2Error::NotFound))?
     };
 
     progress_bar.set_position(0);
@@ -83,8 +83,19 @@ pub async fn repair_with_par2(
     let pb_clone = progress_bar.clone();
     let counts_for_progress = counts.clone();
     let progress_callback: ProgressCallback = Arc::new(move |operation, current, total| {
-        pb_clone.set_length(total);
-        pb_clone.set_position(current);
+        let (base, span) = match operation {
+            Par2Operation::Scanning => (0.0, 0.15),
+            Par2Operation::Loading => (0.15, 0.1),
+            Par2Operation::Verifying => (0.25, 0.55),
+            Par2Operation::Repairing => (0.8, 0.2),
+        };
+        let pct = if total > 0 {
+            (current as f64 / total as f64).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let overall = ((base + span * pct) * progress_scale as f64).round() as u64;
+        pb_clone.set_position(overall.min(progress_scale));
 
         match operation {
             Par2Operation::Scanning => {
@@ -151,7 +162,7 @@ pub async fn repair_with_par2(
         Some(message_callback),
     ) {
         Ok(()) => {
-            progress_bar.set_position(total_files);
+            progress_bar.set_position(progress_scale);
 
             // Check if any files were renamed
             let files_after: HashSet<String> = std::fs::read_dir(download_dir)?

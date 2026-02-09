@@ -2,7 +2,6 @@
 //!
 //! Provides a unified interface for displaying progress across downloads and post-processing.
 
-use human_bytes::human_bytes;
 use indicatif::{ProgressBar, ProgressStyle as IndicatifStyle};
 use std::time::Duration;
 
@@ -105,30 +104,5 @@ pub fn apply_style(bar: &ProgressBar, style: ProgressStyle) {
                 .progress_chars("━━╸ "),
             );
         }
-    }
-}
-
-/// Format a download summary message
-pub fn format_download_summary(
-    files_count: usize,
-    total_files: usize,
-    bytes_downloaded: u64,
-    failed_files: usize,
-) -> String {
-    if failed_files == 0 {
-        format!(
-            "({}/{})✓ Downloaded {}",
-            files_count,
-            total_files,
-            human_bytes(bytes_downloaded as f64)
-        )
-    } else {
-        format!(
-            "({}/{})! Downloaded {} ({} files with errors)",
-            files_count,
-            total_files,
-            human_bytes(bytes_downloaded as f64),
-            failed_files
-        )
     }
 }

@@ -1,13 +1,15 @@
+use bytes::Bytes;
 use futures::stream::{self, StreamExt};
 use indicatif::ProgressBar;
 
-use std::path::PathBuf;
+use std::cmp::Reverse;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::fs::File;
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-use tokio::sync::Mutex;
+
+use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 
 use super::nzb::{Nzb, NzbFile};
 use crate::config::Config;
@@ -40,6 +42,7 @@ impl Downloader {
     pub async fn new(config: Config) -> Result<Self> {
         let pool = NntpPoolBuilder::new(config.usenet.clone())
             .max_size(config.usenet.connections as usize)
+            .max_concurrent_connections(config.tuning.max_concurrent_connections)
             .build()?;
 
         Ok(Self { pool })
@@ -106,10 +109,12 @@ impl Downloader {
 
         // Flatten results and collect missing first-segment message IDs
         let mut available = 0;
+        let mut checked = 0;
         let mut missing_first_segments: HashSet<String> = HashSet::new();
 
         for results in all_results {
             for (msg_id, exists) in results {
+                checked += 1;
                 if exists {
                     available += 1;
                 } else {
@@ -118,7 +123,7 @@ impl Downloader {
             }
         }
 
-        let total = sample_requests.len();
+        let total = checked;
         let missing = total - available;
 
         Ok((available, missing, total, missing_first_segments))
@@ -130,6 +135,7 @@ impl Downloader {
         &self,
         nzb: &Nzb,
         config: Config,
+        skip_message_ids: Option<&std::collections::HashSet<String>>,
     ) -> Result<(Vec<DownloadResult>, ProgressBar)> {
         config.ensure_dirs()?;
 
@@ -156,16 +162,15 @@ impl Downloader {
             progress::create_progress_bar(total_bytes, progress::ProgressStyle::Download);
         progress_bar.set_message(format!("({}/{})", 0, total_files));
 
-        // Download available files concurrently
         let results = self
-            .download_files_concurrent_with_config(&all_files, progress_bar.clone(), config)
+            .download_files_with_workers(&all_files, progress_bar.clone(), config, skip_message_ids)
             .await?;
 
         // Finish the progress bar with clean formatting
         let total_downloaded: u64 = results.iter().map(|r| r.size).sum();
         let failed_files = results.iter().filter(|r| r.segments_failed > 0).count();
 
-        progress_bar.set_position(total_bytes);
+        progress_bar.set_position(total_downloaded.min(total_bytes));
 
         if failed_files == 0 {
             progress_bar.finish_with_message(format!(
@@ -197,383 +202,690 @@ impl Downloader {
         Ok((results, progress_bar))
     }
 
-    /// Download multiple files concurrently with custom config
-    async fn download_files_concurrent_with_config(
+    async fn download_files_with_workers(
         &self,
         files: &[&NzbFile],
         progress_bar: ProgressBar,
         config: Config,
+        skip_message_ids: Option<&std::collections::HashSet<String>>,
     ) -> Result<Vec<DownloadResult>> {
         let total_files = files.len();
-        let completed_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let completed_count = Arc::new(AtomicUsize::new(0));
+        let mut results = Vec::new();
+        let mut file_states: Vec<Arc<FileState>> = Vec::new();
 
-        // Wrap config in Arc to avoid cloning per-file (Config contains strings and paths)
-        let config = std::sync::Arc::new(config);
+        let max_concurrent_files = config.memory.max_concurrent_files.max(1);
+        let file_limit = Arc::new(Semaphore::new(max_concurrent_files));
+
+        let pipeline_size = config.tuning.pipeline_size.max(1);
+        let batch_capacity = (config
+            .memory
+            .max_segments_in_memory
+            .saturating_div(pipeline_size)
+            .max(1))
+        .max(config.usenet.connections as usize);
+        let write_capacity = config.memory.max_segments_in_memory.max(1);
+        let retry_attempts = config.usenet.retry_attempts as usize;
+        let retry_delay = Duration::from_millis(config.usenet.retry_delay);
+
+        let (batch_tx, batch_rx) = mpsc::channel::<SegmentBatch>(batch_capacity);
+        let (write_tx, write_rx) = mpsc::channel::<WriteJob>(write_capacity);
+
+        let writer_handle = tokio::spawn(run_writer(
+            write_rx,
+            progress_bar.clone(),
+            completed_count.clone(),
+            total_files,
+        ));
+
+        let worker_count = config.usenet.connections as usize;
+        let shared_rx = Arc::new(tokio::sync::Mutex::new(batch_rx));
+        let mut worker_handles = Vec::with_capacity(worker_count);
+        for _ in 0..worker_count {
+            let rx = shared_rx.clone();
+            let pool = self.pool.clone();
+            let write_tx = write_tx.clone();
+            let progress = progress_bar.clone();
+            let wait_timeout = Duration::from_secs(config.tuning.connection_wait_timeout);
+            worker_handles.push(tokio::spawn(download_worker(
+                rx,
+                pool,
+                write_tx,
+                progress,
+                wait_timeout,
+                retry_attempts,
+                retry_delay,
+            )));
+        }
+        drop(write_tx);
 
         // Sort files by size (largest first) to maximize initial throughput
-        let mut sorted_files: Vec<&NzbFile> = files.iter().copied().collect();
-        sorted_files.sort_by_key(|f| std::cmp::Reverse(f.segments.segment.len()));
+        let mut sorted_files: Vec<&NzbFile> = files.to_vec();
+        sorted_files.sort_by_key(|f| Reverse(f.segments.segment.len()));
 
-        let download_futures = sorted_files.iter().map(|file| {
-            let pool = self.pool.clone();
-            let config = config.clone();
-            let file = (*file).clone();
-            let progress = progress_bar.clone();
-            let completed = completed_count.clone();
+        for file in sorted_files {
+            let raw_filename = Nzb::get_filename_from_subject(&file.subject)
+                .unwrap_or_else(|| format!("unknown_file_{}", file.date));
+            let filename = sanitize_filename(&raw_filename, &format!("unknown_file_{}", file.date));
 
-            async move {
-                let result =
-                    Self::download_file_with_pool(file, &config, pool, progress.clone()).await;
+            let output_path = config.download.dir.join(&filename);
 
-                // Update file counter (only update every 5 files to reduce overhead)
-                let count = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            // Calculate expected size
+            let expected_size: u64 = file.segments.segment.iter().map(|s| s.bytes).sum();
+
+            let group = match file.groups.group.first() {
+                Some(g) => g.name.clone(),
+                None => {
+                    eprintln!("Missing group for {}, skipping", filename);
+                    results.push(DownloadResult {
+                        filename,
+                        path: output_path,
+                        size: 0,
+                        segments_downloaded: 0,
+                        segments_failed: file.segments.segment.len(),
+                        download_time: Duration::from_secs(0),
+                        average_speed: 0.0,
+                        failed_message_ids: Vec::new(),
+                    });
+                    let count = completed_count.fetch_add(1, Ordering::Relaxed) + 1;
+                    if count % 5 == 0 || count == total_files {
+                        progress_bar.set_message(format!("({}/{})", count, total_files));
+                    }
+                    continue;
+                }
+            };
+
+            let permit = match file_limit.clone().acquire_owned().await {
+                Ok(p) => p,
+                Err(_) => break,
+            };
+
+            let std_file = match create_preallocated_file(&output_path, expected_size).await {
+                Ok(file) => file,
+                Err(e) => {
+                    eprintln!("Failed to create {}: {}", output_path.display(), e);
+                    drop(permit);
+                    results.push(DownloadResult {
+                        filename,
+                        path: output_path,
+                        size: 0,
+                        segments_downloaded: 0,
+                        segments_failed: file.segments.segment.len(),
+                        download_time: Duration::from_secs(0),
+                        average_speed: 0.0,
+                        failed_message_ids: Vec::new(),
+                    });
+                    let count = completed_count.fetch_add(1, Ordering::Relaxed) + 1;
+                    if count % 5 == 0 || count == total_files {
+                        progress_bar.set_message(format!("({}/{})", count, total_files));
+                    }
+                    continue;
+                }
+            };
+
+            // Count only segments that will actually be processed (excluding skipped)
+            let active_segments = if let Some(skip_ids) = skip_message_ids {
+                file.segments
+                    .segment
+                    .iter()
+                    .filter(|s| !skip_ids.contains(&s.message_id))
+                    .count()
+            } else {
+                file.segments.segment.len()
+            };
+
+            // If all segments are skipped, skip this file entirely
+            if active_segments == 0 {
+                drop(permit);
+                let count = completed_count.fetch_add(1, Ordering::Relaxed) + 1;
                 if count % 5 == 0 || count == total_files {
-                    progress.set_message(format!("({}/{})", count, total_files));
+                    progress_bar.set_message(format!("({}/{})", count, total_files));
+                }
+                continue;
+            }
+
+            let state = Arc::new(FileState::new(
+                filename.clone(),
+                output_path.clone(),
+                active_segments,
+                permit,
+            ));
+            file_states.push(state.clone());
+
+            let handle = Arc::new(FileHandle {
+                file: Arc::new(std_file),
+                state,
+            });
+
+            let mut offset = 0u64;
+            let mut batch_segments: Vec<SegmentMeta> = Vec::with_capacity(pipeline_size);
+
+            for segment in &file.segments.segment {
+                // Skip segments known to be missing from availability check
+                if let Some(skip_ids) = skip_message_ids {
+                    if skip_ids.contains(&segment.message_id) {
+                        offset = offset.saturating_add(segment.bytes);
+                        continue;
+                    }
                 }
 
-                result
-            }
-        });
+                batch_segments.push(SegmentMeta {
+                    message_id: segment.message_id.clone(),
+                    segment_number: segment.number,
+                    offset,
+                });
+                offset = offset.saturating_add(segment.bytes);
 
-        // Process downloads with bounded concurrency to prevent pool exhaustion
-        // Each file uses multiple connections for its batches, so limit concurrent files
-        // to avoid total_batches = files × batches_per_file >> pool_size
-        let max_concurrent_files = (config.usenet.connections as usize / 5).max(2);
-        let results: Vec<Result<DownloadResult>> = stream::iter(download_futures)
-            .buffer_unordered(max_concurrent_files)
-            .collect()
-            .await;
+                if batch_segments.len() == pipeline_size {
+                    let batch = SegmentBatch {
+                        file: handle.clone(),
+                        group: group.clone(),
+                        segments: std::mem::take(&mut batch_segments),
+                    };
 
-        // Collect successful results
-        let mut successful_results = Vec::new();
-        for result in results {
-            match result {
-                Ok(download_result) => successful_results.push(download_result),
-                Err(e) => eprintln!("Download failed: {}", e),
-            }
-        }
-
-        Ok(successful_results)
-    }
-
-    /// Download a single file using the connection pool
-    /// Uses direct file writes with seek to avoid buffering all segments in memory
-    async fn download_file_with_pool(
-        file: NzbFile,
-        config: &Config,
-        pool: NntpPool,
-        progress_bar: ProgressBar,
-    ) -> Result<DownloadResult> {
-        let filename = Nzb::get_filename_from_subject(&file.subject)
-            .unwrap_or_else(|| format!("unknown_file_{}", file.date));
-
-        let output_path = config.download.dir.join(&filename);
-
-        // Calculate expected size and segment offsets
-        let segment_sizes: Vec<u64> = file.segments.segment.iter().map(|s| s.bytes).collect();
-        let expected_size: u64 = segment_sizes.iter().sum();
-
-        // Pre-calculate byte offsets for each segment
-        let mut segment_offsets: Vec<u64> = Vec::with_capacity(segment_sizes.len());
-        let mut offset = 0u64;
-        for &size in &segment_sizes {
-            segment_offsets.push(offset);
-            offset += size;
-        }
-
-        // Check if file already exists with correct size and valid content
-        if !config.download.force_redownload {
-            if let Ok(metadata) = tokio::fs::metadata(&output_path).await {
-                if metadata.len() == expected_size {
-                    // Verify file has real content (not zero-filled from pre-allocation)
-                    let is_valid = Self::verify_file_has_content(&output_path)
-                        .await
-                        .unwrap_or(false);
-
-                    if is_valid {
-                        // File is complete - add its size to progress
-                        progress_bar.inc(expected_size);
-                        if !progress_bar.is_hidden() {
-                            progress_bar
-                                .println(format!("  \x1b[90m↳ Skipping: {}\x1b[0m", filename));
-                        }
-                        return Ok(DownloadResult {
-                            filename,
-                            path: output_path,
-                            size: expected_size,
-                            segments_downloaded: file.segments.segment.len(),
-                            segments_failed: 0,
-                            download_time: Duration::from_secs(0),
-                            average_speed: 0.0,
-                            failed_message_ids: Vec::new(),
-                        });
+                    if batch_tx.send(batch).await.is_err() {
+                        break;
                     }
                 }
             }
+
+            if !batch_segments.is_empty() {
+                let batch = SegmentBatch {
+                    file: handle.clone(),
+                    group: group.clone(),
+                    segments: batch_segments,
+                };
+
+                if batch_tx.send(batch).await.is_err() {
+                    break;
+                }
+            }
         }
 
-        let start_time = Instant::now();
+        drop(batch_tx);
 
-        // Create and pre-allocate output file
-        let output_file = File::create(&output_path).await?;
-        output_file.set_len(expected_size).await?;
+        for handle in worker_handles {
+            let _ = handle.await;
+        }
+        let _ = writer_handle.await;
 
-        // Shared file handle for concurrent writes
-        let shared_file = Arc::new(Mutex::new(output_file));
+        for state in file_states {
+            let end_time = state
+                .end_time
+                .lock()
+                .ok()
+                .and_then(|t| *t)
+                .unwrap_or_else(Instant::now);
+            let download_time = end_time.duration_since(state.start_time);
+            let bytes_written = state.bytes_written.load(Ordering::Relaxed);
+            let average_speed = if download_time.as_secs() > 0 {
+                (bytes_written as f64 / 1024.0 / 1024.0) / download_time.as_secs_f64()
+            } else {
+                0.0
+            };
 
-        // Shared statistics using atomics
-        let segments_downloaded = Arc::new(AtomicUsize::new(0));
-        let segments_failed = Arc::new(AtomicUsize::new(0));
-        let actual_size = Arc::new(AtomicU64::new(0));
-        let failed_message_ids = Arc::new(Mutex::new(Vec::new()));
+            let failed_ids = state
+                .failed_message_ids
+                .lock()
+                .map(|ids| ids.clone())
+                .unwrap_or_default();
 
-        // Prepare segment downloads using pipelining
-        let group = &file.groups.group[0].name;
+            let segments_failed = state.segments_failed.load(Ordering::Relaxed);
 
-        // Create segment requests with their offsets
-        let segment_requests: Vec<(SegmentRequest, u64)> = file
+            results.push(DownloadResult {
+                filename: state.filename.clone(),
+                path: state.path.clone(),
+                size: bytes_written,
+                segments_downloaded: state.segments_downloaded.load(Ordering::Relaxed),
+                segments_failed,
+                download_time,
+                average_speed,
+                failed_message_ids: failed_ids,
+            });
+        }
+
+        Ok(results)
+    }
+}
+
+#[derive(Clone)]
+struct SegmentMeta {
+    message_id: String,
+    segment_number: u32,
+    offset: u64,
+}
+
+struct SegmentBatch {
+    file: Arc<FileHandle>,
+    group: String,
+    segments: Vec<SegmentMeta>,
+}
+
+struct FileHandle {
+    file: Arc<std::fs::File>,
+    state: Arc<FileState>,
+}
+
+struct FileState {
+    filename: String,
+    path: PathBuf,
+    segments_total: usize,
+    start_time: Instant,
+    end_time: Mutex<Option<Instant>>,
+    segments_done: AtomicUsize,
+    segments_downloaded: AtomicUsize,
+    segments_failed: AtomicUsize,
+    bytes_written: AtomicU64,
+    max_byte_position: AtomicU64,
+    failed_message_ids: Mutex<Vec<String>>,
+    file_limit_permit: Mutex<Option<OwnedSemaphorePermit>>,
+}
+
+impl FileState {
+    fn new(
+        filename: String,
+        path: PathBuf,
+        segments_total: usize,
+        permit: OwnedSemaphorePermit,
+    ) -> Self {
+        Self {
+            filename,
+            path,
+            segments_total,
+            start_time: Instant::now(),
+            end_time: Mutex::new(None),
+            segments_done: AtomicUsize::new(0),
+            segments_downloaded: AtomicUsize::new(0),
+            segments_failed: AtomicUsize::new(0),
+            bytes_written: AtomicU64::new(0),
+            max_byte_position: AtomicU64::new(0),
+            failed_message_ids: Mutex::new(Vec::new()),
+            file_limit_permit: Mutex::new(Some(permit)),
+        }
+    }
+
+    fn mark_done(&self) -> bool {
+        let done = self.segments_done.fetch_add(1, Ordering::AcqRel) + 1;
+        if done == self.segments_total {
+            if let Ok(mut end_time) = self.end_time.lock() {
+                if end_time.is_none() {
+                    *end_time = Some(Instant::now());
+                }
+            }
+            if let Ok(mut permit) = self.file_limit_permit.lock() {
+                permit.take();
+            }
+            return true;
+        }
+        false
+    }
+}
+
+enum WriteJob {
+    Write {
+        file: Arc<FileHandle>,
+        offset: u64,
+        data: Bytes,
+        message_id: String,
+    },
+    Failed {
+        file: Arc<FileHandle>,
+        message_id: String,
+    },
+}
+
+async fn download_worker(
+    rx: Arc<tokio::sync::Mutex<mpsc::Receiver<SegmentBatch>>>,
+    pool: NntpPool,
+    write_tx: mpsc::Sender<WriteJob>,
+    progress: ProgressBar,
+    wait_timeout: Duration,
+    retry_attempts: usize,
+    retry_delay: Duration,
+) {
+    let mut conn = None;
+
+    loop {
+        let batch = {
+            let mut locked = rx.lock().await;
+            locked.recv().await
+        };
+
+        let batch = match batch {
+            Some(b) => b,
+            None => break,
+        };
+
+        let requests: Vec<SegmentRequest> = batch
             .segments
-            .segment
             .iter()
-            .enumerate()
-            .map(|(idx, segment)| {
-                (
-                    SegmentRequest {
-                        message_id: segment.message_id.clone(),
-                        group: group.clone(),
-                        segment_number: segment.number,
-                    },
-                    segment_offsets[idx],
-                )
+            .map(|segment| SegmentRequest {
+                message_id: segment.message_id.clone(),
+                group: batch.group.clone(),
+                segment_number: segment.segment_number,
             })
             .collect();
 
-        // Pipeline size: how many segments to request per connection
-        let pipeline_size = config.tuning.pipeline_size;
-        let num_connections = config.usenet.connections as usize;
-        let connection_wait_timeout = config.tuning.connection_wait_timeout;
+        let mut attempt = 0usize;
+        loop {
+            if conn.is_none() {
+                conn = get_connection_with_retry(&pool, wait_timeout, &progress).await;
+            }
 
-        // Split into batches for pipelining
-        let batches: Vec<Vec<(SegmentRequest, u64)>> = segment_requests
-            .chunks(pipeline_size)
-            .map(|chunk| chunk.to_vec())
-            .collect();
+            let Some(conn_ref) = conn.as_mut() else {
+                attempt += 1;
+                if attempt > retry_attempts {
+                    if progress.is_hidden() {
+                        eprintln!("Warning: Could not get connection for batch");
+                    } else {
+                        progress
+                            .println("  \x1b[33m⚠ Connection unavailable, batch skipped\x1b[0m");
+                    }
 
-        // Download batches in parallel and write directly to file
-        let batch_futures = batches.into_iter().map(|batch| {
-            let pool = pool.clone();
-            let progress = progress_bar.clone();
-            let shared_file = shared_file.clone();
-            let segments_downloaded = segments_downloaded.clone();
-            let segments_failed = segments_failed.clone();
-            let actual_size = actual_size.clone();
-            let failed_message_ids = failed_message_ids.clone();
-
-            async move {
-                // Get connection from pool with patient retry
-                let mut conn = None;
-                let mut attempt = 0u32;
-                let start = Instant::now();
-                let max_wait = Duration::from_secs(connection_wait_timeout);
-
-                while conn.is_none() && start.elapsed() < max_wait {
-                    if attempt > 0 {
-                        let delay = Duration::from_millis(500) * (1 << attempt.min(4));
-                        tokio::time::sleep(delay).await;
-
-                        if attempt % 5 == 0 && !progress.is_hidden() {
-                            progress.println(format!(
-                                "  \x1b[90m⏳ Waiting for connection... ({:.0}s)\x1b[0m",
-                                start.elapsed().as_secs_f64()
-                            ));
+                    for segment in &batch.segments {
+                        if write_tx
+                            .send(WriteJob::Failed {
+                                file: batch.file.clone(),
+                                message_id: segment.message_id.clone(),
+                            })
+                            .await
+                            .is_err()
+                        {
+                            return;
                         }
                     }
-
-                    match tokio::time::timeout(Duration::from_secs(60), pool.get_connection()).await
-                    {
-                        Ok(Ok(c)) => conn = Some(c),
-                        Ok(Err(_)) | Err(_) => attempt += 1,
-                    }
+                    break;
                 }
 
-                let mut conn = match conn {
-                    Some(c) => c,
-                    None => {
-                        if progress.is_hidden() {
-                            eprintln!(
-                                "  Warning: Could not get connection after {:?}",
-                                start.elapsed()
-                            );
-                        } else {
-                            progress.println(format!(
-                                "  \x1b[33m⚠ Connection unavailable, batch skipped\x1b[0m"
-                            ));
+                let delay = retry_delay.max(Duration::from_millis(100));
+                let backoff = delay.checked_mul(1 << attempt.min(4)).unwrap_or(delay);
+                tokio::time::sleep(backoff).await;
+                continue;
+            };
+
+            let result = match conn_ref.download_segments_pipelined(&requests).await {
+                Ok(results) => {
+                    let mut remaining: HashMap<u32, &SegmentMeta> = batch
+                        .segments
+                        .iter()
+                        .map(|segment| (segment.segment_number, segment))
+                        .collect();
+
+                    for (seg_num, data) in results {
+                        let Some(segment) = remaining.remove(&seg_num) else {
+                            continue;
+                        };
+
+                        if let Some(bytes) = data {
+                            if write_tx
+                                .send(WriteJob::Write {
+                                    file: batch.file.clone(),
+                                    offset: segment.offset,
+                                    data: bytes,
+                                    message_id: segment.message_id.clone(),
+                                })
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        } else if write_tx
+                            .send(WriteJob::Failed {
+                                file: batch.file.clone(),
+                                message_id: segment.message_id.clone(),
+                            })
+                            .await
+                            .is_err()
+                        {
+                            return;
                         }
-                        // Mark all segments in batch as failed, don't increment progress
-                        for (req, _) in &batch {
-                            segments_failed.fetch_add(1, Ordering::Relaxed);
-                            failed_message_ids.lock().await.push(req.message_id.clone());
-                        }
-                        return;
                     }
-                };
 
-                // Extract just the requests for pipelining
-                let requests: Vec<SegmentRequest> =
-                    batch.iter().map(|(req, _)| req.clone()).collect();
-
-                // Build offset lookup
-                let offset_map: std::collections::HashMap<u32, u64> = batch
-                    .iter()
-                    .map(|(req, offset)| (req.segment_number, *offset))
-                    .collect();
-
-                // Download pipelined batch
-                match conn.download_segments_pipelined(&requests).await {
-                    Ok(results) => {
-                        for (seg_num, data) in results {
-                            if let Some(bytes) = data {
-                                // Write directly to file at the correct offset
-                                if let Some(&file_offset) = offset_map.get(&seg_num) {
-                                    let mut file = shared_file.lock().await;
-                                    if let Err(e) =
-                                        file.seek(std::io::SeekFrom::Start(file_offset)).await
-                                    {
-                                        tracing::debug!(
-                                            "Seek failed for segment {}: {}",
-                                            seg_num,
-                                            e
-                                        );
-                                        segments_failed.fetch_add(1, Ordering::Relaxed);
-                                        // Don't increment progress for failed writes
-                                    } else if let Err(e) = file.write_all(&bytes).await {
-                                        tracing::debug!(
-                                            "Write failed for segment {}: {}",
-                                            seg_num,
-                                            e
-                                        );
-                                        segments_failed.fetch_add(1, Ordering::Relaxed);
-                                        // Don't increment progress for failed writes
-                                    } else {
-                                        segments_downloaded.fetch_add(1, Ordering::Relaxed);
-                                        actual_size
-                                            .fetch_add(bytes.len() as u64, Ordering::Relaxed);
-                                        // Only increment progress for successful downloads
-                                        progress.inc(bytes.len() as u64);
-                                    }
-                                }
-                            } else {
-                                // Article missing from server - don't increment progress
-                                segments_failed.fetch_add(1, Ordering::Relaxed);
-                                if let Some(req) =
-                                    requests.iter().find(|r| r.segment_number == seg_num)
-                                {
-                                    failed_message_ids.lock().await.push(req.message_id.clone());
-                                }
+                    if !remaining.is_empty() {
+                        for segment in remaining.values() {
+                            if write_tx
+                                .send(WriteJob::Failed {
+                                    file: batch.file.clone(),
+                                    message_id: segment.message_id.clone(),
+                                })
+                                .await
+                                .is_err()
+                            {
+                                return;
                             }
                         }
                     }
-                    Err(_) => {
-                        // Failed - mark all as failed, don't increment progress
-                        for (req, _) in &batch {
-                            segments_failed.fetch_add(1, Ordering::Relaxed);
-                            failed_message_ids.lock().await.push(req.message_id.clone());
+
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            };
+
+            match result {
+                Ok(()) => break,
+                Err(_) => {
+                    conn = None;
+                    attempt += 1;
+                    if attempt > retry_attempts {
+                        for segment in &batch.segments {
+                            if write_tx
+                                .send(WriteJob::Failed {
+                                    file: batch.file.clone(),
+                                    message_id: segment.message_id.clone(),
+                                })
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
                         }
+                        break;
                     }
-                }
-            }
-        });
 
-        // Execute all batches concurrently
-        stream::iter(batch_futures)
-            .buffer_unordered(num_connections)
-            .collect::<Vec<()>>()
-            .await;
-
-        // Ensure file is synced to disk
-        {
-            let file = shared_file.lock().await;
-            file.sync_all().await?;
-        }
-
-        let download_time = start_time.elapsed();
-        let final_size = actual_size.load(Ordering::Relaxed);
-        let average_speed = if download_time.as_secs() > 0 {
-            (final_size as f64 / 1024.0 / 1024.0) / download_time.as_secs_f64()
-        } else {
-            0.0
-        };
-
-        // Extract failed message IDs
-        let failed_ids = match Arc::try_unwrap(failed_message_ids) {
-            Ok(mutex) => mutex.into_inner(),
-            Err(arc) => {
-                // If we can't unwrap (other references exist), get the data asynchronously
-                arc.lock().await.clone()
-            }
-        };
-
-        Ok(DownloadResult {
-            filename,
-            path: output_path,
-            size: final_size,
-            segments_downloaded: segments_downloaded.load(Ordering::Relaxed),
-            segments_failed: segments_failed.load(Ordering::Relaxed),
-            download_time,
-            average_speed,
-            failed_message_ids: failed_ids,
-        })
-    }
-
-    /// Clean up partial files after failed download
-    pub async fn cleanup_partial_files(results: &[DownloadResult]) -> Result<usize> {
-        let mut cleaned_count = 0;
-
-        for result in results {
-            // Only clean up files with failed segments
-            if result.segments_failed > 0 && result.path.exists() {
-                match tokio::fs::remove_file(&result.path).await {
-                    Ok(_) => {
-                        tracing::debug!("Cleaned up partial file: {}", result.path.display());
-                        cleaned_count += 1;
-                    }
-                    Err(e) => {
-                        tracing::debug!("Failed to clean up {}: {}", result.path.display(), e);
-                    }
+                    let delay = retry_delay.max(Duration::from_millis(100));
+                    let backoff = delay.checked_mul(1 << attempt.min(4)).unwrap_or(delay);
+                    tokio::time::sleep(backoff).await;
                 }
             }
         }
-
-        Ok(cleaned_count)
     }
+}
 
-    /// Verify file has real content (not zero-filled from pre-allocation)
-    /// Samples start, middle, and end to detect empty files quickly
-    async fn verify_file_has_content(path: &std::path::Path) -> Result<bool> {
-        use tokio::io::AsyncReadExt;
+async fn get_connection_with_retry(
+    pool: &NntpPool,
+    wait_timeout: Duration,
+    progress: &ProgressBar,
+) -> Option<crate::nntp::PooledConnection> {
+    let start = Instant::now();
+    let mut attempt = 0u32;
 
-        let mut file = tokio::fs::File::open(path).await?;
-        let metadata = file.metadata().await?;
-        let file_size = metadata.len();
+    while start.elapsed() < wait_timeout {
+        match pool.get_connection().await {
+            Ok(conn) => return Some(conn),
+            Err(_) => {
+                attempt = attempt.saturating_add(1);
+                let delay = Duration::from_millis(200) * (1 << attempt.min(4));
+                tokio::time::sleep(delay).await;
 
-        if file_size == 0 {
-            return Ok(false);
-        }
-
-        // Sample 3 positions: start, middle, end
-        let positions = [0, file_size / 2, file_size.saturating_sub(4096)];
-        let mut buf = [0u8; 4096];
-
-        for pos in positions {
-            file.seek(std::io::SeekFrom::Start(pos)).await?;
-            let n = file.read(&mut buf).await?;
-            // If any sampled region has non-zero bytes, file has content
-            if n > 0 && buf[..n].iter().any(|&b| b != 0) {
-                return Ok(true);
+                if attempt % 5 == 0 && !progress.is_hidden() {
+                    progress.println(format!(
+                        "  \x1b[90m⏳ Waiting for connection... ({:.0}s)\x1b[0m",
+                        start.elapsed().as_secs_f64()
+                    ));
+                }
             }
         }
-
-        // All samples were zeros - file is likely pre-allocated but not written
-        Ok(false)
     }
+
+    None
+}
+
+async fn run_writer(
+    mut rx: mpsc::Receiver<WriteJob>,
+    progress_bar: ProgressBar,
+    completed_files: Arc<AtomicUsize>,
+    total_files: usize,
+) {
+    while let Some(job) = rx.recv().await {
+        match job {
+            WriteJob::Write {
+                file,
+                offset,
+                data,
+                message_id,
+            } => {
+                let data_len = data.len() as u64;
+                let file_handle = file.file.clone();
+                let write_result = tokio::task::spawn_blocking(move || {
+                    let written = write_at(file_handle.as_ref(), data.as_ref(), offset)?;
+                    if written != data_len as usize {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::WriteZero,
+                            "short write",
+                        ));
+                    }
+                    Ok::<(), std::io::Error>(())
+                })
+                .await;
+
+                let write_ok = matches!(write_result, Ok(Ok(())));
+
+                if write_ok {
+                    file.state
+                        .segments_downloaded
+                        .fetch_add(1, Ordering::Relaxed);
+                    file.state
+                        .bytes_written
+                        .fetch_add(data_len, Ordering::Relaxed);
+                    file.state
+                        .max_byte_position
+                        .fetch_max(offset + data_len, Ordering::Relaxed);
+                    progress_bar.inc(data_len);
+                } else {
+                    file.state.segments_failed.fetch_add(1, Ordering::Relaxed);
+                    if let Ok(mut ids) = file.state.failed_message_ids.lock() {
+                        ids.push(message_id);
+                    }
+                }
+
+                if file.state.mark_done() {
+                    // Truncate file to the highest written byte position
+                    // (segments are written at offsets based on encoded sizes,
+                    // so max_byte_position tracks the actual extent of written data)
+                    let final_size = file.state.max_byte_position.load(Ordering::Relaxed);
+                    if final_size > 0 {
+                        let file_handle = file.file.clone();
+                        let _ =
+                            tokio::task::spawn_blocking(move || file_handle.set_len(final_size))
+                                .await;
+                    }
+
+                    let count = completed_files.fetch_add(1, Ordering::Relaxed) + 1;
+                    if count % 5 == 0 || count == total_files {
+                        progress_bar.set_message(format!("({}/{})", count, total_files));
+                    }
+                }
+            }
+            WriteJob::Failed { file, message_id } => {
+                file.state.segments_failed.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut ids) = file.state.failed_message_ids.lock() {
+                    ids.push(message_id);
+                }
+
+                if file.state.mark_done() {
+                    // Truncate file to the highest written byte position
+                    // (segments are written at offsets based on encoded sizes,
+                    // so max_byte_position tracks the actual extent of written data)
+                    let final_size = file.state.max_byte_position.load(Ordering::Relaxed);
+                    if final_size > 0 {
+                        let file_handle = file.file.clone();
+                        let _ =
+                            tokio::task::spawn_blocking(move || file_handle.set_len(final_size))
+                                .await;
+                    }
+
+                    let count = completed_files.fetch_add(1, Ordering::Relaxed) + 1;
+                    if count % 5 == 0 || count == total_files {
+                        progress_bar.set_message(format!("({}/{})", count, total_files));
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn create_preallocated_file(path: &Path, size: u64) -> Result<std::fs::File> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .read(true)
+            .truncate(true)
+            .open(&path)?;
+        file.set_len(size)?;
+        Ok::<std::fs::File, std::io::Error>(file)
+    })
+    .await
+    .map_err(std::io::Error::other)?
+    .map_err(DlNzbError::from)
+}
+
+fn sanitize_filename(raw: &str, fallback: &str) -> String {
+    let name = std::path::Path::new(raw)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    let mut sanitized = String::with_capacity(name.len());
+    for ch in name.chars() {
+        if ch.is_ascii_control() {
+            continue;
+        }
+        match ch {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => sanitized.push('_'),
+            _ => sanitized.push(ch),
+        }
+    }
+    let trimmed = sanitized.trim().trim_matches('.');
+    let mut result = if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
+        fallback.to_string()
+    } else {
+        trimmed.to_string()
+    };
+
+    let max_len = 240usize;
+    if result.len() > max_len {
+        let mut end = 0usize;
+        for (idx, _) in result.char_indices() {
+            if idx > max_len {
+                break;
+            }
+            end = idx;
+        }
+        if end > 0 {
+            result.truncate(end);
+        }
+    }
+
+    result
+}
+
+#[cfg(unix)]
+fn write_at(file: &std::fs::File, buf: &[u8], offset: u64) -> std::io::Result<usize> {
+    use std::os::unix::fs::FileExt;
+    file.write_at(buf, offset)
+}
+
+#[cfg(windows)]
+fn write_at(file: &std::fs::File, buf: &[u8], offset: u64) -> std::io::Result<usize> {
+    use std::os::windows::fs::FileExt;
+    file.seek_write(buf, offset)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn write_at(file: &std::fs::File, buf: &[u8], offset: u64) -> std::io::Result<usize> {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut cloned = file.try_clone()?;
+    cloned.seek(SeekFrom::Start(offset))?;
+    cloned.write(buf)
 }
