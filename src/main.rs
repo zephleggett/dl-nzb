@@ -540,6 +540,7 @@ async fn handle_download_mode(cli: &Cli, config: Config) -> Result<()> {
                         &nzb,
                         &results,
                         &output_dir,
+                        download_time,
                         post_outcome.as_ref(),
                         post_failed,
                     );
@@ -566,19 +567,41 @@ async fn handle_download_mode(cli: &Cli, config: Config) -> Result<()> {
     Ok(())
 }
 
+/// Format a duration as human-readable: "3s", "2m 15s", "1h 30m"
+fn format_duration(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        let m = secs / 60;
+        let s = secs % 60;
+        if s == 0 {
+            format!("{}m", m)
+        } else {
+            format!("{}m {}s", m, s)
+        }
+    } else {
+        let h = secs / 3600;
+        let m = (secs % 3600) / 60;
+        if m == 0 {
+            format!("{}h", h)
+        } else {
+            format!("{}h {}m", h, m)
+        }
+    }
+}
+
 /// Print a final summary after all processing is complete
 fn print_final_summary(
     _nzb: &Nzb,
     results: &[dl_nzb::download::DownloadResult],
     output_dir: &std::path::Path,
+    download_time: std::time::Duration,
     post_outcome: Option<&PostProcessingOutcome>,
     post_failed: bool,
 ) {
-    use std::time::Duration;
-
     // Calculate total stats
     let total_size: u64 = results.iter().map(|r| r.size).sum();
-    let total_time: Duration = results.iter().map(|r| r.download_time).sum();
     let failed_count = results.iter().filter(|r| r.segments_failed > 0).count();
 
     // Find the main video/media file (largest non-PAR2, non-RAR file)
@@ -625,9 +648,9 @@ fn print_final_summary(
                 output_dir.display()
             );
             println!(
-                "  \x1b[90m└─\x1b[0m \x1b[36m{}\x1b[0m in \x1b[35m{:.0}s\x1b[0m",
+                "  \x1b[90m└─\x1b[0m \x1b[36m{}\x1b[0m in \x1b[35m{}\x1b[0m",
                 human_bytes(file_size as f64),
-                total_time.as_secs_f64()
+                format_duration(download_time)
             );
         } else {
             // No main file found, just show stats
@@ -637,9 +660,9 @@ fn print_final_summary(
                 output_dir.display()
             );
             println!(
-                "  \x1b[90m└─\x1b[0m \x1b[36m{}\x1b[0m in \x1b[35m{:.0}s\x1b[0m",
+                "  \x1b[90m└─\x1b[0m \x1b[36m{}\x1b[0m in \x1b[35m{}\x1b[0m",
                 human_bytes(total_size as f64),
-                total_time.as_secs_f64()
+                format_duration(download_time)
             );
         }
     } else if failed_count == 0 {
