@@ -1,64 +1,112 @@
 use bytes::Bytes;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::time::{timeout, Duration};
 use tokio_native_tls::TlsConnector;
 
+use super::counting::CountingReader;
+use super::yenc;
 use crate::config::UsenetConfig;
 use crate::error::{DlNzbError, NntpError};
 
 type Result<T> = std::result::Result<T, DlNzbError>;
 
-/// Async NNTP connection that can be pooled
+const READ_BUFFER_BYTES: usize = 256 * 1024;
+const MAX_ARTICLE_BODY_BYTES: usize = 32 * 1024 * 1024;
+const MAX_RESPONSE_LINE_BYTES: usize = 8192;
+
+const TIMEOUT_CONNECT: Duration = Duration::from_secs(30);
+const TIMEOUT_AUTH: Duration = Duration::from_secs(30);
+const TIMEOUT_GROUP: Duration = Duration::from_secs(15);
+const TIMEOUT_RESPONSE_HEAD: Duration = Duration::from_secs(60);
+const TIMEOUT_RESPONSE_BODY: Duration = Duration::from_secs(120);
+const TIMEOUT_HEALTH: Duration = Duration::from_secs(5);
+
+/// NNTP response codes we react to (RFC 3977).
+mod code {
+    pub const GREETING_OK: &str = "200";
+    pub const GREETING_NO_POST: &str = "201";
+    pub const AUTH_ACCEPTED: &str = "281";
+    pub const AUTH_PASSWORD_REQUIRED: &str = "381";
+    pub const GROUP_OK: &str = "211";
+    pub const STAT_OK: &str = "223";
+    pub const BODY_FOLLOWS: &str = "222";
+    /// Statuses meaning "no such article" — the body is not sent. Retrying is futile.
+    pub const NO_ARTICLE: [&str; 2] = ["430", "423"];
+    /// "No newsgroup selected" — recoverable by (re-)selecting a group.
+    pub const NO_GROUP_SELECTED: &str = "412";
+}
+
+/// Outcome of fetching a single article. Unlike a `Result`, this distinguishes
+/// the failure modes so the caller can choose the right recovery: permanent
+/// failures are never retried, decode failures are retried a small bounded
+/// number of times, and transient (wire/connection) failures are retried
+/// without counting against the per-article budget.
+#[derive(Debug)]
+pub enum ArticleOutcome {
+    /// Successfully downloaded and decoded — placement uses the yEnc `=ypart` offset.
+    Ok {
+        message_id: String,
+        offset: u64,
+        data: Bytes,
+    },
+    /// Server reported the article doesn't exist (430/423). Permanent.
+    Missing { message_id: String },
+    /// Body arrived but failed to yEnc-decode (CRC/size mismatch). The wire is
+    /// still in sync (whole body consumed); retry a bounded number of times.
+    DecodeFailed { message_id: String },
+    /// Wire/timeout/unexpected error. The connection is poisoned; retry the
+    /// article on a fresh connection without counting it against the budget.
+    Transient { message_id: String },
+}
+
+/// A request for one article.
+#[derive(Clone, Debug)]
+pub struct SegmentRequest {
+    pub message_id: String,
+    pub group: String,
+}
+
+/// Async NNTP connection that can be pooled.
 pub struct AsyncNntpConnection {
     writer: Box<dyn AsyncWrite + Unpin + Send>,
     reader: BufReader<Box<dyn AsyncRead + Unpin + Send>>,
     current_group: Option<String>,
-}
-
-/// Request for pipelined downloading
-#[derive(Clone)]
-pub struct SegmentRequest {
-    pub message_id: String,
-    pub group: String,
-    pub segment_number: u32,
+    /// Once a connection enters an unrecoverable state (mid-stream read failure),
+    /// flip this so the pool can recycle it instead of returning poisoned bytes.
+    poisoned: bool,
 }
 
 impl AsyncNntpConnection {
-    /// Create a new NNTP connection with optional shared TLS connector
-    ///
-    /// Using a shared TLS connector enables session reuse across connections to the same server,
-    /// which significantly reduces TLS handshake overhead (can save ~35% CPU on SSL operations)
     pub async fn connect(
         config: &UsenetConfig,
         tls_connector: Option<Arc<TlsConnector>>,
+        bytes_read_counter: Arc<AtomicU64>,
     ) -> Result<Self> {
         let addr = format!("{}:{}", config.server, config.port);
 
-        // Connect with timeout
-        let tcp_stream = timeout(Duration::from_secs(30), TcpStream::connect(&addr))
+        let tcp_stream = timeout(TIMEOUT_CONNECT, TcpStream::connect(&addr))
             .await
-            .map_err(|_| NntpError::Timeout { seconds: 30 })?
+            .map_err(|_| NntpError::Timeout {
+                seconds: TIMEOUT_CONNECT.as_secs(),
+            })?
             .map_err(|e| NntpError::ConnectionFailed {
                 server: config.server.clone(),
                 port: config.port,
                 source: e,
             })?;
 
-        // Set socket options for better performance
         tcp_stream.set_nodelay(true)?;
 
-        // Wrap in TLS if needed
         let (reader, writer): (
             Box<dyn AsyncRead + Unpin + Send>,
             Box<dyn AsyncWrite + Unpin + Send>,
         ) = if config.ssl {
-            // Use shared connector if provided, otherwise create a new one
-            let connector = if let Some(shared_connector) = tls_connector {
-                shared_connector
+            let connector = if let Some(shared) = tls_connector {
+                shared
             } else {
-                // Fallback: create new connector (for backwards compatibility/testing)
                 let mut tls_builder = native_tls::TlsConnector::builder();
                 if !config.verify_ssl_certs {
                     tls_builder.danger_accept_invalid_certs(true);
@@ -68,126 +116,211 @@ impl AsyncNntpConnection {
                 Arc::new(TlsConnector::from(native_connector))
             };
 
-            // Perform TLS handshake
             let tls_stream = timeout(
-                Duration::from_secs(30),
+                TIMEOUT_CONNECT,
                 connector.connect(&config.server, tcp_stream),
             )
             .await
-            .map_err(|_| NntpError::Timeout { seconds: 30 })?
+            .map_err(|_| NntpError::Timeout {
+                seconds: TIMEOUT_CONNECT.as_secs(),
+            })?
             .map_err(|e| NntpError::TlsError(e.to_string()))?;
 
-            // Split TLS stream
             let (read_half, write_half) = tokio::io::split(tls_stream);
-            (Box::new(read_half), Box::new(write_half))
+            let counted = CountingReader::new(read_half, bytes_read_counter);
+            (Box::new(counted), Box::new(write_half))
         } else {
-            // Plain TCP
             let (read_half, write_half) = tokio::io::split(tcp_stream);
-            (Box::new(read_half), Box::new(write_half))
+            let counted = CountingReader::new(read_half, bytes_read_counter);
+            (Box::new(counted), Box::new(write_half))
         };
 
-        let reader = BufReader::with_capacity(256 * 1024, reader); // 256KB read buffer for pipelining
+        let reader = BufReader::with_capacity(READ_BUFFER_BYTES, reader);
 
         let mut conn = Self {
             writer,
             reader,
             current_group: None,
+            poisoned: false,
         };
 
-        // Initialize connection
         conn.initialize(config).await?;
-
         Ok(conn)
     }
 
     async fn initialize(&mut self, config: &UsenetConfig) -> Result<()> {
-        // Read server greeting
-        let response = self.read_response().await?;
-        if !response.starts_with("200") && !response.starts_with("201") {
+        let greeting = timeout(TIMEOUT_AUTH, self.read_response())
+            .await
+            .map_err(|_| NntpError::Timeout {
+                seconds: TIMEOUT_AUTH.as_secs(),
+            })??;
+        if !greeting.starts_with(code::GREETING_OK) && !greeting.starts_with(code::GREETING_NO_POST)
+        {
             return Err(
-                NntpError::ProtocolError(format!("Server greeting failed: {}", response)).into(),
+                NntpError::ProtocolError(format!("Server greeting failed: {}", greeting)).into(),
             );
         }
-
-        // Authenticate
         self.authenticate(config).await
     }
 
     async fn authenticate(&mut self, config: &UsenetConfig) -> Result<()> {
-        // Send username
         self.send_command(&format!("AUTHINFO USER {}", config.username))
             .await?;
-        let response = self.read_response().await?;
-
-        if response.starts_with("381") {
-            // Server wants password
+        let response = timeout(TIMEOUT_AUTH, self.read_response())
+            .await
+            .map_err(|_| NntpError::Timeout {
+                seconds: TIMEOUT_AUTH.as_secs(),
+            })??;
+        if response.starts_with(code::AUTH_PASSWORD_REQUIRED) {
             self.send_command(&format!("AUTHINFO PASS {}", config.password))
                 .await?;
-            let response = self.read_response().await?;
-
-            if !response.starts_with("281") {
-                // Sanitize response to avoid leaking sensitive info
-                let sanitized = response.split_whitespace().next().unwrap_or("Unknown");
-                return Err(NntpError::AuthFailed(format!(
-                    "Authentication failed ({})",
-                    sanitized
-                ))
-                .into());
+            let response = timeout(TIMEOUT_AUTH, self.read_response())
+                .await
+                .map_err(|_| NntpError::Timeout {
+                    seconds: TIMEOUT_AUTH.as_secs(),
+                })??;
+            if !response.starts_with(code::AUTH_ACCEPTED) {
+                return Err(NntpError::AuthFailed(sanitize_response(&response)).into());
             }
-        } else if !response.starts_with("281") {
-            // Sanitize response to avoid leaking sensitive info
-            let sanitized = response.split_whitespace().next().unwrap_or("Unknown");
-            return Err(
-                NntpError::AuthFailed(format!("Authentication failed ({})", sanitized)).into(),
-            );
+        } else if !response.starts_with(code::AUTH_ACCEPTED) {
+            return Err(NntpError::AuthFailed(sanitize_response(&response)).into());
         }
-
         Ok(())
     }
 
-    /// Download a segment and return the decoded data
-    pub async fn download_segment(&mut self, message_id: &str, group: &str) -> Result<Bytes> {
-        // Select group if different from current
-        if self.current_group.as_deref() != Some(group) {
-            self.send_command(&format!("GROUP {}", group)).await?;
-            let response = timeout(Duration::from_secs(10), self.read_response())
-                .await
-                .map_err(|_| NntpError::Timeout { seconds: 10 })??;
-            if !response.starts_with("211") {
-                return Err(NntpError::GroupNotFound {
-                    group: group.to_string(),
-                }
-                .into());
-            }
-            self.current_group = Some(group.to_string());
-        }
+    /// Returns true once the connection has hit an unrecoverable mid-stream
+    /// error. Callers should discard it instead of recycling.
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned
+    }
 
-        // Request article body
-        self.send_command(&format!("BODY <{}>", message_id)).await?;
-        let response = timeout(Duration::from_secs(10), self.read_response())
-            .await
-            .map_err(|_| NntpError::Timeout { seconds: 10 })??;
-        if !response.starts_with("222") {
-            return Err(NntpError::ArticleNotFound {
-                message_id: message_id.to_string(),
+    /// Read a response line with a deadline; any failure (I/O error or timeout)
+    /// poisons the connection because the wire is now out of sync.
+    async fn read_response_poisoning(&mut self, deadline: Duration) -> Result<String> {
+        match timeout(deadline, self.read_response()).await {
+            Ok(Ok(r)) => Ok(r),
+            Ok(Err(e)) => Err(self.poison(e)),
+            Err(_) => Err(self.poison_timeout(deadline)),
+        }
+    }
+
+    async fn read_article_body_poisoning(&mut self, deadline: Duration) -> Result<Vec<u8>> {
+        match timeout(deadline, self.read_article_body()).await {
+            Ok(Ok(b)) => Ok(b),
+            Ok(Err(e)) => Err(self.poison(e)),
+            Err(_) => Err(self.poison_timeout(deadline)),
+        }
+    }
+
+    fn poison(&mut self, e: DlNzbError) -> DlNzbError {
+        self.poisoned = true;
+        e
+    }
+
+    fn poison_timeout(&mut self, deadline: Duration) -> DlNzbError {
+        self.poisoned = true;
+        NntpError::Timeout {
+            seconds: deadline.as_secs(),
+        }
+        .into()
+    }
+
+    /// Select an NNTP group, caching the last group to avoid redundant traffic.
+    ///
+    /// We retrieve articles by message-id (`BODY <id>`), which per RFC 3977 is
+    /// group-independent, so this only needs to be called once per connection to
+    /// satisfy legacy servers that demand a `GROUP` before serving any article.
+    /// A failed selection is non-fatal: most servers still serve `BODY <id>`.
+    /// A wire/timeout error poisons the connection (the stream is out of sync).
+    pub async fn ensure_group(&mut self, group: &str) -> Result<()> {
+        if self.current_group.as_deref() == Some(group) {
+            return Ok(());
+        }
+        self.send_command(&format!("GROUP {}", group)).await?;
+        let response = self.read_response_poisoning(TIMEOUT_GROUP).await?;
+        if !response.starts_with(code::GROUP_OK) {
+            // GROUP failure (e.g. 411) is not poisoning — no body follows.
+            return Err(NntpError::GroupNotFound {
+                group: group.to_string(),
             }
             .into());
         }
-
-        // Read and decode the body
-        let encoded_data = timeout(Duration::from_secs(30), self.read_article_body())
-            .await
-            .map_err(|_| NntpError::Timeout { seconds: 30 })??;
-
-        // Simple yEnc decoding
-        let decoded = self.decode_yenc_simple(&encoded_data)?;
-
-        Ok(Bytes::from(decoded))
+        self.current_group = Some(group.to_string());
+        Ok(())
     }
 
-    /// Check if articles exist on the server using STAT command (no download)
-    /// Returns a vector of (message_id, exists) pairs
-    /// Note: STAT with message-id doesn't require GROUP selection
+    /// Queue a `BODY <message-id>` request without flushing. The caller keeps
+    /// several requests in flight (a sliding window) to hide round-trip latency,
+    /// flushing once per fill and draining responses in order with
+    /// [`read_body_outcome`]. A write error poisons the connection.
+    pub async fn send_body(&mut self, message_id: &str) -> Result<()> {
+        let mut buf = Vec::with_capacity(message_id.len() + 8);
+        buf.extend_from_slice(b"BODY <");
+        buf.extend_from_slice(message_id.as_bytes());
+        buf.extend_from_slice(b">\r\n");
+        self.writer
+            .write_all(&buf)
+            .await
+            .map_err(|e| self.poison_with(e))
+    }
+
+    /// Flush queued requests to the socket.
+    pub async fn flush(&mut self) -> Result<()> {
+        self.writer.flush().await.map_err(|e| self.poison_with(e))
+    }
+
+    /// Read and classify the response for one previously-sent `BODY` request.
+    ///
+    /// Never returns `Err`: any wire/timeout failure poisons the connection and
+    /// is reported as `Transient` so the caller retries the article elsewhere.
+    /// Responses must be drained in the same order the `BODY` commands were sent.
+    pub async fn read_body_outcome(&mut self, message_id: &str) -> ArticleOutcome {
+        let mid = || message_id.to_string();
+        let response = match self.read_response_poisoning(TIMEOUT_RESPONSE_HEAD).await {
+            Ok(r) => r,
+            Err(_) => return ArticleOutcome::Transient { message_id: mid() },
+        };
+
+        if response.starts_with(code::BODY_FOLLOWS) {
+            let body = match self
+                .read_article_body_poisoning(TIMEOUT_RESPONSE_BODY)
+                .await
+            {
+                Ok(b) => b,
+                Err(_) => return ArticleOutcome::Transient { message_id: mid() },
+            };
+            match yenc::decode_article(&body) {
+                Ok(decoded) => ArticleOutcome::Ok {
+                    message_id: mid(),
+                    offset: decoded.offset,
+                    data: Bytes::from(decoded.data),
+                },
+                Err(e) => {
+                    // The wire is in sync (full body consumed); only the payload
+                    // is bad. Bounded retry happens at the caller.
+                    tracing::debug!("yEnc decode failed for {}: {}", message_id, e);
+                    ArticleOutcome::DecodeFailed { message_id: mid() }
+                }
+            }
+        } else if code::NO_ARTICLE.iter().any(|c| response.starts_with(c)) {
+            ArticleOutcome::Missing { message_id: mid() }
+        } else if response.starts_with(code::NO_GROUP_SELECTED) {
+            // Server insists on a selected group; drop the cache so the worker
+            // re-selects before retrying this (transient) article.
+            self.current_group = None;
+            ArticleOutcome::Transient { message_id: mid() }
+        } else {
+            // Unknown status — the wire may be desynced relative to our request
+            // stream. Poison so the connection is discarded.
+            self.poisoned = true;
+            ArticleOutcome::Transient { message_id: mid() }
+        }
+    }
+
+    /// STAT a batch of message IDs to check existence without downloading.
+    /// STAT with message-id form doesn't require GROUP selection. Errors that
+    /// don't affect the wire state (timeouts on individual responses) leave
+    /// the connection usable; we treat unanswered STATs as "missing".
     pub async fn check_articles_exist(
         &mut self,
         requests: &[SegmentRequest],
@@ -196,64 +329,47 @@ impl AsyncNntpConnection {
             return Ok(Vec::new());
         }
 
-        // Pipeline STAT requests - message-id format doesn't require GROUP
+        let mut buf = Vec::with_capacity(requests.len() * 64);
         for req in requests {
-            self.writer
-                .write_all(format!("STAT <{}>\r\n", req.message_id).as_bytes())
-                .await?;
+            buf.extend_from_slice(b"STAT <");
+            buf.extend_from_slice(req.message_id.as_bytes());
+            buf.extend_from_slice(b">\r\n");
         }
-        self.writer.flush().await?;
+        self.writer
+            .write_all(&buf)
+            .await
+            .map_err(|e| self.poison_with(e))?;
+        self.writer.flush().await.map_err(|e| self.poison_with(e))?;
 
-        // Read responses - STAT responses are instant (no body data)
         let mut results = Vec::with_capacity(requests.len());
         for req in requests {
-            let response = match timeout(Duration::from_secs(10), self.read_response()).await {
-                Ok(Ok(r)) => r,
-                _ => {
-                    results.push((req.message_id.clone(), false));
-                    continue;
-                }
-            };
-
-            // 223 = article exists, 430 = no such article
-            let exists = response.starts_with("223");
+            let response = self.read_response_poisoning(TIMEOUT_RESPONSE_HEAD).await?;
+            let exists = response.starts_with(code::STAT_OK);
             results.push((req.message_id.clone(), exists));
         }
-
         Ok(results)
     }
 
-    const MAX_ARTICLE_BODY_SIZE: usize = 16 * 1024 * 1024; // 16MB
-
-    /// Read article body until termination
     async fn read_article_body(&mut self) -> Result<Vec<u8>> {
-        use tokio::io::AsyncBufReadExt;
-
-        let mut body = Vec::with_capacity(1024 * 1024); // Pre-allocate 1MB for larger segments
+        let mut body = Vec::with_capacity(768 * 1024);
         let mut line = Vec::new();
         let mut terminated = false;
 
         loop {
             line.clear();
-
-            // Read line efficiently using BufRead
-            let bytes_read = self.reader.read_until(b'\n', &mut line).await?;
-            if bytes_read == 0 {
-                break; // EOF
+            let n = self.reader.read_until(b'\n', &mut line).await?;
+            if n == 0 {
+                break;
             }
 
-            // Check for termination (single dot followed by newline)
             if line == b".\r\n" || line == b".\n" {
                 terminated = true;
                 break;
             }
-
-            // Handle dot-stuffing (lines starting with .. become .)
+            // Dot-stuffing: leading ".." becomes "."
             if line.len() >= 2 && line[0] == b'.' && line[1] == b'.' {
                 line.remove(0);
             }
-
-            // Add line to body (without CRLF, but keep newline for yenc decoder)
             if line.ends_with(b"\r\n") {
                 body.extend_from_slice(&line[..line.len() - 2]);
             } else if line.ends_with(b"\n") {
@@ -261,565 +377,101 @@ impl AsyncNntpConnection {
             } else {
                 body.extend_from_slice(&line);
             }
+            body.push(b'\n');
 
-            body.push(b'\n'); // Add newline back for yenc decoder
-
-            if body.len() > Self::MAX_ARTICLE_BODY_SIZE {
+            if body.len() > MAX_ARTICLE_BODY_BYTES {
                 return Err(NntpError::ProtocolError(format!(
-                    "Article body exceeds maximum size of {} bytes",
-                    Self::MAX_ARTICLE_BODY_SIZE
+                    "article body exceeds {} bytes",
+                    MAX_ARTICLE_BODY_BYTES
                 ))
                 .into());
             }
         }
 
         if !terminated {
-            return Err(NntpError::ProtocolError(
-                "Article body terminated unexpectedly".to_string(),
-            )
-            .into());
+            return Err(NntpError::ProtocolError("unterminated article body".into()).into());
         }
-
         Ok(body)
     }
 
-    /// Optimized yEnc decoder with SIMD acceleration
-    fn decode_yenc_simple(&self, data: &[u8]) -> Result<Vec<u8>> {
-        // Pre-allocate based on expected output size (roughly same as input)
-        let mut decoded = Vec::with_capacity(data.len());
-        let mut in_data = false;
-
-        // Use split for efficient line iteration
-        for line in data.split(|&b| b == b'\n') {
-            // Check for yEnc markers
-            if line.starts_with(b"=ybegin") {
-                in_data = true;
-                continue;
-            }
-            if line.starts_with(b"=yend") {
-                break;
-            }
-            if line.starts_with(b"=ypart") {
-                continue;
-            }
-
-            if in_data && !line.is_empty() {
-                Self::decode_yenc_line_simd(line, &mut decoded);
-            }
-        }
-
-        // Shrink to actual size if we over-allocated
-        decoded.shrink_to_fit();
-        Ok(decoded)
-    }
-
-    /// Decode a single yEnc line, using SIMD when possible
-    #[inline]
-    fn decode_yenc_line_simd(line: &[u8], output: &mut Vec<u8>) {
-        // Check for escape characters or carriage returns that require scalar handling
-        let has_special = line.iter().any(|&b| b == b'=' || b == b'\r');
-        if has_special {
-            Self::decode_yenc_scalar(line, output);
-        } else {
-            Self::decode_yenc_fast(line, output);
-        }
-    }
-
-    /// Scalar yEnc decoder for lines with escape sequences
-    #[inline]
-    fn decode_yenc_scalar(line: &[u8], output: &mut Vec<u8>) {
-        let mut iter = line.iter().copied();
-        while let Some(byte) = iter.next() {
-            if byte == b'=' {
-                // Escaped character
-                if let Some(next_byte) = iter.next() {
-                    output.push(next_byte.wrapping_sub(64).wrapping_sub(42));
-                }
-            } else if byte != b'\r' {
-                // Normal character (skip carriage returns)
-                output.push(byte.wrapping_sub(42));
-            }
-        }
-    }
-
-    /// SIMD-accelerated yEnc decoder for lines without escape sequences
-    /// Uses SSE2 on x86_64, NEON on aarch64, scalar fallback otherwise
-    #[inline]
-    fn decode_yenc_fast(line: &[u8], output: &mut Vec<u8>) {
-        #[cfg(target_arch = "x86_64")]
-        {
-            Self::decode_yenc_sse2(line, output);
-        }
-
-        #[cfg(target_arch = "aarch64")]
-        {
-            Self::decode_yenc_neon(line, output);
-        }
-
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-        {
-            // Scalar fallback for other architectures
-            output.extend(line.iter().map(|&b| b.wrapping_sub(42)));
-        }
-    }
-
-    /// SSE2 implementation for x86_64
-    #[cfg(target_arch = "x86_64")]
-    #[inline]
-    fn decode_yenc_sse2(line: &[u8], output: &mut Vec<u8>) {
-        use std::arch::x86_64::*;
-
-        let len = line.len();
-        let start_len = output.len();
-
-        // Process 16 bytes at a time with SSE2
-        let chunks = len / 16;
-        let simd_len = chunks * 16;
-
-        if chunks > 0 {
-            // Resize output to hold SIMD results (initializes memory properly)
-            output.resize(start_len + simd_len, 0);
-
-            // SAFETY: We've resized the vec so memory is initialized,
-            // and SSE2 is always available on x86_64
-            unsafe {
-                let sub_val = _mm_set1_epi8(42);
-                let mut i = 0;
-
-                for _ in 0..chunks {
-                    let input = _mm_loadu_si128(line.as_ptr().add(i) as *const __m128i);
-                    let result = _mm_sub_epi8(input, sub_val);
-
-                    let out_ptr = output.as_mut_ptr().add(start_len + i);
-                    _mm_storeu_si128(out_ptr as *mut __m128i, result);
-                    i += 16;
-                }
-            }
-        }
-
-        // Handle remaining bytes with scalar code
-        for &byte in &line[simd_len..] {
-            output.push(byte.wrapping_sub(42));
-        }
-    }
-
-    /// NEON implementation for aarch64
-    #[cfg(target_arch = "aarch64")]
-    #[inline]
-    fn decode_yenc_neon(line: &[u8], output: &mut Vec<u8>) {
-        use std::arch::aarch64::*;
-
-        let len = line.len();
-        let start_len = output.len();
-
-        // Process 16 bytes at a time with NEON
-        let chunks = len / 16;
-        let simd_len = chunks * 16;
-
-        if chunks > 0 {
-            // Resize output to hold SIMD results (initializes memory properly)
-            output.resize(start_len + simd_len, 0);
-
-            // SAFETY: We've resized the vec so memory is initialized,
-            // and NEON is always available on aarch64
-            unsafe {
-                let sub_val = vdupq_n_u8(42);
-                let mut i = 0;
-
-                for _ in 0..chunks {
-                    let input = vld1q_u8(line.as_ptr().add(i));
-                    let result = vsubq_u8(input, sub_val);
-
-                    let out_ptr = output.as_mut_ptr().add(start_len + i);
-                    vst1q_u8(out_ptr, result);
-                    i += 16;
-                }
-            }
-        }
-
-        // Handle remaining bytes with scalar code
-        for &byte in &line[simd_len..] {
-            output.push(byte.wrapping_sub(42));
-        }
-    }
-
     async fn send_command(&mut self, command: &str) -> Result<()> {
-        self.writer.write_all(command.as_bytes()).await?;
-        self.writer.write_all(b"\r\n").await?;
-        self.writer.flush().await?;
+        self.writer
+            .write_all(command.as_bytes())
+            .await
+            .map_err(|e| self.poison_with(e))?;
+        self.writer
+            .write_all(b"\r\n")
+            .await
+            .map_err(|e| self.poison_with(e))?;
+        self.writer.flush().await.map_err(|e| self.poison_with(e))?;
         Ok(())
     }
 
     async fn read_response(&mut self) -> Result<String> {
         let mut response = String::new();
         self.reader.read_line(&mut response).await?;
-
-        if response.len() > 8192 {
-            return Err(NntpError::ProtocolError(
-                "Response line exceeds maximum length".to_string(),
-            )
-            .into());
+        if response.len() > MAX_RESPONSE_LINE_BYTES {
+            return Err(NntpError::ProtocolError("response line too long".into()).into());
         }
-
-        // Remove CRLF
         if response.ends_with("\r\n") {
             response.truncate(response.len() - 2);
         } else if response.ends_with('\n') {
             response.truncate(response.len() - 1);
         }
-
         Ok(response)
     }
 
-    /// Check if connection is healthy by sending a NOOP
+    /// Health probe. Sends `DATE` (mandatory READER command per RFC 3977 §7.1)
+    /// because some providers reject `NOOP`. Any well-formed 1xx/2xx response
+    /// proves the connection is round-trip-capable.
     pub async fn is_healthy(&mut self) -> bool {
-        match self.send_command("NOOP").await {
-            Ok(_) => match timeout(Duration::from_secs(5), self.read_response()).await {
-                Ok(Ok(response)) => response.starts_with("200"),
-                _ => false,
-            },
-            Err(_) => false,
+        if self.poisoned {
+            return false;
+        }
+        if self.send_command("DATE").await.is_err() {
+            self.poisoned = true;
+            return false;
+        }
+        match timeout(TIMEOUT_HEALTH, self.read_response()).await {
+            Ok(Ok(response)) => {
+                let first = response.chars().next();
+                let healthy = matches!(first, Some('1') | Some('2'));
+                if !healthy {
+                    tracing::debug!("DATE returned non-OK response: {}", response);
+                }
+                healthy
+            }
+            Ok(Err(e)) => {
+                tracing::debug!("DATE read_response error: {}", e);
+                self.poisoned = true;
+                false
+            }
+            Err(_) => {
+                tracing::debug!("DATE timed out");
+                self.poisoned = true;
+                false
+            }
         }
     }
 
-    /// Download multiple segments using pipelining for maximum throughput
-    ///
-    /// This sends multiple BODY commands before waiting for responses,
-    /// dramatically reducing round-trip latency overhead.
-    pub async fn download_segments_pipelined(
-        &mut self,
-        requests: &[SegmentRequest],
-    ) -> Result<Vec<(u32, Option<Bytes>)>> {
-        if requests.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Switch to the group if needed (all requests should be from same group)
-        let group = &requests[0].group;
-        if self.current_group.as_deref() != Some(group) {
-            self.send_command(&format!("GROUP {}", group)).await?;
-            let response = timeout(Duration::from_secs(10), self.read_response())
-                .await
-                .map_err(|_| NntpError::Timeout { seconds: 10 })??;
-            if !response.starts_with("211") {
-                return Err(NntpError::GroupNotFound {
-                    group: group.to_string(),
-                }
-                .into());
-            }
-            self.current_group = Some(group.to_string());
-        }
-
-        // Pipeline all BODY requests - send them all without waiting
-        for req in requests {
-            self.writer
-                .write_all(format!("BODY <{}>\r\n", req.message_id).as_bytes())
-                .await?;
-        }
-        self.writer.flush().await?;
-
-        // Now read all responses in order
-        let mut results = Vec::with_capacity(requests.len());
-
-        for req in requests {
-            // Read response code
-            let response = match timeout(Duration::from_secs(30), self.read_response()).await {
-                Ok(Ok(r)) => r,
-                Ok(Err(e)) => return Err(e),
-                Err(_) => return Err(NntpError::Timeout { seconds: 30 }.into()),
-            };
-
-            if !response.starts_with("222") {
-                // Article not found or error
-                if response.starts_with("430") || response.starts_with("423") {
-                    // 430 = no such article, 423 = no such article number
-                    // These don't send a body, safe to skip
-                    results.push((req.segment_number, None));
-                    continue;
-                }
-
-                let code = response
-                    .get(0..3)
-                    .and_then(|s| s.parse::<u16>().ok())
-                    .unwrap_or(0);
-                return Err(NntpError::ServerError {
-                    code,
-                    message: response,
-                }
-                .into());
-            }
-
-            // Read and decode the body
-            let encoded_data =
-                match timeout(Duration::from_secs(60), self.read_article_body()).await {
-                    Ok(Ok(data)) => data,
-                    Ok(Err(e)) => return Err(e),
-                    Err(_) => return Err(NntpError::Timeout { seconds: 60 }.into()),
-                };
-
-            // Decode yEnc
-            match self.decode_yenc_simple(&encoded_data) {
-                Ok(decoded) => {
-                    results.push((req.segment_number, Some(Bytes::from(decoded))));
-                }
-                Err(_) => {
-                    results.push((req.segment_number, None));
-                }
-            }
-        }
-
-        Ok(results)
-    }
-
-    /// Close the connection gracefully
     pub async fn close(&mut self) -> Result<()> {
         let _ = self.send_command("QUIT").await;
         let _ = timeout(Duration::from_secs(2), self.read_response()).await;
-        // Note: OwnedWriteHalf doesn't need explicit shutdown
         Ok(())
     }
 
-    // Test helpers - expose internal functions for testing
-    #[cfg(test)]
-    pub fn test_decode_yenc_scalar(line: &[u8], output: &mut Vec<u8>) {
-        Self::decode_yenc_scalar(line, output);
-    }
-
-    #[cfg(test)]
-    pub fn test_decode_yenc_fast(line: &[u8], output: &mut Vec<u8>) {
-        Self::decode_yenc_fast(line, output);
-    }
-
-    #[cfg(test)]
-    pub fn test_decode_yenc_line_simd(line: &[u8], output: &mut Vec<u8>) {
-        Self::decode_yenc_line_simd(line, output);
+    fn poison_with(&mut self, e: std::io::Error) -> DlNzbError {
+        self.poisoned = true;
+        DlNzbError::from(e)
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_yenc_decode_simple_line() {
-        // Simple line without escapes: "Hello" encoded as yEnc
-        // yEnc adds 42 to each byte, so we create encoded data
-        let plain = b"Hello World!";
-        let encoded: Vec<u8> = plain.iter().map(|&b| b.wrapping_add(42)).collect();
-
-        let mut scalar_out = Vec::new();
-        let mut simd_out = Vec::new();
-
-        AsyncNntpConnection::test_decode_yenc_scalar(&encoded, &mut scalar_out);
-        AsyncNntpConnection::test_decode_yenc_fast(&encoded, &mut simd_out);
-
-        assert_eq!(scalar_out, plain.to_vec(), "Scalar decode failed");
-        assert_eq!(simd_out, plain.to_vec(), "SIMD decode failed");
-        assert_eq!(scalar_out, simd_out, "Scalar and SIMD results differ");
-    }
-
-    #[test]
-    fn test_yenc_decode_with_escapes() {
-        // Line with escape sequence: =J decodes to newline (10)
-        // In yEnc, escape sequences are: = followed by (char + 64)
-        // So to encode newline (10): 10 + 42 + 64 = 116 = 't', preceded by '='
-        // Decode: 't' - 64 - 42 = 10
-        let encoded = vec![b'r' + 42, b'=', b't', b's' + 42]; // "r" + escaped_newline + "s"
-
-        let mut output = Vec::new();
-        AsyncNntpConnection::test_decode_yenc_line_simd(&encoded, &mut output);
-
-        // Should get: 'r', newline (10), 's'
-        assert_eq!(output, vec![b'r', 10, b's']);
-    }
-
-    #[test]
-    fn test_yenc_decode_carriage_return_stripped() {
-        let plain = b"test";
-        let mut encoded: Vec<u8> = plain.iter().map(|&b| b.wrapping_add(42)).collect();
-        encoded.push(b'\r'); // Add carriage return at end
-
-        let mut output = Vec::new();
-        AsyncNntpConnection::test_decode_yenc_line_simd(&encoded, &mut output);
-
-        assert_eq!(output, plain.to_vec(), "Carriage return should be stripped");
-    }
-
-    #[test]
-    fn test_yenc_decode_empty_line() {
-        let mut output = Vec::new();
-        AsyncNntpConnection::test_decode_yenc_fast(&[], &mut output);
-        assert!(output.is_empty());
-
-        let mut output2 = Vec::new();
-        AsyncNntpConnection::test_decode_yenc_scalar(&[], &mut output2);
-        assert!(output2.is_empty());
-    }
-
-    #[test]
-    fn test_yenc_decode_short_line() {
-        // Line shorter than 16 bytes (SIMD chunk size)
-        let plain = b"Short";
-        let encoded: Vec<u8> = plain.iter().map(|&b| b.wrapping_add(42)).collect();
-
-        let mut output = Vec::new();
-        AsyncNntpConnection::test_decode_yenc_fast(&encoded, &mut output);
-
-        assert_eq!(output, plain.to_vec());
-    }
-
-    #[test]
-    fn test_yenc_decode_exactly_16_bytes() {
-        // Exactly one SIMD chunk
-        let plain = b"0123456789ABCDEF";
-        let encoded: Vec<u8> = plain.iter().map(|&b| b.wrapping_add(42)).collect();
-
-        let mut output = Vec::new();
-        AsyncNntpConnection::test_decode_yenc_fast(&encoded, &mut output);
-
-        assert_eq!(output, plain.to_vec());
-    }
-
-    #[test]
-    fn test_yenc_decode_32_bytes() {
-        // Two SIMD chunks
-        let plain = b"0123456789ABCDEF0123456789ABCDEF";
-        let encoded: Vec<u8> = plain.iter().map(|&b| b.wrapping_add(42)).collect();
-
-        let mut output = Vec::new();
-        AsyncNntpConnection::test_decode_yenc_fast(&encoded, &mut output);
-
-        assert_eq!(output, plain.to_vec());
-    }
-
-    #[test]
-    fn test_yenc_decode_33_bytes() {
-        // Two SIMD chunks + 1 remainder
-        let plain = b"0123456789ABCDEF0123456789ABCDEFX";
-        let encoded: Vec<u8> = plain.iter().map(|&b| b.wrapping_add(42)).collect();
-
-        let mut output = Vec::new();
-        AsyncNntpConnection::test_decode_yenc_fast(&encoded, &mut output);
-
-        assert_eq!(output, plain.to_vec());
-    }
-
-    #[test]
-    fn test_yenc_decode_large_line() {
-        // Typical yEnc line is 128 bytes
-        // Use bytes that won't produce '=' (61) or '\r' (13) when encoded
-        // Avoid: 61 - 42 = 19, 13 - 42 = -29 (wraps to 227)
-        let plain: Vec<u8> = (0..128)
-            .map(|i| {
-                let b = (i % 200) as u8 + 32;
-                // Ensure encoded value isn't '=' (61) or '\r' (13)
-                if b.wrapping_add(42) == b'=' || b.wrapping_add(42) == b'\r' {
-                    b + 1
-                } else {
-                    b
-                }
-            })
-            .collect();
-        let encoded: Vec<u8> = plain.iter().map(|&b| b.wrapping_add(42)).collect();
-
-        let mut scalar_out = Vec::new();
-        let mut simd_out = Vec::new();
-
-        AsyncNntpConnection::test_decode_yenc_scalar(&encoded, &mut scalar_out);
-        AsyncNntpConnection::test_decode_yenc_fast(&encoded, &mut simd_out);
-
-        assert_eq!(scalar_out, plain, "Scalar failed on large line");
-        assert_eq!(simd_out, plain, "SIMD failed on large line");
-    }
-
-    #[test]
-    fn test_simd_vs_scalar_equivalence() {
-        // Test with various sizes to ensure SIMD and scalar produce identical results
-        // Use bytes that won't produce '=' (61) or '\r' (13) when encoded
-        for size in [1, 15, 16, 17, 31, 32, 33, 64, 100, 128, 256] {
-            let plain: Vec<u8> = (0..size)
-                .map(|i| {
-                    let b = (i % 200) as u8 + 32;
-                    // Ensure encoded value isn't '=' (61) or '\r' (13)
-                    if b.wrapping_add(42) == b'=' || b.wrapping_add(42) == b'\r' {
-                        b + 1
-                    } else {
-                        b
-                    }
-                })
-                .collect();
-            let encoded: Vec<u8> = plain.iter().map(|&b| b.wrapping_add(42)).collect();
-
-            let mut scalar_out = Vec::new();
-            let mut simd_out = Vec::new();
-
-            AsyncNntpConnection::test_decode_yenc_scalar(&encoded, &mut scalar_out);
-            AsyncNntpConnection::test_decode_yenc_fast(&encoded, &mut simd_out);
-
-            assert_eq!(
-                scalar_out, simd_out,
-                "Mismatch at size {}: scalar={:?}, simd={:?}",
-                size, scalar_out, simd_out
-            );
-        }
-    }
-
-    #[test]
-    fn benchmark_simd_vs_scalar() {
-        // Simple benchmark to show SIMD benefit
-        let iterations = 10000;
-        let line_size = 128; // Typical yEnc line
-
-        let plain: Vec<u8> = (0..line_size).map(|i| (i % 200) as u8 + 32).collect();
-        let encoded: Vec<u8> = plain.iter().map(|&b| b.wrapping_add(42)).collect();
-
-        // Warm up
-        for _ in 0..100 {
-            let mut out = Vec::new();
-            AsyncNntpConnection::test_decode_yenc_fast(&encoded, &mut out);
-        }
-
-        // Benchmark SIMD
-        let start = std::time::Instant::now();
-        for _ in 0..iterations {
-            let mut out = Vec::with_capacity(line_size);
-            AsyncNntpConnection::test_decode_yenc_fast(&encoded, &mut out);
-            std::hint::black_box(out);
-        }
-        let simd_time = start.elapsed();
-
-        // Benchmark scalar
-        let start = std::time::Instant::now();
-        for _ in 0..iterations {
-            let mut out = Vec::with_capacity(line_size);
-            AsyncNntpConnection::test_decode_yenc_scalar(&encoded, &mut out);
-            std::hint::black_box(out);
-        }
-        let scalar_time = start.elapsed();
-
-        let speedup = scalar_time.as_nanos() as f64 / simd_time.as_nanos() as f64;
-
-        println!(
-            "\n=== yEnc Decode Benchmark ({} bytes x {} iterations) ===",
-            line_size, iterations
-        );
-        println!(
-            "SIMD:   {:?} ({:.2} ns/line)",
-            simd_time,
-            simd_time.as_nanos() as f64 / iterations as f64
-        );
-        println!(
-            "Scalar: {:?} ({:.2} ns/line)",
-            scalar_time,
-            scalar_time.as_nanos() as f64 / iterations as f64
-        );
-        println!("Speedup: {:.2}x", speedup);
-
-        // SIMD should be faster (or at least not slower)
-        // Note: On very short lines, scalar might be faster due to SIMD overhead
-        assert!(
-            speedup > 0.5,
-            "SIMD should not be more than 2x slower than scalar"
-        );
+fn sanitize_response(response: &str) -> String {
+    // Strip everything after the response code so credentials can't leak.
+    let code = response.split_whitespace().next().unwrap_or("");
+    if code.is_empty() {
+        "Unknown".into()
+    } else {
+        code.to_string()
     }
 }

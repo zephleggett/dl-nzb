@@ -5,70 +5,217 @@
 
 use super::file_extension;
 use crate::error::{DlNzbError, PostProcessingError};
-use std::fs;
+use crate::patterns::par2 as par2_patterns;
+use par2_rs::Par2Info;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::{fs, io::Read};
 
 type Result<T> = std::result::Result<T, DlNzbError>;
 
-/// Check if a filename looks obfuscated (random/meaningless)
+/// Outcome of the PAR2-driven filename recovery pass.
+pub struct Par2NameRecovery {
+    pub files_renamed: usize,
+}
+
+/// Rename obfuscated files to their real names using the authoritative file
+/// table embedded in the PAR2 set.
+///
+/// Each protected file is identified by the MD5 of its first 16 KiB (the PAR2
+/// `hash_16k`), so this works even when every filename on disk is scrambled —
+/// the most reliable deobfuscation method (this is what SABnzbd does). It must
+/// run BEFORE PAR2 repair so the repairer's name-match fast path sees real names
+/// and before any `delete_par2_after_repair` purge removes the par2 files.
+pub fn recover_par2_names(directory: &Path, par2_files: &[PathBuf]) -> Result<Par2NameRecovery> {
+    // Prefer the index par2 (no `.vol`), else any par2 file; `Par2Info::load`
+    // discovers sibling volumes by recovery-set id regardless.
+    let index = par2_files
+        .iter()
+        .find(|p| par2_patterns::is_main_par2(p))
+        .or_else(|| par2_files.first());
+    let Some(index) = index else {
+        return Ok(Par2NameRecovery { files_renamed: 0 });
+    };
+
+    let info = match Par2Info::load(index) {
+        Ok(i) => i,
+        Err(e) => {
+            tracing::debug!(
+                "PAR2 name recovery: could not parse {}: {}",
+                index.display(),
+                e
+            );
+            return Ok(Par2NameRecovery { files_renamed: 0 });
+        }
+    };
+
+    // Map first-16k hash -> real name. Drop any hash shared by two distinct
+    // names (ambiguous — can't safely pick), mirroring SABnzbd's duplicate guard.
+    let mut by_hash: HashMap<[u8; 16], String> = HashMap::new();
+    let mut ambiguous: HashSet<[u8; 16]> = HashSet::new();
+    let mut known_names: HashSet<String> = HashSet::new();
+    for f in &info.files {
+        known_names.insert(f.name.clone());
+        match by_hash.get(&f.hash_16k) {
+            Some(existing) if existing != &f.name => {
+                ambiguous.insert(f.hash_16k);
+            }
+            _ => {
+                by_hash.insert(f.hash_16k, f.name.clone());
+            }
+        }
+    }
+    for h in &ambiguous {
+        by_hash.remove(h);
+    }
+    if by_hash.is_empty() {
+        return Ok(Par2NameRecovery { files_renamed: 0 });
+    }
+
+    let entries: Vec<PathBuf> = match fs::read_dir(directory) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_file())
+            .collect(),
+        Err(_) => return Ok(Par2NameRecovery { files_renamed: 0 }),
+    };
+
+    let mut files_renamed = 0;
+    for path in entries {
+        if par2_patterns::is_par2_file(&path) {
+            continue;
+        }
+        let cur_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if cur_name.is_empty() || known_names.contains(cur_name) {
+            continue; // already correctly named
+        }
+        let hash = match md5_first_16k(&path) {
+            Ok(h) => h,
+            Err(_) => continue,
+        };
+        let Some(real_name) = by_hash.get(&hash) else {
+            continue;
+        };
+        if real_name == cur_name {
+            continue;
+        }
+        let target = path.with_file_name(real_name);
+        // Authoritative rename: if the destination already exists, skip rather
+        // than create a `name_1` variant that par2 verify can't match by name.
+        if target.exists() {
+            tracing::debug!(
+                "PAR2 name recovery: target {} exists, skipping",
+                target.display()
+            );
+            continue;
+        }
+        match fs::rename(&path, &target) {
+            Ok(()) => {
+                tracing::debug!("PAR2 name recovery: {} -> {}", path.display(), real_name);
+                files_renamed += 1;
+            }
+            Err(e) => tracing::debug!("PAR2 name recovery rename failed: {}", e),
+        }
+    }
+
+    Ok(Par2NameRecovery { files_renamed })
+}
+
+/// MD5 of the first 16 KiB of a file (or the whole file if smaller), matching
+/// the PAR2 `hash_16k` definition.
+fn md5_first_16k(path: &Path) -> std::io::Result<[u8; 16]> {
+    let mut f = fs::File::open(path)?;
+    let mut buf = vec![0u8; 16384];
+    let mut filled = 0;
+    while filled < buf.len() {
+        let n = f.read(&mut buf[filled..])?;
+        if n == 0 {
+            break;
+        }
+        filled += n;
+    }
+    Ok(par2_rs::hash::compute_md5(&buf[..filled]))
+}
+
+/// Heuristic: looks like a hash/scrambled name rather than a human-meaningful one.
 fn is_probably_obfuscated(filename: &str) -> bool {
-    // Remove extension for analysis
-    let name_without_ext = Path::new(filename)
+    let name = Path::new(filename)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or(filename);
-
-    // Check for patterns that suggest obfuscation
-    let lowercase = name_without_ext.to_lowercase();
-
-    // Too short to be meaningful
-    if name_without_ext.len() < 5 {
+    let lower = name.to_lowercase();
+    let len = name.len();
+    if len < 5 {
         return true;
     }
 
-    // Check for excessive special characters or numbers
-    let special_chars = name_without_ext
+    if lower.starts_with("f7f8f9") || lower.contains("yenc") {
+        return true;
+    }
+
+    // Word-boundary count: any contiguous segment of alphanumerics. Real
+    // release names typically have many short tokens separated by `.`, `_`,
+    // `-`, or space. Hashes have one giant token.
+    let mut word_count = 0usize;
+    let mut in_word = false;
+    let mut longest_digit_run = 0usize;
+    let mut current_digit_run = 0usize;
+    let mut longest_hex_run = 0usize;
+    let mut current_hex_run = 0usize;
+    for c in name.chars() {
+        if c.is_alphanumeric() {
+            if !in_word {
+                in_word = true;
+                word_count += 1;
+            }
+        } else {
+            in_word = false;
+        }
+        if c.is_ascii_digit() {
+            current_digit_run += 1;
+            longest_digit_run = longest_digit_run.max(current_digit_run);
+        } else {
+            current_digit_run = 0;
+        }
+        if c.is_ascii_hexdigit() {
+            current_hex_run += 1;
+            longest_hex_run = longest_hex_run.max(current_hex_run);
+        } else {
+            current_hex_run = 0;
+        }
+    }
+
+    // Single long alphanumeric blob that's mostly hex digits → likely a hash.
+    // Hashes typically run together as one token with no separators.
+    if word_count <= 1 && len >= 8 && longest_hex_run * 4 >= len * 3 {
+        return true;
+    }
+
+    let digits = name.chars().filter(|c| c.is_ascii_digit()).count();
+    let alpha = name.chars().filter(|c| c.is_alphabetic()).count();
+    let specials = name
         .chars()
-        .filter(|c| !c.is_alphanumeric() && *c != ' ' && *c != '-' && *c != '_')
-        .count();
-    let digits = name_without_ext.chars().filter(|c| c.is_numeric()).count();
-    let alpha = name_without_ext
-        .chars()
-        .filter(|c| c.is_alphabetic())
+        .filter(|c| !c.is_alphanumeric() && *c != ' ' && *c != '-' && *c != '_' && *c != '.')
         .count();
 
-    // More than 50% special chars or digits suggests obfuscation
-    if special_chars > name_without_ext.len() / 2 {
+    if specials > len / 2 {
         return true;
     }
-    if digits > name_without_ext.len() / 2 && alpha < 3 {
+    // Mostly digits with very little text.
+    if digits > len / 2 && alpha < 3 {
         return true;
     }
 
-    // Check for hex-like patterns (long strings of hex chars)
-    let hex_chars = name_without_ext
-        .chars()
-        .filter(|c| c.is_ascii_hexdigit())
-        .count();
-    if hex_chars > name_without_ext.len() * 3 / 4 && name_without_ext.len() > 8 {
-        return true;
-    }
-
-    // Check for common obfuscation patterns
-    if lowercase.starts_with("f7f8f9")
-        || lowercase.contains("yenc")
-        || lowercase.matches(char::is_numeric).count() > 10
-    {
-        return true;
-    }
-
-    // Check for lack of vowels (random consonant strings)
-    let vowels = name_without_ext
-        .chars()
-        .filter(|c| matches!(c.to_ascii_lowercase(), 'a' | 'e' | 'i' | 'o' | 'u'))
-        .count();
-    if alpha > 8 && vowels < alpha / 4 {
-        return true;
+    // Random consonant strings (very low vowel density in a single long word).
+    if word_count <= 1 {
+        let vowels = name
+            .chars()
+            .filter(|c| matches!(c.to_ascii_lowercase(), 'a' | 'e' | 'i' | 'o' | 'u'))
+            .count();
+        if alpha >= 8 && vowels < alpha / 4 {
+            return true;
+        }
     }
 
     false
@@ -294,6 +441,15 @@ pub fn deobfuscate_files(directory: &Path, useful_name: &str) -> Result<Deobfusc
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(&new_name);
+
+    // If the destination resolves to the same file we already have, there's
+    // nothing to rename — and forcing _1 suffix would be worse than doing nothing.
+    if new_path == biggest_file {
+        return Ok(DeobfuscateResult {
+            files_renamed,
+            extensions_fixed,
+        });
+    }
     let new_path = get_unique_filename(&new_path);
 
     tracing::debug!(

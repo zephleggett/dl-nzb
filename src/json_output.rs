@@ -1,8 +1,8 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::path::PathBuf;
 
 /// JSON output for list mode
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 pub struct NzbInfo {
     pub file: PathBuf,
     pub total_files: usize,
@@ -11,7 +11,7 @@ pub struct NzbInfo {
     pub files: Vec<FileInfo>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 pub struct FileInfo {
     pub filename: String,
     pub size: u64,
@@ -19,20 +19,41 @@ pub struct FileInfo {
     pub is_par2: bool,
 }
 
-/// JSON output for download results
-#[derive(Debug, Serialize, Deserialize)]
+/// JSON output for download results.
+///
+/// Byte/speed semantics:
+/// - `total_size`: all committed bytes on disk after truncation (decoded yEnc
+///   payload), including PAR2 recovery files.
+/// - `data_bytes`: committed bytes excluding PAR2 recovery files — the payload.
+/// - `par2_bytes`: committed PAR2 recovery bytes (overhead that exists only to
+///   repair the payload; 0 when none were fetched).
+/// - `wire_bytes`: plaintext bytes pulled from the socket — the encoded payload
+///   plus yEnc/NNTP framing and any retry traffic; matches what other NZB
+///   clients and network monitors report. Runs ~2-4% above the encoded payload.
+/// - `download_time_seconds`: wall clock from before the availability check to
+///   after the download settled — useful for "how long did the CLI invocation
+///   spend on the download phase".
+/// - `transfer_time_seconds`: wall clock from the first segment landing to
+///   the last — excludes pool warmup, availability checks, and finalization.
+/// - `average_speed_mib_per_sec`: `wire_bytes / transfer_time_seconds`, in
+///   1024-based MiB/s, matching the units shown by the live progress bar.
+#[derive(Debug, Serialize)]
 pub struct DownloadSummary {
     pub nzb: PathBuf,
     pub output_dir: PathBuf,
     pub success: bool,
     pub total_size: u64,
+    pub data_bytes: u64,
+    pub par2_bytes: u64,
+    pub wire_bytes: u64,
     pub download_time_seconds: f64,
-    pub average_speed_mbps: f64,
+    pub transfer_time_seconds: f64,
+    pub average_speed_mib_per_sec: f64,
     pub files: Vec<DownloadFileResult>,
     pub post_processing: PostProcessingResult,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 pub struct DownloadFileResult {
     pub filename: String,
     pub path: PathBuf,
@@ -42,7 +63,7 @@ pub struct DownloadFileResult {
     pub success: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 pub struct PostProcessingResult {
     pub par2_verified: bool,
     pub par2_repaired: bool,
@@ -51,7 +72,7 @@ pub struct PostProcessingResult {
 }
 
 /// JSON output for test command
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 pub struct TestResult {
     pub server: String,
     pub port: u16,
@@ -63,7 +84,7 @@ pub struct TestResult {
 }
 
 /// JSON output for errors
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 pub struct ErrorOutput {
     pub error: String,
     pub details: Option<String>,

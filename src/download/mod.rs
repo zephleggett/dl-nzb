@@ -6,5 +6,5 @@
 mod downloader;
 mod nzb;
 
-pub use downloader::{DownloadResult, Downloader};
+pub use downloader::{AvailabilityReport, DownloadOutcome, DownloadResult, Downloader};
 pub use nzb::Nzb;

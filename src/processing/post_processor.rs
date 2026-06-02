@@ -1,17 +1,21 @@
-//! Post-processing orchestration for downloaded files
+//! Post-processing: coordinate PAR2 verify/repair, RAR extraction, and deobfuscation.
 //!
-//! Coordinates PAR2 verification/repair, RAR extraction, and deobfuscation.
+//! The orchestration is deliberately conservative:
+//! 1. If PAR2 fails, we do NOT extract — corrupt RAR data could write garbage.
+//! 2. If RAR extraction starts and any segment in the RAR set failed to download,
+//!    we still attempt extraction only when PAR2 succeeded (which would have
+//!    repaired the damage).
+//! 3. Deobfuscation only runs once everything else has settled.
 
-use indicatif::ProgressBar;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use super::par2::{self, Par2Status};
-use super::rar::{self, RarExtractor};
+use super::rar::RarExtractor;
 use crate::config::PostProcessingConfig;
 use crate::download::DownloadResult;
 use crate::error::DlNzbError;
 use crate::patterns::par2 as par2_patterns;
+use crate::patterns::rar as rar_patterns;
 
 type Result<T> = std::result::Result<T, DlNzbError>;
 
@@ -24,6 +28,7 @@ pub struct PostProcessor {
 pub struct PostProcessingOutcome {
     pub par2_status: Par2Status,
     pub rar_extracted: bool,
+    pub rar_archives_failed: usize,
     pub files_renamed: usize,
     pub extensions_fixed: usize,
 }
@@ -44,6 +49,7 @@ impl PostProcessor {
             return Ok(PostProcessingOutcome {
                 par2_status: Par2Status::NoPar2Files,
                 rar_extracted: false,
+                rar_archives_failed: 0,
                 files_renamed: 0,
                 extensions_fixed: 0,
             });
@@ -51,7 +57,6 @@ impl PostProcessor {
 
         let download_dir = results[0].path.parent().unwrap_or(Path::new("."));
 
-        // Collect PAR2 files from download results
         let downloaded_par2_files: Vec<PathBuf> = results
             .iter()
             .filter(|r| par2_patterns::is_par2_file(&r.path))
@@ -63,103 +68,107 @@ impl PostProcessor {
             .and_then(|n| n.to_str())
             .unwrap_or("download");
 
-        // Run PAR2 repair if configured
-        let par2_status = if self.config.auto_par2_repair {
-            let bar = ProgressBar::new(100);
-            bar.enable_steady_tick(Duration::from_millis(100));
+        // Authoritative PAR2-driven name recovery BEFORE repair: identifies each
+        // obfuscated file by its first-16k MD5 against the PAR2 file table and
+        // renames it to the real name. Running here (not in the post-repair
+        // heuristic pass) means the repairer matches by name and any
+        // `delete_par2_after_repair` purge can't remove the par2 first.
+        let mut par2_renamed = 0usize;
+        if self.config.deobfuscate_file_names
+            && !downloaded_par2_files.is_empty()
+            && !crate::shutdown::is_requested()
+        {
+            match super::deobfuscate::recover_par2_names(download_dir, &downloaded_par2_files) {
+                Ok(rec) => {
+                    par2_renamed = rec.files_renamed;
+                    if par2_renamed > 0 && !crate::output_mode::is_quiet() {
+                        println!(
+                            "  \x1b[36m✓ Recovered {} name{} from PAR2\x1b[0m",
+                            par2_renamed,
+                            if par2_renamed == 1 { "" } else { "s" }
+                        );
+                    }
+                }
+                Err(e) => tracing::debug!("PAR2 name recovery failed: {}", e),
+            }
+        }
 
+        let par2_status = if self.config.auto_par2_repair && !crate::shutdown::is_requested() {
+            let bar =
+                crate::progress::create_progress_bar(100, crate::progress::ProgressStyle::Par2);
             par2::repair_with_par2(&self.config, download_dir, &downloaded_par2_files, &bar).await?
         } else {
             Par2Status::NoPar2Files
         };
 
-        // Check archive integrity
-        let archive_files_with_failures = self.check_archive_integrity(results, download_dir)?;
+        let archive_files_with_failures = self.check_archive_integrity(results);
 
-        // Extract RAR archives only if safe
-        let should_extract = self.config.auto_extract_rar
-            && ((archive_files_with_failures.is_empty() && par2_status == Par2Status::NoPar2Files)
-                || par2_status == Par2Status::Success);
+        let safe_to_extract = match par2_status {
+            Par2Status::Success => true,
+            Par2Status::Failed => false,
+            Par2Status::NoPar2Files => archive_files_with_failures.is_empty(),
+        };
 
         let mut rar_extracted = false;
-        if should_extract {
-            let bar = ProgressBar::new(100);
-            bar.enable_steady_tick(Duration::from_millis(100));
-
+        let mut rar_failed = 0usize;
+        if self.config.auto_extract_rar && safe_to_extract && !crate::shutdown::is_requested() {
+            let bar =
+                crate::progress::create_progress_bar(100, crate::progress::ProgressStyle::Par2);
             let extractor = RarExtractor::new(self.config.clone(), self.large_file_threshold);
-            let extracted_count = extractor.extract_archives(download_dir, &bar).await?;
-            rar_extracted = extracted_count > 0;
+            let report = extractor.extract_archives(download_dir, &bar).await?;
+            rar_extracted = report.archives_extracted > 0;
+            rar_failed = report.archives_failed;
+        } else if self.config.auto_extract_rar && !archive_files_with_failures.is_empty() {
+            if !crate::output_mode::is_quiet() {
+                println!(
+                    "  \x1b[33m⚠ Skipping RAR extraction — {} archive{} have download failures and PAR2 did not succeed\x1b[0m",
+                    archive_files_with_failures.len(),
+                    if archive_files_with_failures.len() == 1 { "" } else { "s" }
+                );
+            }
+        } else if self.config.auto_extract_rar
+            && par2_status == Par2Status::Failed
+            && !crate::output_mode::is_quiet()
+        {
+            println!("  \x1b[33m⚠ Skipping RAR extraction — PAR2 verification failed\x1b[0m");
         }
 
-        // Deobfuscate file names if configured
-        let mut files_renamed = 0;
-        let mut extensions_fixed = 0;
-        if self.config.deobfuscate_file_names {
-            let result = self.run_deobfuscation(download_dir, useful_name)?;
-            files_renamed = result.files_renamed;
-            extensions_fixed = result.extensions_fixed;
-        }
+        let (files_renamed, extensions_fixed) =
+            if self.config.deobfuscate_file_names && !crate::shutdown::is_requested() {
+                let result = self.run_deobfuscation(download_dir, useful_name)?;
+                (result.files_renamed, result.extensions_fixed)
+            } else {
+                (0, 0)
+            };
 
         Ok(PostProcessingOutcome {
             par2_status,
             rar_extracted,
-            files_renamed,
+            rar_archives_failed: rar_failed,
+            files_renamed: files_renamed + par2_renamed,
             extensions_fixed,
         })
     }
 
-    /// Check if any RAR files have failed segments
-    fn check_archive_integrity(
-        &self,
-        results: &[DownloadResult],
-        download_dir: &Path,
-    ) -> Result<Vec<String>> {
-        let mut failed_rar_files = Vec::new();
-
-        let rar_files: Vec<PathBuf> = std::fs::read_dir(download_dir)?
-            .filter_map(|entry| entry.ok())
-            .map(|entry| entry.path())
-            .filter(|path| rar::is_rar_archive(path))
-            .collect();
-
-        for rar_path in rar_files {
-            let filename = rar_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("unknown");
-
-            if let Some(result) = results.iter().find(|r| {
+    fn check_archive_integrity(&self, results: &[DownloadResult]) -> Vec<String> {
+        results
+            .iter()
+            .filter(|r| r.segments_failed > 0 && rar_patterns::is_extractable_archive(&r.path))
+            .filter_map(|r| {
                 r.path
                     .file_name()
                     .and_then(|n| n.to_str())
-                    .map(|n| n == filename)
-                    .unwrap_or(false)
-            }) {
-                if result.segments_failed > 0 {
-                    failed_rar_files.push(filename.to_string());
-                }
-            }
-        }
-
-        Ok(failed_rar_files)
+                    .map(str::to_owned)
+            })
+            .collect()
     }
 
-    /// Run deobfuscation on extracted files
     fn run_deobfuscation(
         &self,
         download_dir: &Path,
         useful_name: &str,
     ) -> Result<super::deobfuscate::DeobfuscateResult> {
-        use indicatif::ProgressStyle as IndicatifStyle;
-
-        let spinner = ProgressBar::new_spinner();
-        spinner.set_style(
-            IndicatifStyle::with_template("{spinner:.cyan} {msg}")
-                .unwrap()
-                .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
-        );
-        spinner.enable_steady_tick(Duration::from_millis(80));
-        spinner.set_message("Deobfuscating...");
+        let spinner = crate::progress::create_spinner("Deobfuscating...");
 
         match super::deobfuscate::deobfuscate_files(download_dir, useful_name) {
             Ok(result) => {
@@ -172,7 +181,9 @@ impl PostProcessor {
                         msg.push(format!("{} renamed", result.files_renamed));
                     }
                     spinner.finish_and_clear();
-                    println!("  \x1b[36m✓ Deobfuscated ({})\x1b[0m", msg.join(", "));
+                    if !crate::output_mode::is_quiet() {
+                        println!("  \x1b[36m✓ Deobfuscated ({})\x1b[0m", msg.join(", "));
+                    }
                 } else {
                     spinner.finish_and_clear();
                 }

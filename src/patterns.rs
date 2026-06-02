@@ -51,8 +51,8 @@ pub mod rar {
         true
     }
 
-    /// Check if a file is part of a RAR archive set (for deletion)
-    pub fn is_rar_related(filename: &str) -> bool {
+    /// Check if a file is part of a RAR archive set (for deletion).
+    fn is_rar_related(filename: &str) -> bool {
         let lower = filename.to_lowercase();
         lower.ends_with(".rar") || OLD_STYLE_SPLIT_REGEX.is_match(filename)
     }
@@ -95,19 +95,6 @@ pub mod par2 {
                 .and_then(|n| n.to_str())
                 .map(|name| !name.to_lowercase().contains(".vol"))
                 .unwrap_or(false)
-    }
-}
-
-/// Extension checking utilities
-pub mod ext {
-    use std::path::Path;
-
-    /// Check if path has a specific extension (case-insensitive)
-    pub fn has_extension(path: &Path, target_ext: &str) -> bool {
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.eq_ignore_ascii_case(target_ext))
-            .unwrap_or(false)
     }
 }
 

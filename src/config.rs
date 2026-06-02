@@ -97,6 +97,12 @@ pub struct PostProcessingConfig {
     pub delete_rar_after_extract: bool,
     pub delete_par2_after_repair: bool,
     pub deobfuscate_file_names: bool,
+    /// Download every PAR2 recovery volume up front. Default `false`: recovery
+    /// volumes are deferred and only fetched when a data segment is actually
+    /// missing or corrupt, saving the (often 10-30%) recovery bytes on the
+    /// common case where the download completes intact. (SABnzbd `enable_all_par`.)
+    #[serde(default)]
+    pub download_all_par2: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,14 +116,31 @@ pub struct LoggingConfig {
 /// These are advanced settings that typically don't need adjustment
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TuningConfig {
-    /// Number of segments to request per connection in a pipeline batch
-    pub pipeline_size: usize,
+    /// Number of `BODY` requests each connection keeps in flight (a continuous
+    /// sliding window) to hide round-trip latency. Small values (2-8) are ideal:
+    /// the pipeline stays continuously full while retry granularity and memory
+    /// stay tiny. Replaces the old per-batch `pipeline_size` knob (which is now
+    /// ignored if present in an old config).
+    #[serde(default = "default_pipeline_depth")]
+    pub pipeline_depth: usize,
+    /// Maximum retries for a yEnc decode (CRC/size) failure before the article
+    /// is given up. Transient wire failures are retried separately, uncounted.
+    #[serde(default = "default_decode_retry_cap")]
+    pub decode_retry_cap: u8,
     /// Maximum time (seconds) to wait for a pool connection before skipping batch
     pub connection_wait_timeout: u64,
     /// Maximum concurrent connection creation attempts
     pub max_concurrent_connections: usize,
     /// File size threshold (bytes) above which to show progress during RAR extraction
     pub large_file_threshold: u64,
+}
+
+fn default_pipeline_depth() -> usize {
+    4
+}
+
+fn default_decode_retry_cap() -> u8 {
+    3
 }
 
 // Default implementations
@@ -165,6 +188,7 @@ impl Default for PostProcessingConfig {
             delete_rar_after_extract: false,
             delete_par2_after_repair: false,
             deobfuscate_file_names: true,
+            download_all_par2: false,
         }
     }
 }
@@ -182,10 +206,11 @@ impl Default for LoggingConfig {
 impl Default for TuningConfig {
     fn default() -> Self {
         Self {
-            pipeline_size: 50,                      // Segments per connection batch
-            connection_wait_timeout: 300,           // 5 minutes max wait
-            max_concurrent_connections: 20,         // Concurrent connection creation limit
-            large_file_threshold: 10 * 1024 * 1024, // 10MB for progress monitoring
+            pipeline_depth: default_pipeline_depth(), // in-flight BODY requests per connection
+            decode_retry_cap: default_decode_retry_cap(), // bounded yEnc-decode retries
+            connection_wait_timeout: 300,             // 5 minutes max wait
+            max_concurrent_connections: 20,           // Concurrent connection creation limit
+            large_file_threshold: 10 * 1024 * 1024,   // 10MB for progress monitoring
         }
     }
 }
@@ -289,7 +314,7 @@ impl Config {
     }
 
     /// Create a sample configuration file
-    pub fn create_sample<P: AsRef<Path>>(path: P) -> Result<()> {
+    fn create_sample<P: AsRef<Path>>(path: P) -> Result<()> {
         let sample = Self::default();
         let content = toml::to_string_pretty(&sample)
             .map_err(|e| ConfigError::ParseError(format!("Failed to serialize config: {}", e)))?;
@@ -332,6 +357,7 @@ impl Config {
 # delete_rar_after_extract - Delete RAR files after successful extraction
 # delete_par2_after_repair - Delete PAR2 files after successful repair
 # deobfuscate_file_names  - Rename obfuscated files to meaningful names
+# download_all_par2       - Download all PAR2 recovery up front (default: false = fetch on demand)
 "#,
             content
         );
@@ -370,9 +396,9 @@ impl Config {
             .into());
         }
 
-        if self.tuning.pipeline_size == 0 {
+        if self.tuning.pipeline_depth == 0 {
             return Err(ConfigError::Invalid {
-                field: "pipeline_size".to_string(),
+                field: "pipeline_depth".to_string(),
                 reason: "Must be at least 1".to_string(),
             }
             .into());

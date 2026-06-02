@@ -1,5 +1,7 @@
 use human_bytes::human_bytes;
 use std::error::Error;
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
 use dl_nzb::{
@@ -21,11 +23,8 @@ type Result<T> = std::result::Result<T, DlNzbError>;
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse_and_validate();
-
-    // Store JSON flag before moving cli
     let use_json = cli.json;
 
-    // Run the actual main logic and handle errors appropriately
     if let Err(e) = run(cli).await {
         if use_json {
             let error_output = ErrorOutput::from_error(&e);
@@ -47,48 +46,85 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<()> {
-    // Initialize logging
     init_logging(&cli)?;
 
-    // Handle Ctrl+C gracefully
-    tokio::spawn(async {
-        let _ = tokio::signal::ctrl_c().await;
-        eprintln!("\nInterrupted.");
-        std::process::exit(130); // Standard Ctrl+C exit code
-    });
+    // Two-stage Ctrl+C:
+    //   1st: request graceful shutdown — workers stop accepting new jobs, the
+    //        writer finalizes in-flight writes, and post-processing is skipped.
+    //   2nd: force an immediate exit (130).
+    // A 10-second backstop hard-exits if the graceful drain hangs.
+    spawn_signal_handler();
 
-    // Handle special commands first
     if let Some(command) = &cli.command {
         return handle_command(command, &cli).await;
     }
 
-    // Load configuration (auto-creates if it doesn't exist)
     let mut config = Config::load()?;
-
-    // Apply CLI overrides
     config.apply_overrides(cli.get_config_overrides());
-
-    // Validate configuration
     config.validate()?;
 
-    // Handle list mode
     if cli.list {
         return handle_list_mode(&cli).await;
     }
 
-    // Check if we have files to download
     if cli.files.is_empty() {
         eprintln!("No NZB files specified. Use 'dl-nzb --help' for usage information.");
         return Ok(());
     }
 
-    // Download mode
     handle_download_mode(&cli, config).await
 }
 
-/// Initialize logging based on CLI arguments
+/// Counter for the `test` subcommand, which doesn't care about byte tallies.
+fn throwaway_counter() -> Arc<AtomicU64> {
+    Arc::new(AtomicU64::new(0))
+}
+
+/// Spawn the Ctrl+C handler. First interrupt requests a graceful shutdown (and
+/// arms a 10s hard-exit backstop); a second interrupt forces an immediate exit.
+fn spawn_signal_handler() {
+    #[cfg(unix)]
+    tokio::spawn(async {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigint = match signal(SignalKind::interrupt()) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        sigint.recv().await;
+        eprintln!("\nInterrupted; finishing pending writes, skipping post-processing…");
+        dl_nzb::shutdown::request();
+        // Either a second Ctrl+C or the backstop forces exit.
+        tokio::select! {
+            _ = sigint.recv() => {
+                eprintln!("Force quit.");
+                std::process::exit(130);
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
+                std::process::exit(130);
+            }
+        }
+    });
+
+    #[cfg(not(unix))]
+    tokio::spawn(async {
+        if tokio::signal::ctrl_c().await.is_err() {
+            return;
+        }
+        eprintln!("\nInterrupted; finishing pending writes, skipping post-processing…");
+        dl_nzb::shutdown::request();
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!("Force quit.");
+                std::process::exit(130);
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
+                std::process::exit(130);
+            }
+        }
+    });
+}
+
 fn init_logging(cli: &Cli) -> Result<()> {
-    // Base filter from CLI, but suppress par2-rs logs (they break progress bars)
     let filter = EnvFilter::try_new(cli.get_log_level())
         .unwrap_or_else(|_| EnvFilter::new("info"))
         .add_directive("par2_rs=off".parse().unwrap());
@@ -106,7 +142,6 @@ fn init_logging(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-/// Handle subcommands
 async fn handle_command(command: &Commands, cli: &Cli) -> Result<()> {
     match command {
         Commands::Test => {
@@ -114,7 +149,6 @@ async fn handle_command(command: &Commands, cli: &Cli) -> Result<()> {
             let test_config = config.usenet.clone();
 
             if cli.json {
-                // JSON output mode
                 let mut result = TestResult {
                     server: test_config.server.clone(),
                     port: test_config.port,
@@ -124,8 +158,7 @@ async fn handle_command(command: &Commands, cli: &Cli) -> Result<()> {
                     healthy: false,
                     error: None,
                 };
-
-                match AsyncNntpConnection::connect(&test_config, None).await {
+                match AsyncNntpConnection::connect(&test_config, None, throwaway_counter()).await {
                     Ok(mut conn) => {
                         result.connected = true;
                         result.authenticated = true;
@@ -136,21 +169,16 @@ async fn handle_command(command: &Commands, cli: &Cli) -> Result<()> {
                         result.error = Some(e.to_string());
                     }
                 }
-
                 println!("{}", serde_json::to_string_pretty(&result)?);
             } else {
-                // Human-readable output
                 println!("Testing connection to Usenet server...");
-
-                match AsyncNntpConnection::connect(&test_config, None).await {
+                match AsyncNntpConnection::connect(&test_config, None, throwaway_counter()).await {
                     Ok(mut conn) => {
                         println!("✓ Successfully connected to {}", test_config.server);
                         println!("   Authentication: OK");
-
                         if conn.is_healthy().await {
                             println!("   Server status: Healthy");
                         }
-
                         let _ = conn.close().await;
                     }
                     Err(e) => {
@@ -159,13 +187,11 @@ async fn handle_command(command: &Commands, cli: &Cli) -> Result<()> {
                     }
                 }
             }
-
             Ok(())
         }
 
         Commands::Config => {
             let config_path = Config::config_path()?;
-
             println!("Configuration file location:");
             println!("  {}", config_path.display());
             println!();
@@ -174,7 +200,6 @@ async fn handle_command(command: &Commands, cli: &Cli) -> Result<()> {
                 println!("Current configuration:");
                 println!("{}", "─".repeat(60));
                 let mut config = Config::load()?;
-                // Redact password before display
                 if !config.usenet.password.is_empty() {
                     config.usenet.password = "********".to_string();
                 }
@@ -185,7 +210,6 @@ async fn handle_command(command: &Commands, cli: &Cli) -> Result<()> {
                 println!("Configuration file does not exist yet.");
                 println!("Run any command to auto-create it with default values.");
             }
-
             Ok(())
         }
 
@@ -194,8 +218,9 @@ async fn handle_command(command: &Commands, cli: &Cli) -> Result<()> {
             println!("A fast, lightweight NZB downloader");
             println!();
             println!("Features:");
-            println!("  • Parallel segment downloads");
-            println!("  • Built-in PAR2 repair");
+            println!("  • Parallel segment downloads with per-segment retry");
+            println!("  • yEnc decoder with =ypart offsets and CRC32 verification");
+            println!("  • Built-in PAR2 repair (par2-rs, pure Rust + SIMD)");
             println!("  • Automatic RAR extraction");
             println!("  • JSON output for scripting");
             Ok(())
@@ -203,15 +228,11 @@ async fn handle_command(command: &Commands, cli: &Cli) -> Result<()> {
     }
 }
 
-/// Handle list mode
 async fn handle_list_mode(cli: &Cli) -> Result<()> {
     if cli.json {
-        // JSON output mode
         let mut results = Vec::new();
-
         for nzb_path in &cli.files {
             let nzb = Nzb::from_file(nzb_path)?;
-
             let files: Vec<FileInfo> = nzb
                 .files()
                 .iter()
@@ -219,8 +240,8 @@ async fn handle_list_mode(cli: &Cli) -> Result<()> {
                     let filename = Nzb::get_filename_from_subject(&file.subject)
                         .unwrap_or_else(|| file.subject.clone());
                     let size: u64 = file.segments.segment.iter().map(|s| s.bytes).sum();
-                    let is_par2 = filename.to_lowercase().ends_with(".par2");
-
+                    let is_par2 =
+                        dl_nzb::patterns::par2::is_par2_file(std::path::Path::new(&filename));
                     FileInfo {
                         filename,
                         size,
@@ -229,7 +250,6 @@ async fn handle_list_mode(cli: &Cli) -> Result<()> {
                     }
                 })
                 .collect();
-
             results.push(NzbInfo {
                 file: nzb_path.clone(),
                 total_files: nzb.files().len(),
@@ -238,32 +258,27 @@ async fn handle_list_mode(cli: &Cli) -> Result<()> {
                 files,
             });
         }
-
         println!("{}", serde_json::to_string_pretty(&results)?);
     } else {
-        // Human-readable output
         for nzb_path in &cli.files {
             println!("\n📄 {}", nzb_path.display());
             println!("{}", "─".repeat(50));
-
             let nzb = Nzb::from_file(nzb_path)?;
-
-            // Display NZB info
             println!("Total files: {}", nzb.files().len());
             println!("Total size: {}", human_bytes(nzb.total_size() as f64));
             println!("Total segments: {}", nzb.total_segments());
-
             println!("\nFiles:");
             for file in nzb.files() {
                 let filename = Nzb::get_filename_from_subject(&file.subject)
                     .unwrap_or_else(|| file.subject.clone());
                 let display_name = sanitize_display(&filename);
                 let size: u64 = file.segments.segment.iter().map(|s| s.bytes).sum();
-                let file_type = if filename.to_lowercase().ends_with(".par2") {
-                    "PAR2"
-                } else {
-                    "DATA"
-                };
+                let file_type =
+                    if dl_nzb::patterns::par2::is_par2_file(std::path::Path::new(&filename)) {
+                        "PAR2"
+                    } else {
+                        "DATA"
+                    };
                 println!(
                     "  [{:4}] {} ({})",
                     file_type,
@@ -273,45 +288,33 @@ async fn handle_list_mode(cli: &Cli) -> Result<()> {
             }
         }
     }
-
     Ok(())
 }
 
-/// Create a styled spinner with the given message
-fn create_spinner(msg: &str) -> indicatif::ProgressBar {
-    use indicatif::{ProgressBar, ProgressStyle};
-    let spinner = ProgressBar::new_spinner();
-    spinner.set_style(
-        ProgressStyle::with_template("{spinner:.cyan} {msg}")
-            .unwrap()
-            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
-    );
-    spinner.enable_steady_tick(std::time::Duration::from_millis(80));
-    spinner.set_message(msg.to_string());
-    spinner
-}
-
-/// Handle download mode
 async fn handle_download_mode(cli: &Cli, config: Config) -> Result<()> {
-    // Validate download-specific configuration (server credentials)
     config.validate_for_download()?;
 
-    // Create downloader with spinner (unless JSON output)
+    // In JSON mode, suppress the decorative human-readable progress lines from
+    // the downloader/post-processor so the JSON document is the only stdout
+    // content. stderr remains available for warnings.
+    if cli.json {
+        dl_nzb::output_mode::set_quiet(true);
+    }
+
     let downloader = if cli.json {
         Downloader::new(config.clone()).await?
     } else {
-        let spinner = create_spinner("Connecting to server...");
-
+        let spinner = dl_nzb::progress::create_spinner("Connecting to server...");
         let downloader = Downloader::new(config.clone()).await?;
-
         spinner.finish_and_clear();
         downloader
     };
 
-    // Process each NZB file
-    let mut all_results = Vec::new();
-
     for nzb_path in &cli.files {
+        // Don't start (or continue to) another NZB after an interrupt.
+        if dl_nzb::shutdown::is_requested() {
+            break;
+        }
         let nzb = match Nzb::from_file(nzb_path) {
             Ok(nzb) => nzb,
             Err(e) => {
@@ -320,9 +323,7 @@ async fn handle_download_mode(cli: &Cli, config: Config) -> Result<()> {
             }
         };
 
-        // Create output directory based on NZB filename
         let output_dir = if config.download.create_subfolders {
-            // Use NZB filename (without extension) as folder name
             let folder_name = nzb_path
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -335,110 +336,82 @@ async fn handle_download_mode(cli: &Cli, config: Config) -> Result<()> {
 
         std::fs::create_dir_all(&output_dir)?;
 
-        // Update config for this download
         let mut download_config = config.clone();
         download_config.download.dir = output_dir.clone();
         download_config.download.force_redownload = cli.force;
 
-        // Track timing for JSON output
         let download_start = std::time::Instant::now();
 
-        // Quick availability check (unless JSON mode or quiet)
+        // Pre-flight availability scan: STAT every segment to learn exactly
+        // what's missing before committing to the download. Builds the skip set
+        // (so missing articles are never fetched) and estimates whether PAR2 can
+        // repair the gap. Runs in every mode; only the interactive abort prompt
+        // is gated to interactive runs (JSON/quiet report and continue).
         let mut skip_message_ids: Option<std::collections::HashSet<String>> = None;
-        if !cli.json && !cli.quiet {
-            let spinner = create_spinner("Checking article availability...");
-
-            match downloader.check_availability(&nzb).await {
-                Ok((available, missing, total, missing_ids)) => {
-                    spinner.finish_and_clear();
-
-                    if !missing_ids.is_empty() {
-                        skip_message_ids = Some(missing_ids.clone());
+        {
+            let interactive = !cli.json && !cli.quiet;
+            let spinner = interactive
+                .then(|| dl_nzb::progress::create_spinner("Checking article availability..."));
+            match downloader.check_all_availability(&nzb).await {
+                Ok(report) => {
+                    if let Some(s) = spinner {
+                        s.finish_and_clear();
                     }
-
-                    if missing > 0 {
-                        let percent = (available as f64 / total as f64) * 100.0;
-
-                        // Check which files are missing by looking up the missing message IDs
-                        let missing_files: Vec<String> = nzb
-                            .files()
+                    if !report.missing_ids.is_empty() {
+                        skip_message_ids = Some(report.missing_ids.clone());
+                    }
+                    if !report.missing_files.is_empty() {
+                        let percent = report.data_completion_percent();
+                        let missing_display: Vec<String> = report
+                            .missing_files
                             .iter()
-                            .filter(|f| {
-                                f.segments
-                                    .segment
-                                    .first()
-                                    .map(|s| missing_ids.contains(&s.message_id))
-                                    .unwrap_or(false)
-                            })
-                            .filter_map(|f| Nzb::get_filename_from_subject(&f.subject))
+                            .map(|n| sanitize_display(n))
                             .collect();
-                        let missing_display: Vec<String> =
-                            missing_files.iter().map(|n| sanitize_display(n)).collect();
-
-                        // Check if only non-essential files are missing (.nfo, .sfv, .srr)
-                        let only_nonessential = missing_files.iter().all(|name| {
-                            let lower = name.to_lowercase();
-                            lower.ends_with(".nfo")
-                                || lower.ends_with(".sfv")
-                                || lower.ends_with(".srr")
-                        });
-
-                        // Check if PAR2 files are available
-                        let has_par2 = nzb.files().iter().any(|f| {
-                            Nzb::get_filename_from_subject(&f.subject)
-                                .map(|n| n.to_lowercase().ends_with(".par2"))
-                                .unwrap_or(false)
-                        });
-
-                        // PAR2 typically provides 10% redundancy
-                        let missing_percent = 100.0 - percent;
-                        let can_likely_repair = has_par2 && missing_percent <= 10.0;
-
-                        if only_nonessential {
-                            // Just info, non-essential files missing
-                            println!(
-                                "\x1b[90mℹ {:.0}% available ({} missing: {})\x1b[0m",
-                                percent,
-                                missing,
-                                missing_display.join(", ")
-                            );
-                            // Continue without prompting
-                        } else if can_likely_repair {
-                            println!(
-                                "\x1b[33m⚠ {:.0}% available ({} of {} files). PAR2 repair likely.\x1b[0m",
-                                percent, available, total
-                            );
-                            // Continue without prompting
-                        } else {
-                            // Significant missing files - prompt user
-                            if has_par2 {
-                                println!(
-                                    "\x1b[31m✗ Only {:.0}% available ({} of {} files). PAR2 repair unlikely.\x1b[0m",
-                                    percent, available, total
-                                );
+                        // Emit the verdict to stdout for interactive runs, stderr
+                        // otherwise (keeps `--json` stdout a clean document).
+                        let say = |line: String| {
+                            if interactive {
+                                println!("{}", line);
                             } else {
-                                println!(
-                                    "\x1b[31m✗ Only {:.0}% available ({} of {} files). No PAR2 for repair.\x1b[0m",
-                                    percent, available, total
-                                );
+                                eprintln!("{}", line);
                             }
-
-                            // Prompt user
-                            eprint!("  Continue anyway? [y/N] ");
-                            use std::io::{self, BufRead, Write};
-                            io::stderr().flush().ok();
-
-                            let stdin = io::stdin();
-                            let response = stdin.lock().lines().next();
-                            match response {
-                                Some(Ok(line)) => {
-                                    let answer = line.trim().to_lowercase();
-                                    if answer != "y" && answer != "yes" {
-                                        println!("  Aborted.");
-                                        continue; // Skip to next NZB
+                        };
+                        if report.only_nonessential_missing() {
+                            say(format!(
+                                "\x1b[90mℹ {:.1}% of data available ({} non-essential missing: {})\x1b[0m",
+                                percent,
+                                report.missing_files.len(),
+                                missing_display.join(", ")
+                            ));
+                        } else if report.likely_repairable() {
+                            say(format!(
+                                "\x1b[33m⚠ {:.1}% of data available; {} recovery present — PAR2 repair likely.\x1b[0m",
+                                percent,
+                                human_bytes(report.available_par2_bytes as f64)
+                            ));
+                        } else {
+                            let reason = if report.has_par2 {
+                                "PAR2 recovery is insufficient"
+                            } else {
+                                "no PAR2 files for repair"
+                            };
+                            say(format!(
+                                "\x1b[31m✗ {:.1}% of data available; {} — repair unlikely.\x1b[0m",
+                                percent, reason
+                            ));
+                            if interactive {
+                                eprint!("  Continue anyway? [y/N] ");
+                                use std::io::{self, BufRead, Write};
+                                io::stderr().flush().ok();
+                                let stdin = io::stdin();
+                                let proceed = matches!(
+                                    stdin.lock().lines().next(),
+                                    Some(Ok(line)) if {
+                                        let a = line.trim().to_lowercase();
+                                        a == "y" || a == "yes"
                                     }
-                                }
-                                _ => {
+                                );
+                                if !proceed {
                                     println!("  Aborted.");
                                     continue;
                                 }
@@ -447,22 +420,29 @@ async fn handle_download_mode(cli: &Cli, config: Config) -> Result<()> {
                     }
                 }
                 Err(e) => {
-                    spinner.finish_and_clear();
-                    eprintln!("Warning: Could not check availability: {}", e);
-                    // Continue with download anyway
+                    if let Some(s) = spinner {
+                        s.finish_and_clear();
+                    }
+                    eprintln!("Warning: could not check availability: {}", e);
                 }
             }
         }
 
-        // Download the NZB - handle 430s inline
         match downloader
-            .download_nzb(&nzb, download_config.clone(), skip_message_ids.as_ref())
+            .download_nzb_on_demand(
+                &nzb,
+                download_config.clone(),
+                skip_message_ids.as_ref(),
+                config.post_processing.download_all_par2,
+            )
             .await
         {
-            Ok((results, _progress_bar)) => {
+            Ok(outcome) => {
+                let results = outcome.files;
+                let transfer_time = outcome.transfer_duration;
+                let actual_wire_bytes = outcome.actual_wire_bytes;
                 let download_time = download_start.elapsed();
 
-                // Post-processing
                 let mut post_result = PostProcessingResult {
                     par2_verified: false,
                     par2_repaired: false,
@@ -472,7 +452,21 @@ async fn handle_download_mode(cli: &Cli, config: Config) -> Result<()> {
                 let mut post_outcome: Option<PostProcessingOutcome> = None;
                 let mut post_failed = false;
 
-                if config.post_processing.auto_par2_repair
+                // Skip post-processing entirely if a shutdown was requested —
+                // PAR2 repair / RAR extraction on an interrupted, incomplete
+                // download is wasted work the user asked us to stop.
+                let interrupted = dl_nzb::shutdown::is_requested();
+
+                if interrupted {
+                    let partials = count_partials(&output_dir);
+                    if !cli.json {
+                        eprintln!(
+                            "Skipping post-processing (interrupted). Left {} incomplete file(s) in {}",
+                            partials,
+                            output_dir.display()
+                        );
+                    }
+                } else if config.post_processing.auto_par2_repair
                     || config.post_processing.auto_extract_rar
                 {
                     let processor = PostProcessor::new(
@@ -496,31 +490,47 @@ async fn handle_download_mode(cli: &Cli, config: Config) -> Result<()> {
                     }
                 }
 
+                // Re-read shutdown: a Ctrl-C *during* post-processing (cancelled
+                // PAR2 repair returns Failed) should read as "interrupted", not a
+                // genuine verification failure.
+                let interrupted = interrupted || dl_nzb::shutdown::is_requested();
                 let download_ok = results.iter().all(|r| r.segments_failed == 0);
                 let post_ok = if post_failed {
                     false
                 } else if let Some(outcome) = post_outcome.as_ref() {
-                    outcome.par2_status != Par2Status::Failed
+                    outcome.par2_status != Par2Status::Failed && outcome.rar_archives_failed == 0
                 } else {
                     true
                 };
+                let success = download_ok && post_ok && !interrupted;
 
-                let success = download_ok && post_ok;
-
-                // Output results
                 if cli.json {
                     let total_size: u64 = results.iter().map(|r| r.size).sum();
+                    let par2_bytes: u64 = results
+                        .iter()
+                        .filter(|r| dl_nzb::patterns::par2::is_par2_file(&r.path))
+                        .map(|r| r.size)
+                        .sum();
+                    let data_bytes = total_size.saturating_sub(par2_bytes);
+                    let transfer_secs = transfer_time.as_secs_f64();
+                    // Guard against division by ~0 for very short downloads;
+                    // anything under 50 ms doesn't yield a meaningful rate.
+                    let speed_mib_per_sec = if transfer_secs >= 0.05 {
+                        (actual_wire_bytes as f64) / 1_048_576.0 / transfer_secs
+                    } else {
+                        0.0
+                    };
                     let summary = DownloadSummary {
                         nzb: nzb_path.clone(),
                         output_dir: output_dir.clone(),
                         success,
                         total_size,
+                        data_bytes,
+                        par2_bytes,
+                        wire_bytes: actual_wire_bytes,
                         download_time_seconds: download_time.as_secs_f64(),
-                        average_speed_mbps: if download_time.as_secs() > 0 {
-                            (total_size as f64 / 1024.0 / 1024.0) / download_time.as_secs_f64()
-                        } else {
-                            0.0
-                        },
+                        transfer_time_seconds: transfer_secs,
+                        average_speed_mib_per_sec: speed_mib_per_sec,
                         files: results
                             .iter()
                             .map(|r| DownloadFileResult {
@@ -535,9 +545,13 @@ async fn handle_download_mode(cli: &Cli, config: Config) -> Result<()> {
                         post_processing: post_result,
                     };
                     println!("{}", serde_json::to_string_pretty(&summary)?);
+                } else if interrupted {
+                    println!(
+                        "\x1b[1;33m■ Interrupted\x1b[0m \x1b[90m└─\x1b[0m \x1b[34m{}\x1b[0m",
+                        output_dir.display()
+                    );
                 } else {
                     print_final_summary(
-                        &nzb,
                         &results,
                         &output_dir,
                         download_time,
@@ -545,8 +559,6 @@ async fn handle_download_mode(cli: &Cli, config: Config) -> Result<()> {
                         post_failed,
                     );
                 }
-
-                all_results.extend(results);
             }
             Err(e) => {
                 if cli.json {
@@ -559,7 +571,6 @@ async fn handle_download_mode(cli: &Cli, config: Config) -> Result<()> {
         }
     }
 
-    // Terminal bell to notify completion (skip in quiet/json mode)
     if !cli.quiet && !cli.json {
         print!("\x07");
     }
@@ -567,7 +578,6 @@ async fn handle_download_mode(cli: &Cli, config: Config) -> Result<()> {
     Ok(())
 }
 
-/// Format a duration as human-readable: "3s", "2m 15s", "1h 30m"
 fn format_duration(d: std::time::Duration) -> String {
     let secs = d.as_secs();
     if secs < 60 {
@@ -591,20 +601,16 @@ fn format_duration(d: std::time::Duration) -> String {
     }
 }
 
-/// Print a final summary after all processing is complete
 fn print_final_summary(
-    _nzb: &Nzb,
     results: &[dl_nzb::download::DownloadResult],
     output_dir: &std::path::Path,
     download_time: std::time::Duration,
     post_outcome: Option<&PostProcessingOutcome>,
     post_failed: bool,
 ) {
-    // Calculate total stats
     let total_size: u64 = results.iter().map(|r| r.size).sum();
     let failed_count = results.iter().filter(|r| r.segments_failed > 0).count();
 
-    // Find the main video/media file (largest non-PAR2, non-RAR file)
     let main_file = std::fs::read_dir(output_dir).ok().and_then(|entries| {
         entries
             .filter_map(|e| e.ok())
@@ -615,30 +621,32 @@ fn print_final_summary(
                     && !name.ends_with(".rar")
                     && !name.ends_with(".nfo")
                     && !name.ends_with(".sfv")
+                    && !name.ends_with(".partial")
             })
             .max_by_key(|e| e.metadata().ok().map(|m| m.len()).unwrap_or(0))
     });
 
     println!();
 
-    let mut post_issue = false;
-    let mut post_issue_msg = None;
-    if post_failed {
-        post_issue = true;
-        post_issue_msg = Some("Post-processing failed");
+    let post_issue: Option<&str> = if post_failed {
+        Some("Post-processing failed")
     } else if let Some(outcome) = post_outcome {
         if outcome.par2_status == Par2Status::Failed {
-            post_issue = true;
-            post_issue_msg = Some("PAR2 verification failed");
+            Some("PAR2 verification failed")
+        } else if outcome.rar_archives_failed > 0 {
+            Some("RAR extraction had failures")
+        } else {
+            None
         }
-    }
+    } else {
+        None
+    };
 
-    if failed_count == 0 && !post_issue {
+    if failed_count == 0 && post_issue.is_none() {
         if let Some(file) = main_file {
             let filename = file.file_name().to_string_lossy().to_string();
             let display_name = sanitize_display(&filename);
             let file_size = file.metadata().ok().map(|m| m.len()).unwrap_or(0);
-
             println!(
                 "\x1b[1;32m✓ Complete:\x1b[0m \x1b[37m{}\x1b[0m",
                 display_name
@@ -653,7 +661,6 @@ fn print_final_summary(
                 format_duration(download_time)
             );
         } else {
-            // No main file found, just show stats
             println!("\x1b[1;32m✓ Complete\x1b[0m");
             println!(
                 "  \x1b[90m└─\x1b[0m \x1b[34m{}\x1b[0m",
@@ -666,7 +673,7 @@ fn print_final_summary(
             );
         }
     } else if failed_count == 0 {
-        let issue = post_issue_msg.unwrap_or("Post-processing issues");
+        let issue = post_issue.unwrap_or("Post-processing issues");
         println!(
             "\x1b[1;33m⚠ Completed with issues:\x1b[0m \x1b[37m{}\x1b[0m",
             issue
@@ -690,4 +697,16 @@ fn print_final_summary(
 
 fn sanitize_display(input: &str) -> String {
     input.chars().filter(|c| !c.is_ascii_control()).collect()
+}
+
+/// Count `*.partial` files left behind in a directory (after an interrupt we
+/// keep them rather than renaming truncated data to final names).
+fn count_partials(dir: &std::path::Path) -> usize {
+    std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".partial"))
+                .count()
+        })
+        .unwrap_or(0)
 }

@@ -1,12 +1,8 @@
-//! Domain-specific error types for dl-nzb
-//!
-//! This module provides structured error handling with proper error chains
-//! and context preservation.
+//! Domain-specific error types for dl-nzb.
 
 use std::path::PathBuf;
 use thiserror::Error;
 
-/// Top-level error type for the dl-nzb application
 #[derive(Error, Debug)]
 pub enum DlNzbError {
     #[error("NZB error: {0}")]
@@ -34,29 +30,12 @@ pub enum DlNzbError {
     SerdeJson(#[from] serde_json::Error),
 }
 
-/// NZB parsing and validation errors
 #[derive(Error, Debug)]
 pub enum NzbError {
     #[error("Failed to parse NZB file: {0}")]
     ParseError(String),
-
-    #[error("Invalid NZB file at {path}: {reason}")]
-    InvalidFile { path: PathBuf, reason: String },
-
-    #[error("NZB file not found: {0}")]
-    NotFound(PathBuf),
-
-    #[error("No files found in NZB")]
-    EmptyNzb,
-
-    #[error("Missing required field: {0}")]
-    MissingField(String),
-
-    #[error("Invalid segment: {0}")]
-    InvalidSegment(String),
 }
 
-/// NNTP protocol and connection errors
 #[derive(Error, Debug)]
 pub enum NntpError {
     #[error("Connection failed to {server}:{port}: {source}")]
@@ -81,9 +60,6 @@ pub enum NntpError {
     #[error("Server response error: {code} {message}")]
     ServerError { code: u16, message: String },
 
-    #[error("Article not found: {message_id}")]
-    ArticleNotFound { message_id: String },
-
     #[error("Group not found: {group}")]
     GroupNotFound { group: String },
 
@@ -94,12 +70,8 @@ pub enum NntpError {
     UnhealthyConnection,
 }
 
-/// Configuration validation errors
 #[derive(Error, Debug)]
 pub enum ConfigError {
-    #[error("Configuration file not found: {0}")]
-    NotFound(PathBuf),
-
     #[error("Failed to parse configuration: {0}")]
     ParseError(String),
 
@@ -117,57 +89,21 @@ pub enum ConfigError {
 
     #[error("Invalid path: {path}: {reason}")]
     InvalidPath { path: PathBuf, reason: String },
-
-    #[error("Environment variable error: {0}")]
-    EnvVar(#[from] std::env::VarError),
 }
 
-/// Download operation errors
 #[derive(Error, Debug)]
 pub enum DownloadError {
-    #[error("Failed to download segment {number} of {total}: {reason}")]
-    SegmentFailed {
-        number: u32,
-        total: u32,
-        reason: String,
-    },
-
-    #[error("Failed to download file {filename}: {reason}")]
-    FileFailed { filename: String, reason: String },
-
     #[error("Insufficient segments: {available}/{required} available")]
     InsufficientSegments { available: usize, required: usize },
 
     #[error("Connection pool exhausted")]
     PoolExhausted,
-
-    #[error("Download cancelled")]
-    Cancelled,
-
-    #[error("Write error for {path}: {source}")]
-    WriteError {
-        path: PathBuf,
-        source: std::io::Error,
-    },
 }
 
-/// Post-processing errors (PAR2, RAR extraction)
 #[derive(Error, Debug)]
 pub enum PostProcessingError {
     #[error("PAR2 error: {0}")]
     Par2(#[from] par2_rs::Par2Error),
-
-    #[error("RAR extraction failed for {archive}: {reason}")]
-    RarFailed { archive: PathBuf, reason: String },
-
-    #[error("No RAR archives found")]
-    NoRarArchives,
-
-    #[error("Archive corrupted: {0}")]
-    CorruptedArchive(PathBuf),
-
-    #[error("Extraction tool not found: {tool}")]
-    ToolNotFound { tool: String },
 
     #[error("Failed to rename file from {from} to {to}: {source}")]
     FileRenameError {
@@ -177,7 +113,6 @@ pub enum PostProcessingError {
     },
 }
 
-/// Result type alias using DlNzbError
 pub type Result<T> = std::result::Result<T, DlNzbError>;
 
 #[cfg(test)]
@@ -186,13 +121,13 @@ mod tests {
 
     #[test]
     fn test_error_display() {
-        let err = NzbError::NotFound(PathBuf::from("/test/file.nzb"));
-        assert_eq!(err.to_string(), "NZB file not found: /test/file.nzb");
+        let err = NzbError::ParseError("bad xml".into());
+        assert_eq!(err.to_string(), "Failed to parse NZB file: bad xml");
     }
 
     #[test]
     fn test_error_conversion() {
-        let nzb_err = NzbError::EmptyNzb;
+        let nzb_err = NzbError::ParseError("oops".into());
         let dl_err: DlNzbError = nzb_err.into();
         assert!(matches!(dl_err, DlNzbError::Nzb(_)));
     }

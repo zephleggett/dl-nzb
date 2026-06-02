@@ -104,6 +104,15 @@ impl Nzb {
         &self.files
     }
 
+    /// A copy of this NZB keeping only the files for which `keep` returns true.
+    /// Used to split a download into a data-first phase and a deferred PAR2
+    /// recovery phase.
+    pub fn subset<F: Fn(&NzbFile) -> bool>(&self, keep: F) -> Nzb {
+        Nzb {
+            files: self.files.iter().filter(|f| keep(f)).cloned().collect(),
+        }
+    }
+
     pub fn total_size(&self) -> u64 {
         self.files
             .iter()
