@@ -46,6 +46,25 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    // Resolve colour + glyph mode ONCE, before logging or any output. JSON mode
+    // suppresses all decorative output anyway, so force colour off there. Auto
+    // detection keys off the stream this command writes to: stdout for the
+    // `list` / `config` data dumps, stderr for the download/test narrative.
+    use std::io::IsTerminal;
+    let color_choice = if cli.json {
+        dl_nzb::ui::style::ColorChoice::Never
+    } else {
+        cli.color.into()
+    };
+    let stdout_command = cli.list || matches!(cli.command, Some(Commands::Config));
+    let auto_tty = if stdout_command {
+        std::io::stdout().is_terminal()
+    } else {
+        std::io::stderr().is_terminal()
+    };
+    dl_nzb::ui::style::init(color_choice, auto_tty);
+    dl_nzb::ui::glyph::init();
+
     init_logging(&cli)?;
 
     // Two-stage Ctrl+C:
@@ -143,6 +162,28 @@ fn spawn_signal_handler() {
     });
 }
 
+/// A `MakeWriter` that wraps each log write in `MultiProgress::suspend` so log
+/// lines never tear a live progress bar, and always writes to stderr (stdout is
+/// reserved for `--json` / `list` data).
+struct SuspendingWriter;
+
+impl std::io::Write for SuspendingWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        dl_nzb::progress::multi().suspend(|| std::io::stderr().write_all(buf))?;
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        std::io::stderr().flush()
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SuspendingWriter {
+    type Writer = SuspendingWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        SuspendingWriter
+    }
+}
+
 fn init_logging(cli: &Cli) -> Result<()> {
     let filter = EnvFilter::try_new(cli.get_log_level())
         .unwrap_or_else(|_| EnvFilter::new("info"))
@@ -150,7 +191,8 @@ fn init_logging(cli: &Cli) -> Result<()> {
 
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_target(false);
+        .with_target(false)
+        .with_writer(SuspendingWriter);
 
     if cli.quiet {
         subscriber.without_time().init();
@@ -190,18 +232,40 @@ async fn handle_command(command: &Commands, cli: &Cli) -> Result<()> {
                 }
                 println!("{}", serde_json::to_string_pretty(&result)?);
             } else {
-                println!("Testing connection to Usenet server...");
+                use dl_nzb::ui::{glyph, style};
+                let spinner = dl_nzb::progress::DelayedSpinner::new(
+                    "Testing connection…",
+                    std::time::Duration::from_millis(150),
+                );
                 match AsyncNntpConnection::connect(&test_config, None, throwaway_counter()).await {
                     Ok(mut conn) => {
-                        println!("✓ Successfully connected to {}", test_config.server);
-                        println!("   Authentication: OK");
-                        if conn.is_healthy().await {
-                            println!("   Server status: Healthy");
-                        }
+                        let healthy = conn.is_healthy().await;
                         let _ = conn.close().await;
+                        spinner.finish_and_clear();
+                        // Human diagnostic → stderr (keeps the narrative off stdout,
+                        // consistent with the download run).
+                        eprintln!(
+                            "{}",
+                            style::success(&format!(
+                                "{} Connected to {}",
+                                glyph::OK,
+                                test_config.server
+                            ))
+                        );
+                        eprintln!(
+                            "  {} Authentication OK",
+                            style::dim(glyph::branch(!healthy))
+                        );
+                        if healthy {
+                            eprintln!("  {} Server healthy", style::dim(glyph::branch(true)));
+                        }
                     }
                     Err(e) => {
-                        eprintln!("❌ Connection failed: {}", e);
+                        spinner.finish_and_clear();
+                        eprintln!(
+                            "{}",
+                            style::error(&format!("{} Connection failed: {}", glyph::ERR, e))
+                        );
                         return Err(e);
                     }
                 }
@@ -210,38 +274,34 @@ async fn handle_command(command: &Commands, cli: &Cli) -> Result<()> {
         }
 
         Commands::Config => {
+            use dl_nzb::ui::{self, glyph, style};
             let config_path = Config::config_path()?;
-            println!("Configuration file location:");
-            println!("  {}", config_path.display());
+            println!("{}", style::heading("Configuration"));
+            println!(
+                "  {} {}",
+                style::dim(glyph::branch(true)),
+                style::path(&config_path.display().to_string())
+            );
             println!();
 
             if config_path.exists() {
-                println!("Current configuration:");
-                println!("{}", "─".repeat(60));
                 let mut config = Config::load()?;
                 if !config.usenet.password.is_empty() {
                     config.usenet.password = "********".to_string();
                 }
-                let toml = config.display_toml()?;
-                println!("{}", toml);
-                println!("{}", "─".repeat(60));
+                println!("{}", style::dim(&ui::rule(60)));
+                println!("{}", config.display_toml()?);
+                println!("{}", style::dim(&ui::rule(60)));
             } else {
-                println!("Configuration file does not exist yet.");
-                println!("Run any command to auto-create it with default values.");
+                println!(
+                    "  {} {}",
+                    style::dim(glyph::branch(true)),
+                    style::warn(&format!(
+                        "{} No config yet — run any command to create it.",
+                        glyph::WARN
+                    ))
+                );
             }
-            Ok(())
-        }
-
-        Commands::Version => {
-            println!("dl-nzb {}", env!("CARGO_PKG_VERSION"));
-            println!("A fast, lightweight NZB downloader");
-            println!();
-            println!("Features:");
-            println!("  • Parallel segment downloads with per-segment retry");
-            println!("  • yEnc decoder with =ypart offsets and CRC32 verification");
-            println!("  • Built-in PAR2 repair (par2-rs, pure Rust + SIMD)");
-            println!("  • Automatic RAR extraction");
-            println!("  • JSON output for scripting");
             Ok(())
         }
     }
@@ -279,30 +339,48 @@ async fn handle_list_mode(cli: &Cli) -> Result<()> {
         }
         println!("{}", serde_json::to_string_pretty(&results)?);
     } else {
+        use dl_nzb::ui::{self, glyph, style};
         for nzb_path in &cli.files {
-            println!("\n📄 {}", nzb_path.display());
-            println!("{}", "─".repeat(50));
             let nzb = Nzb::from_file(nzb_path)?;
-            println!("Total files: {}", nzb.files().len());
-            println!("Total size: {}", human_bytes(nzb.total_size() as f64));
-            println!("Total segments: {}", nzb.total_segments());
-            println!("\nFiles:");
-            for file in nzb.files() {
+            println!();
+            println!(
+                "{}{}",
+                style::heading(&nzb_path.display().to_string()),
+                style::dim(&format!(
+                    "  ·  {} · {} files · {} segments",
+                    human_bytes(nzb.total_size() as f64),
+                    nzb.files().len(),
+                    nzb.total_segments(),
+                ))
+            );
+            let files = nzb.files();
+            let shown = files.len().min(ui::MAX_LISTED_FILES);
+            let extra = files.len().saturating_sub(shown);
+            for (i, file) in files.iter().take(shown).enumerate() {
+                let last = extra == 0 && i + 1 == shown;
                 let filename = Nzb::get_filename_from_subject(&file.subject)
                     .unwrap_or_else(|| file.subject.clone());
-                let display_name = sanitize_display(&filename);
+                let display_name = ui::truncate_middle(&ui::sanitize_display(&filename), 48);
                 let size: u64 = file.segments.segment.iter().map(|s| s.bytes).sum();
-                let file_type =
-                    if dl_nzb::patterns::par2::is_par2_file(std::path::Path::new(&filename)) {
-                        "PAR2"
-                    } else {
-                        "DATA"
-                    };
+                let is_par2 = dl_nzb::patterns::par2::is_par2_file(std::path::Path::new(&filename));
+                let tag = if is_par2 {
+                    style::dim("PAR2")
+                } else {
+                    style::accent("DATA")
+                };
                 println!(
-                    "  [{:4}] {} ({})",
-                    file_type,
+                    "  {} {}  {}  {}",
+                    style::dim(glyph::branch(last)),
+                    tag,
                     display_name,
-                    human_bytes(size as f64)
+                    style::info(&human_bytes(size as f64)),
+                );
+            }
+            if extra > 0 {
+                println!(
+                    "  {} {}",
+                    style::dim(glyph::branch(true)),
+                    style::dim(&format!("… and {extra} more"))
                 );
             }
         }
@@ -323,13 +401,21 @@ async fn handle_download_mode(cli: &Cli, config: Config) -> Result<()> {
     let downloader = if cli.json {
         Downloader::new(config.clone()).await?
     } else {
-        let spinner = dl_nzb::progress::create_spinner("Connecting to server...");
+        let spinner = dl_nzb::progress::DelayedSpinner::new(
+            "Connecting to server…",
+            std::time::Duration::from_millis(150),
+        );
         let downloader = Downloader::new(config.clone()).await?;
         spinner.finish_and_clear();
         downloader
     };
 
-    for nzb_path in &cli.files {
+    // Track the whole batch for the optional completion bell.
+    let batch_start = std::time::Instant::now();
+    let mut all_succeeded = true;
+    let total_nzbs = cli.files.len();
+
+    for (idx, nzb_path) in cli.files.iter().enumerate() {
         // Don't start (or continue to) another NZB after an interrupt.
         if dl_nzb::shutdown::is_requested() {
             break;
@@ -338,6 +424,7 @@ async fn handle_download_mode(cli: &Cli, config: Config) -> Result<()> {
             Ok(nzb) => nzb,
             Err(e) => {
                 eprintln!("Failed to load {}: {}", nzb_path.display(), e);
+                all_succeeded = false;
                 continue;
             }
         };
@@ -355,6 +442,35 @@ async fn handle_download_mode(cli: &Cli, config: Config) -> Result<()> {
 
         std::fs::create_dir_all(&output_dir)?;
 
+        // Per-NZB banner: release name + size/file count, with a blank line
+        // separating consecutive NZBs.
+        {
+            use dl_nzb::ui::{self, style};
+            let title = nzb_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(ui::sanitize_display)
+                .unwrap_or_else(|| nzb_path.display().to_string());
+            let title = ui::truncate_middle(&title, 64);
+            let counter = if total_nzbs > 1 {
+                format!("  [{}/{}]", idx + 1, total_nzbs)
+            } else {
+                String::new()
+            };
+            let file_count = nzb.files().len();
+            ui::blank();
+            ui::header(format!(
+                "{}{}",
+                style::heading(&title),
+                style::dim(&format!(
+                    "  ·  {} · {} file{}{counter}",
+                    human_bytes(nzb.total_size() as f64),
+                    file_count,
+                    if file_count == 1 { "" } else { "s" },
+                ))
+            ));
+        }
+
         let mut download_config = config.clone();
         download_config.download.dir = output_dir.clone();
         download_config.download.force_redownload = cli.force;
@@ -368,9 +484,14 @@ async fn handle_download_mode(cli: &Cli, config: Config) -> Result<()> {
         // is gated to interactive runs (JSON/quiet report and continue).
         let mut skip_message_ids: Option<std::collections::HashSet<String>> = None;
         {
+            use dl_nzb::ui::{self, glyph, style};
             let interactive = !cli.json && !cli.quiet;
-            let spinner = interactive
-                .then(|| dl_nzb::progress::create_spinner("Checking article availability..."));
+            let spinner = interactive.then(|| {
+                dl_nzb::progress::DelayedSpinner::new(
+                    "Checking article availability…",
+                    std::time::Duration::from_millis(150),
+                )
+            });
             match downloader.check_all_availability(&nzb).await {
                 Ok(report) => {
                     if let Some(s) = spinner {
@@ -379,61 +500,82 @@ async fn handle_download_mode(cli: &Cli, config: Config) -> Result<()> {
                     if !report.missing_ids.is_empty() {
                         skip_message_ids = Some(report.missing_ids.clone());
                     }
-                    if !report.missing_files.is_empty() {
+                    // If the scan was interrupted (Ctrl+C), don't print a verdict
+                    // from partial data or show the interactive prompt — we're
+                    // about to abort below.
+                    if !report.missing_files.is_empty() && !dl_nzb::shutdown::is_requested() {
                         let percent = report.data_completion_percent();
                         let missing_display: Vec<String> = report
                             .missing_files
                             .iter()
-                            .map(|n| sanitize_display(n))
+                            .map(|n| ui::sanitize_display(n))
                             .collect();
-                        // Emit the verdict to stdout for interactive runs, stderr
-                        // otherwise (keeps `--json` stdout a clean document).
-                        let say = |line: String| {
-                            if interactive {
-                                println!("{}", line);
-                            } else {
-                                eprintln!("{}", line);
-                            }
-                        };
                         if report.only_nonessential_missing() {
-                            say(format!(
-                                "\x1b[90mℹ {:.1}% of data available ({} non-essential missing: {})\x1b[0m",
-                                percent,
-                                report.missing_files.len(),
-                                missing_display.join(", ")
-                            ));
+                            ui::child(
+                                false,
+                                style::dim(&format!(
+                                    "{} {:.1}% of data available ({} non-essential missing: {})",
+                                    glyph::INFO,
+                                    percent,
+                                    report.missing_files.len(),
+                                    missing_display.join(", ")
+                                )),
+                            );
                         } else if report.likely_repairable() {
-                            say(format!(
-                                "\x1b[33m⚠ {:.1}% of data available; {} recovery present — PAR2 repair likely.\x1b[0m",
-                                percent,
-                                human_bytes(report.available_par2_bytes as f64)
-                            ));
+                            ui::child(
+                                false,
+                                style::warn(&format!(
+                                    "{} {:.1}% of data available; {} recovery present — PAR2 repair likely.",
+                                    glyph::WARN,
+                                    percent,
+                                    human_bytes(report.available_par2_bytes as f64)
+                                )),
+                            );
                         } else {
                             let reason = if report.has_par2 {
                                 "PAR2 recovery is insufficient"
                             } else {
                                 "no PAR2 files for repair"
                             };
-                            say(format!(
-                                "\x1b[31m✗ {:.1}% of data available; {} — repair unlikely.\x1b[0m",
-                                percent, reason
-                            ));
-                            if interactive {
+                            ui::child(
+                                false,
+                                style::error(&format!(
+                                    "{} {:.1}% of data available; {} — repair unlikely.",
+                                    glyph::ERR,
+                                    percent,
+                                    reason
+                                )),
+                            );
+
+                            // Only prompt when stdin AND stderr are real TTYs; a
+                            // piped/CI run must never block. Non-interactive skips
+                            // the NZB unless --force is set.
+                            use std::io::IsTerminal;
+                            let can_prompt = interactive
+                                && std::io::stdin().is_terminal()
+                                && std::io::stderr().is_terminal();
+                            if can_prompt {
                                 eprint!("  Continue anyway? [y/N] ");
                                 use std::io::{self, BufRead, Write};
                                 io::stderr().flush().ok();
-                                let stdin = io::stdin();
                                 let proceed = matches!(
-                                    stdin.lock().lines().next(),
+                                    io::stdin().lock().lines().next(),
                                     Some(Ok(line)) if {
-                                        let a = line.trim().to_lowercase();
+                                        let a = line.trim().to_ascii_lowercase();
                                         a == "y" || a == "yes"
                                     }
                                 );
                                 if !proceed {
-                                    println!("  Aborted.");
+                                    eprintln!("  Aborted.");
+                                    all_succeeded = false;
                                     continue;
                                 }
+                            } else if !cli.force {
+                                eprintln!(
+                                    "  Non-interactive: skipping likely-unrepairable download (re-run with --force to download anyway)."
+                                );
+                                all_succeeded = false;
+                                continue;
                             }
                         }
                     }
@@ -445,6 +587,11 @@ async fn handle_download_mode(cli: &Cli, config: Config) -> Result<()> {
                     eprintln!("Warning: could not check availability: {}", e);
                 }
             }
+        }
+
+        // A Ctrl+C during the availability scan should abort before downloading.
+        if dl_nzb::shutdown::is_requested() {
+            break;
         }
 
         match downloader
@@ -522,6 +669,9 @@ async fn handle_download_mode(cli: &Cli, config: Config) -> Result<()> {
                     true
                 };
                 let success = download_ok && post_ok && !interrupted;
+                if !success {
+                    all_succeeded = false;
+                }
 
                 if cli.json {
                     let total_size: u64 = results.iter().map(|r| r.size).sum();
@@ -565,10 +715,13 @@ async fn handle_download_mode(cli: &Cli, config: Config) -> Result<()> {
                     };
                     println!("{}", serde_json::to_string_pretty(&summary)?);
                 } else if interrupted {
-                    println!(
-                        "\x1b[1;33m■ Interrupted\x1b[0m \x1b[90m└─\x1b[0m \x1b[34m{}\x1b[0m",
-                        output_dir.display()
-                    );
+                    use dl_nzb::ui::{self, glyph, style};
+                    ui::blank();
+                    ui::header(format!(
+                        "{}",
+                        style::warn(&format!("{} Interrupted", glyph::INTERRUPTED))
+                    ));
+                    ui::child(true, style::path(&output_dir.display().to_string()));
                 } else {
                     print_final_summary(
                         &results,
@@ -586,38 +739,35 @@ async fn handle_download_mode(cli: &Cli, config: Config) -> Result<()> {
                 } else {
                     eprintln!("Download failed for {}: {}", nzb_path.display(), e);
                 }
+                all_succeeded = false;
             }
         }
     }
 
-    if !cli.quiet && !cli.json {
-        print!("\x07");
+    // Optional completion bell: opt-in, success-only, only for a run long enough
+    // to warrant attention, and never into a pipe/CI (stderr must be a TTY).
+    {
+        use std::io::IsTerminal;
+        let long_enough =
+            batch_start.elapsed().as_secs() >= config.notifications.notify_min_seconds;
+        if !cli.quiet
+            && !cli.json
+            && config.notifications.notify_on_complete
+            && all_succeeded
+            && long_enough
+            && std::io::stderr().is_terminal()
+        {
+            eprint!("\x07");
+        }
     }
 
     Ok(())
 }
 
-fn format_duration(d: std::time::Duration) -> String {
-    let secs = d.as_secs();
-    if secs < 60 {
-        format!("{}s", secs)
-    } else if secs < 3600 {
-        let m = secs / 60;
-        let s = secs % 60;
-        if s == 0 {
-            format!("{}m", m)
-        } else {
-            format!("{}m {}s", m, s)
-        }
-    } else {
-        let h = secs / 3600;
-        let m = (secs % 3600) / 60;
-        if m == 0 {
-            format!("{}h", h)
-        } else {
-            format!("{}h {}m", h, m)
-        }
-    }
+/// Files we don't surface individually in the summary (recovery / metadata).
+fn is_auxiliary(name: &str) -> bool {
+    let n = name.to_lowercase();
+    n.ends_with(".par2") || n.ends_with(".nfo") || n.ends_with(".sfv") || n.ends_with(".partial")
 }
 
 fn print_final_summary(
@@ -627,25 +777,18 @@ fn print_final_summary(
     post_outcome: Option<&PostProcessingOutcome>,
     post_failed: bool,
 ) {
+    use dl_nzb::ui::{self, glyph, style};
+
     let total_size: u64 = results.iter().map(|r| r.size).sum();
     let failed_count = results.iter().filter(|r| r.segments_failed > 0).count();
 
-    let main_file = std::fs::read_dir(output_dir).ok().and_then(|entries| {
-        entries
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().is_file())
-            .filter(|e| {
-                let name = e.file_name().to_string_lossy().to_lowercase();
-                !name.ends_with(".par2")
-                    && !name.ends_with(".rar")
-                    && !name.ends_with(".nfo")
-                    && !name.ends_with(".sfv")
-                    && !name.ends_with(".partial")
-            })
-            .max_by_key(|e| e.metadata().ok().map(|m| m.len()).unwrap_or(0))
-    });
-
-    println!();
+    // Payload files (what the user actually wanted), failed-first then largest,
+    // so the per-file cap never hides a failure.
+    let mut payload: Vec<&dl_nzb::download::DownloadResult> = results
+        .iter()
+        .filter(|r| !is_auxiliary(&r.filename))
+        .collect();
+    payload.sort_by_key(|r| (r.segments_failed == 0, std::cmp::Reverse(r.size)));
 
     let post_issue: Option<&str> = if post_failed {
         Some("Post-processing failed")
@@ -661,61 +804,88 @@ fn print_final_summary(
         None
     };
 
-    if failed_count == 0 && post_issue.is_none() {
-        if let Some(file) = main_file {
-            let filename = file.file_name().to_string_lossy().to_string();
-            let display_name = sanitize_display(&filename);
-            let file_size = file.metadata().ok().map(|m| m.len()).unwrap_or(0);
-            println!(
-                "\x1b[1;32m✓ Complete:\x1b[0m \x1b[37m{}\x1b[0m",
-                display_name
-            );
-            println!(
-                "  \x1b[90m└─\x1b[0m \x1b[34m{}\x1b[0m",
-                output_dir.display()
-            );
-            println!(
-                "  \x1b[90m└─\x1b[0m \x1b[36m{}\x1b[0m in \x1b[35m{}\x1b[0m",
-                human_bytes(file_size as f64),
-                format_duration(download_time)
-            );
+    ui::blank();
+
+    // Header line: status verb, plus the file name for a single-file release.
+    let clean = failed_count == 0 && post_issue.is_none();
+    if clean {
+        let verb = format!("{}", style::success(&format!("{} Complete", glyph::OK)));
+        if payload.len() == 1 {
+            let name = ui::truncate_middle(&ui::sanitize_display(&payload[0].filename), 56);
+            ui::header(format!(
+                "{verb}{}{}",
+                style::dim("  ·  "),
+                style::heading(&name)
+            ));
         } else {
-            println!("\x1b[1;32m✓ Complete\x1b[0m");
-            println!(
-                "  \x1b[90m└─\x1b[0m \x1b[34m{}\x1b[0m",
-                output_dir.display()
-            );
-            println!(
-                "  \x1b[90m└─\x1b[0m \x1b[36m{}\x1b[0m in \x1b[35m{}\x1b[0m",
-                human_bytes(total_size as f64),
-                format_duration(download_time)
-            );
+            ui::header(verb);
         }
     } else if failed_count == 0 {
-        let issue = post_issue.unwrap_or("Post-processing issues");
-        println!(
-            "\x1b[1;33m⚠ Completed with issues:\x1b[0m \x1b[37m{}\x1b[0m",
-            issue
-        );
-        println!(
-            "  \x1b[90m└─\x1b[0m \x1b[34m{}\x1b[0m",
-            output_dir.display()
-        );
+        ui::header(format!(
+            "{}",
+            style::warn(&format!("{} Completed with issues", glyph::WARN))
+        ));
     } else {
-        println!(
-            "\x1b[1;33m! Completed with {} file{} having errors\x1b[0m",
-            failed_count,
-            if failed_count == 1 { "" } else { "s" }
-        );
-        println!(
-            "  \x1b[90m└─\x1b[0m \x1b[34m{}\x1b[0m",
-            output_dir.display()
-        );
+        ui::header(format!(
+            "{}",
+            style::warn(&format!(
+                "{} Completed — {failed_count} file{} with errors",
+                glyph::WARN,
+                if failed_count == 1 { "" } else { "s" }
+            ))
+        ));
     }
-}
 
-fn sanitize_display(input: &str) -> String {
-    input.chars().filter(|c| !c.is_ascii_control()).collect()
+    // Child tree, built then emitted so exactly the last row gets └─.
+    let mut tree = ui::Tree::new();
+
+    // Multi-file: a compact list (capped, failed-first).
+    if payload.len() > 1 {
+        let shown = payload.len().min(ui::MAX_LISTED_FILES);
+        for r in payload.iter().take(shown) {
+            let name = ui::truncate_middle(&ui::sanitize_display(&r.filename), 48);
+            let mark = if r.segments_failed == 0 {
+                format!("{}", style::success(glyph::OK.as_str()))
+            } else {
+                format!("{}", style::error(glyph::ERR.as_str()))
+            };
+            tree.push(format!(
+                "{mark}  {name}  {}",
+                style::info(&human_bytes(r.size as f64))
+            ));
+        }
+        let extra = payload.len().saturating_sub(shown);
+        if extra > 0 {
+            tree.push(format!(
+                "{}",
+                style::dim(&format!(
+                    "… and {extra} more file{}",
+                    if extra == 1 { "" } else { "s" }
+                ))
+            ));
+        }
+    }
+
+    if let Some(issue) = post_issue {
+        tree.push(format!(
+            "{}",
+            style::warn(&format!("{} {}", glyph::WARN, issue))
+        ));
+    }
+
+    tree.push(format!(
+        "{} {}",
+        style::dim(glyph::INFO.as_str()),
+        style::path(&output_dir.display().to_string())
+    ));
+    tree.push(format!(
+        "{} {} in {}",
+        style::dim(glyph::INFO.as_str()),
+        style::info(&human_bytes(total_size as f64)),
+        style::accent(&ui::format_duration(download_time)),
+    ));
+
+    tree.emit();
 }
 
 /// Count `*.partial` files left behind in a directory (after an interrupt we

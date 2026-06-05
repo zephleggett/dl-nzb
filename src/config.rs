@@ -42,6 +42,37 @@ pub struct Config {
 
     #[serde(default)]
     pub tuning: TuningConfig,
+
+    #[serde(default)]
+    pub notifications: NotificationConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationConfig {
+    /// Ring the terminal bell when a download finishes *successfully* and the
+    /// run lasted at least `notify_min_seconds`. Default `false`: silence is the
+    /// polite default (matching cargo/uv/bun). The bell is also suppressed when
+    /// stderr is not a terminal (pipes/CI).
+    #[serde(default)]
+    pub notify_on_complete: bool,
+
+    /// Minimum run length (seconds) before the bell rings, so quick downloads
+    /// don't startle. Only applies when `notify_on_complete` is true.
+    #[serde(default = "default_notify_min_seconds")]
+    pub notify_min_seconds: u64,
+}
+
+fn default_notify_min_seconds() -> u64 {
+    30
+}
+
+impl Default for NotificationConfig {
+    fn default() -> Self {
+        Self {
+            notify_on_complete: false,
+            notify_min_seconds: default_notify_min_seconds(),
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -245,6 +276,11 @@ fn load_env_overrides(mut config: Config) -> Config {
     if let Ok(val) = env::var("DL_NZB_DOWNLOAD_DIR") {
         config.download.dir = PathBuf::from(val);
     }
+    if let Ok(val) = env::var("DL_NZB_NOTIFY_ON_COMPLETE") {
+        if let Ok(b) = val.parse() {
+            config.notifications.notify_on_complete = b;
+        }
+    }
 
     config
 }
@@ -358,6 +394,10 @@ impl Config {
 # delete_par2_after_repair - Delete PAR2 files after successful repair
 # deobfuscate_file_names  - Rename obfuscated files to meaningful names
 # download_all_par2       - Download all PAR2 recovery up front (default: false = fetch on demand)
+#
+# [notifications]
+# notify_on_complete - Ring the terminal bell when a long download succeeds (default: false)
+# notify_min_seconds - Minimum run length before the bell rings (default: 30)
 "#,
             content
         );

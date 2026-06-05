@@ -250,6 +250,7 @@ fn make_config(server: &str, port: u16, download_dir: PathBuf) -> Config {
             max_concurrent_connections: 4,
             large_file_threshold: 1024 * 1024,
         },
+        notifications: Default::default(),
     }
 }
 

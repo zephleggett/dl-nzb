@@ -81,11 +81,16 @@ impl PostProcessor {
             match super::deobfuscate::recover_par2_names(download_dir, &downloaded_par2_files) {
                 Ok(rec) => {
                     par2_renamed = rec.files_renamed;
-                    if par2_renamed > 0 && !crate::output_mode::is_quiet() {
-                        println!(
-                            "  \x1b[36m✓ Recovered {} name{} from PAR2\x1b[0m",
-                            par2_renamed,
-                            if par2_renamed == 1 { "" } else { "s" }
+                    if par2_renamed > 0 {
+                        use crate::ui::{glyph, style};
+                        crate::ui::child(
+                            false,
+                            style::info(&format!(
+                                "{} Recovered {} name{} from PAR2",
+                                glyph::OK,
+                                par2_renamed,
+                                if par2_renamed == 1 { "" } else { "s" }
+                            )),
                         );
                     }
                 }
@@ -113,24 +118,31 @@ impl PostProcessor {
         let mut rar_failed = 0usize;
         if self.config.auto_extract_rar && safe_to_extract && !crate::shutdown::is_requested() {
             let bar =
-                crate::progress::create_progress_bar(100, crate::progress::ProgressStyle::Par2);
+                crate::progress::create_progress_bar(100, crate::progress::ProgressStyle::Extract);
             let extractor = RarExtractor::new(self.config.clone(), self.large_file_threshold);
             let report = extractor.extract_archives(download_dir, &bar).await?;
             rar_extracted = report.archives_extracted > 0;
             rar_failed = report.archives_failed;
         } else if self.config.auto_extract_rar && !archive_files_with_failures.is_empty() {
-            if !crate::output_mode::is_quiet() {
-                println!(
-                    "  \x1b[33m⚠ Skipping RAR extraction — {} archive{} have download failures and PAR2 did not succeed\x1b[0m",
+            use crate::ui::{glyph, style};
+            crate::ui::child(
+                false,
+                style::warn(&format!(
+                    "{} Skipping RAR extraction — {} archive{} have download failures and PAR2 did not succeed",
+                    glyph::WARN,
                     archive_files_with_failures.len(),
                     if archive_files_with_failures.len() == 1 { "" } else { "s" }
-                );
-            }
-        } else if self.config.auto_extract_rar
-            && par2_status == Par2Status::Failed
-            && !crate::output_mode::is_quiet()
-        {
-            println!("  \x1b[33m⚠ Skipping RAR extraction — PAR2 verification failed\x1b[0m");
+                )),
+            );
+        } else if self.config.auto_extract_rar && par2_status == Par2Status::Failed {
+            use crate::ui::{glyph, style};
+            crate::ui::child(
+                false,
+                style::warn(&format!(
+                    "{} Skipping RAR extraction — PAR2 verification failed",
+                    glyph::WARN
+                )),
+            );
         }
 
         let (files_renamed, extensions_fixed) =
@@ -181,9 +193,11 @@ impl PostProcessor {
                         msg.push(format!("{} renamed", result.files_renamed));
                     }
                     spinner.finish_and_clear();
-                    if !crate::output_mode::is_quiet() {
-                        println!("  \x1b[36m✓ Deobfuscated ({})\x1b[0m", msg.join(", "));
-                    }
+                    use crate::ui::{glyph, style};
+                    crate::ui::child(
+                        false,
+                        style::info(&format!("{} Deobfuscated ({})", glyph::OK, msg.join(", "))),
+                    );
                 } else {
                     spinner.finish_and_clear();
                 }

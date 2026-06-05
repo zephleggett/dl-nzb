@@ -199,8 +199,6 @@ pub async fn repair_with_par2(
             };
             let renamed_count = files_before.symmetric_difference(&files_after).count() / 2;
 
-            progress_bar.finish_with_message("  ");
-
             let mut summary = Vec::new();
             if renamed_count > 0 {
                 summary.push(format!("{} renamed", renamed_count));
@@ -214,21 +212,29 @@ pub async fn repair_with_par2(
                 }
             }
 
-            if !crate::output_mode::is_quiet() {
-                if summary.is_empty() {
-                    println!("  └─ \x1b[33m✓ PAR2 verified\x1b[0m");
-                } else {
-                    println!(
-                        "  └─ \x1b[33m✓ PAR2 verified ({})\x1b[0m",
+            // A successful verify is green (success), not the bar's working yellow.
+            use crate::ui::{glyph, style};
+            let body = if summary.is_empty() {
+                format!(
+                    "{}",
+                    style::success(&format!("{} PAR2 verified", glyph::OK))
+                )
+            } else {
+                format!(
+                    "{}",
+                    style::success(&format!(
+                        "{} PAR2 verified ({})",
+                        glyph::OK,
                         summary.join(", ")
-                    );
-                }
-            }
+                    ))
+                )
+            };
+            crate::ui::finish_clean(progress_bar, Some(body));
             Ok(Par2Status::Success)
         }
         Ok(Err(e)) => {
-            progress::apply_style(progress_bar, progress::ProgressStyle::Par2Error);
-            progress_bar.finish_with_message("  ");
+            use crate::ui::{glyph, style};
+            crate::ui::finish_clean(progress_bar, None);
 
             let mut issue_parts = Vec::new();
             if let Ok(c) = counts.lock() {
@@ -247,26 +253,33 @@ pub async fn repair_with_par2(
                 error_msg
             };
 
-            if !crate::output_mode::is_quiet() {
-                if !issue_parts.is_empty() {
-                    println!(
-                        "  \x1b[33m⚠ {} files with issues\x1b[0m",
+            if !issue_parts.is_empty() {
+                crate::ui::child(
+                    false,
+                    style::warn(&format!(
+                        "{} {} files with issues",
+                        glyph::WARN,
                         issue_parts.join(", ")
-                    );
-                }
-                println!("  └─ \x1b[31m✗ PAR2 failed: {}\x1b[0m", short_error);
+                    )),
+                );
             }
+            crate::ui::child(
+                true,
+                style::error(&format!("{} PAR2 failed: {}", glyph::ERR, short_error)),
+            );
             Ok(Par2Status::Failed)
         }
         Err(join_err) => {
-            progress::apply_style(progress_bar, progress::ProgressStyle::Par2Error);
-            progress_bar.finish_with_message("  ");
-            if !crate::output_mode::is_quiet() {
-                println!(
-                    "  └─ \x1b[31m✗ PAR2 failed: internal error: {}\x1b[0m",
+            use crate::ui::{glyph, style};
+            crate::ui::finish_clean(progress_bar, None);
+            crate::ui::child(
+                true,
+                style::error(&format!(
+                    "{} PAR2 failed: internal error: {}",
+                    glyph::ERR,
                     join_err
-                );
-            }
+                )),
+            );
             Ok(Par2Status::Failed)
         }
     }

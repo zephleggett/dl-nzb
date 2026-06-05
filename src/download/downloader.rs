@@ -49,7 +49,6 @@ pub struct DownloadResult {
 /// network monitors and other NZB clients display.
 pub struct DownloadOutcome {
     pub files: Vec<DownloadResult>,
-    pub progress_bar: ProgressBar,
     pub transfer_duration: Duration,
     /// Plaintext bytes received across all connections during the transfer
     /// window. Includes yEnc framing/escape sequences, NNTP command/response
@@ -154,6 +153,10 @@ impl Downloader {
     /// segment present but later segments missing is now detected, and a file
     /// missing only its first segment still downloads its remaining segments.
     pub async fn check_all_availability(&self, nzb: &Nzb) -> Result<AvailabilityReport> {
+        // Bail immediately if a shutdown was already requested.
+        if crate::shutdown::is_requested() {
+            return Ok(AvailabilityReport::default());
+        }
         let files: Vec<&NzbFile> = nzb.files().iter().collect();
 
         struct FileAcc {
@@ -208,11 +211,14 @@ impl Downloader {
             });
         }
 
-        // STAT every segment, pipelined in large batches across all connections.
-        const STAT_BATCH: usize = 256;
+        // STAT every segment, pipelined across all connections. Size each batch
+        // to roughly one pipelined round-trip per connection (capped) so the
+        // whole scan is a few round-trips even for tens of thousands of segments,
+        // instead of fixed 256-article batches (many more round-trips).
         let parallelism = self.connections.max(1);
+        let stat_batch = requests.len().div_ceil(parallelism).clamp(128, 512);
         let batches: Vec<Vec<SegmentRequest>> =
-            requests.chunks(STAT_BATCH).map(|c| c.to_vec()).collect();
+            requests.chunks(stat_batch).map(|c| c.to_vec()).collect();
         let pool = self.pool.clone();
         // Per-article STAT status: Some(true)=present, Some(false)=absent (430),
         // None=unknown (the batch errored). Unknown is NOT marked absent — those
@@ -224,42 +230,69 @@ impl Downloader {
             async move {
                 match pool.get_connection().await {
                     Ok(mut conn) => match conn.check_articles_exist(&batch).await {
-                        Ok(r) => r.into_iter().map(|(id, ex)| (id, Some(ex))).collect(),
+                        Ok(r) => {
+                            r.into_iter()
+                                .map(|(id, ex)| (id, Some(ex)))
+                                .collect::<Vec<(String, Option<bool>)>>()
+                        }
                         Err(e) => {
                             tracing::debug!("STAT batch failed: {}", e);
-                            batch.into_iter().map(|r| (r.message_id, None)).collect()
+                            batch
+                                .into_iter()
+                                .map(|r| (r.message_id, None))
+                                .collect::<Vec<(String, Option<bool>)>>()
                         }
                     },
                     Err(e) => {
                         tracing::debug!("STAT pool failure: {}", e);
-                        batch.into_iter().map(|r| (r.message_id, None)).collect()
+                        batch
+                            .into_iter()
+                            .map(|r| (r.message_id, None))
+                            .collect::<Vec<(String, Option<bool>)>>()
                     }
                 }
             }
         });
-        let all_results: Vec<Vec<(String, Option<bool>)>> = stream::iter(batch_futures)
-            .buffer_unordered(parallelism)
-            .collect()
-            .await;
 
         let mut missing_ids: HashSet<String> = HashSet::new();
         let mut scan_incomplete = false;
-        for batch in all_results {
-            for (msg_id, status) in batch {
-                match status {
-                    Some(true) => {}
-                    Some(false) => {
-                        if let Some(&(idx, bytes)) = meta.get(&msg_id) {
-                            file_accs[idx].missing_bytes += bytes;
-                            file_accs[idx].has_missing = true;
-                        }
-                        missing_ids.insert(msg_id);
-                    }
-                    None => {
+        // Consume batch results as they complete, tallying inline. The select
+        // with a short timer lets a Ctrl+C abort the scan within ~150 ms even if
+        // some batches are slow; breaking drops the stream, which cancels any
+        // STATs still in flight.
+        let mut stream = std::pin::pin!(stream::iter(batch_futures).buffer_unordered(parallelism));
+        'scan: loop {
+            tokio::select! {
+                biased;
+                item = stream.next() => {
+                    let Some(batch) = item else { break 'scan };
+                    if crate::shutdown::is_requested() {
                         scan_incomplete = true;
-                        if let Some(&(idx, bytes)) = meta.get(&msg_id) {
-                            file_accs[idx].unknown_bytes += bytes;
+                        break 'scan;
+                    }
+                    for (msg_id, status) in batch {
+                        match status {
+                            Some(true) => {}
+                            Some(false) => {
+                                if let Some(&(idx, bytes)) = meta.get(&msg_id) {
+                                    file_accs[idx].missing_bytes += bytes;
+                                    file_accs[idx].has_missing = true;
+                                }
+                                missing_ids.insert(msg_id);
+                            }
+                            None => {
+                                scan_incomplete = true;
+                                if let Some(&(idx, bytes)) = meta.get(&msg_id) {
+                                    file_accs[idx].unknown_bytes += bytes;
+                                }
+                            }
                         }
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(150)) => {
+                    if crate::shutdown::is_requested() {
+                        scan_incomplete = true;
+                        break 'scan;
                     }
                 }
             }
@@ -371,39 +404,50 @@ impl Downloader {
             .sum();
         let data_downloaded = total_downloaded.saturating_sub(par2_downloaded);
         let failed_files = results.iter().filter(|r| r.segments_failed > 0).count();
-        progress_bar.set_length(total_encoded.max(total_downloaded));
-        progress_bar.set_position(progress_bar.length().unwrap_or(total_encoded));
-        progress_bar.finish_with_message(format!("({}/{})  ", files.len(), files.len()));
 
-        if !crate::output_mode::is_quiet() {
+        // Clear the live bar (no leftover 100% skeleton) and leave one result
+        // line. Clearing rather than freezing also hides the encoded-vs-decoded
+        // "stall at ~95% then snap to 100%" that the encoded total produces.
+        let result_line = if !crate::output_mode::is_quiet() {
             let speed_suffix = format_speed_suffix(actual_wire_bytes, transfer_duration);
             let par2_suffix = if par2_downloaded > 0 {
                 format!(" + {} PAR2", human_bytes(par2_downloaded as f64))
             } else {
                 String::new()
             };
-            if failed_files == 0 {
-                println!(
-                    "  └─ \x1b[32m✓ Downloaded {}{}{}\x1b[0m",
-                    human_bytes(data_downloaded as f64),
-                    par2_suffix,
-                    speed_suffix,
-                );
+            use crate::ui::{glyph, style};
+            Some(if failed_files == 0 {
+                format!(
+                    "{}",
+                    style::success(&format!(
+                        "{} Downloaded {}{}{}",
+                        glyph::OK,
+                        human_bytes(data_downloaded as f64),
+                        par2_suffix,
+                        speed_suffix,
+                    ))
+                )
             } else {
-                println!(
-                    "  └─ \x1b[33m! Downloaded {}{} ({} file{} with errors){}\x1b[0m",
-                    human_bytes(data_downloaded as f64),
-                    par2_suffix,
-                    failed_files,
-                    if failed_files == 1 { "" } else { "s" },
-                    speed_suffix,
-                );
-            }
-        }
+                format!(
+                    "{}",
+                    style::warn(&format!(
+                        "{} Downloaded {}{} ({} file{} with errors){}",
+                        glyph::WARN,
+                        human_bytes(data_downloaded as f64),
+                        par2_suffix,
+                        failed_files,
+                        if failed_files == 1 { "" } else { "s" },
+                        speed_suffix,
+                    ))
+                )
+            })
+        } else {
+            None
+        };
+        crate::ui::finish_clean(&progress_bar, result_line);
 
         Ok(DownloadOutcome {
             files: results,
-            progress_bar,
             transfer_duration,
             actual_wire_bytes,
         })
@@ -474,25 +518,33 @@ impl Downloader {
             .any(|r| crate::patterns::par2::is_par2_file(&r.path) && r.segments_failed > 0);
 
         if !data_failed && !index_failed {
-            if !crate::output_mode::is_quiet() {
-                let saved: u64 = nzb
-                    .files()
-                    .iter()
-                    .filter(|f| is_deferred(f))
-                    .flat_map(|f| &f.segments.segment)
-                    .map(|s| s.bytes)
-                    .sum();
-                println!(
-                    "  └─ \x1b[90mℹ Data complete — skipped {} of PAR2 recovery\x1b[0m",
+            let saved: u64 = nzb
+                .files()
+                .iter()
+                .filter(|f| is_deferred(f))
+                .flat_map(|f| &f.segments.segment)
+                .map(|s| s.bytes)
+                .sum();
+            use crate::ui::{glyph, style};
+            crate::ui::child(
+                false,
+                style::dim(&format!(
+                    "{} Data complete — skipped {} of PAR2 recovery",
+                    glyph::INFO,
                     human_bytes(saved as f64)
-                );
-            }
+                )),
+            );
             return Ok(outcome1);
         }
 
-        if !crate::output_mode::is_quiet() {
-            println!(
-                "  \x1b[33m↻ Missing/corrupt data — fetching PAR2 recovery for repair…\x1b[0m"
+        {
+            use crate::ui::{glyph, style};
+            crate::ui::child(
+                false,
+                style::warn(&format!(
+                    "{} Missing/corrupt data — fetching PAR2 recovery for repair…",
+                    glyph::RETRY
+                )),
             );
         }
         let phase2 = nzb.subset(is_deferred);
@@ -502,7 +554,6 @@ impl Downloader {
         files.extend(outcome2.files);
         Ok(DownloadOutcome {
             files,
-            progress_bar: outcome2.progress_bar,
             transfer_duration: outcome1.transfer_duration + outcome2.transfer_duration,
             actual_wire_bytes: outcome1.actual_wire_bytes + outcome2.actual_wire_bytes,
         })

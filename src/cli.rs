@@ -1,10 +1,45 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
+
+/// When to colourise output.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ColorWhen {
+    /// Colour only when the output stream is a terminal (honours `NO_COLOR`).
+    Auto,
+    /// Always colourise.
+    Always,
+    /// Never colourise.
+    Never,
+}
+
+impl From<ColorWhen> for crate::ui::style::ColorChoice {
+    fn from(w: ColorWhen) -> Self {
+        match w {
+            ColorWhen::Auto => Self::Auto,
+            ColorWhen::Always => Self::Always,
+            ColorWhen::Never => Self::Never,
+        }
+    }
+}
+
+/// Full text rendered for `--version` (a single version surface; `-V` shows the
+/// bare version line).
+const LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "\n",
+    "A fast, lightweight NZB downloader\n\n",
+    "Features:\n",
+    "  • Parallel segment downloads with per-segment retry\n",
+    "  • yEnc decoder with =ypart offsets and CRC32 verification\n",
+    "  • Built-in PAR2 repair (par2-rs, pure Rust + SIMD)\n",
+    "  • Automatic RAR extraction\n",
+    "  • JSON output for scripting",
+);
 
 /// Fast NZB downloader for Usenet
 #[derive(Parser, Debug)]
 #[command(name = "dl-nzb")]
-#[command(version, about, long_about = None)]
+#[command(version, long_version = LONG_VERSION, about, long_about = None)]
 #[command(after_help = "EXAMPLES:
     Download an NZB file:
         dl-nzb file.nzb
@@ -47,6 +82,10 @@ pub struct Cli {
     #[arg(long)]
     pub json: bool,
 
+    /// Colourise output: auto (default), always, or never
+    #[arg(long, value_enum, value_name = "WHEN", default_value_t = ColorWhen::Auto)]
+    pub color: ColorWhen,
+
     /// Force re-download (overwrite existing files)
     #[arg(short, long)]
     pub force: bool,
@@ -63,9 +102,6 @@ pub enum Commands {
 
     /// Show configuration
     Config,
-
-    /// Show version information
-    Version,
 }
 
 impl Cli {

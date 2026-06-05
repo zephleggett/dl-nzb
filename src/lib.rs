@@ -32,6 +32,7 @@ pub mod error;
 pub mod json_output;
 pub mod patterns;
 pub mod progress;
+pub mod ui;
 
 // Feature modules organized by functionality
 pub mod download;
