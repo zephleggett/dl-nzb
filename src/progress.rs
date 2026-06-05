@@ -35,13 +35,22 @@ pub enum ProgressStyle {
 
 /// Bar fill characters: Unicode when available, ASCII on dumb/non-UTF8 terminals.
 fn bar_chars() -> &'static str {
-    if colors_enabled() || crate::ui::glyph::OK.as_str() == "✓" {
-        // Unicode environment (colours imply a capable terminal; the glyph probe
-        // confirms UTF-8 was resolved).
+    if crate::ui::glyph::is_unicode() {
         "━━╸ "
     } else {
         "=> "
     }
+}
+
+/// The shared spinner style (cyan when colour is on) + braille tick set.
+fn spinner_style() -> IndicatifStyle {
+    IndicatifStyle::with_template(if colors_enabled() {
+        "{spinner:.cyan} {msg}"
+    } else {
+        "{spinner} {msg}"
+    })
+    .expect("invalid spinner template")
+    .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
 }
 
 /// Create a progress bar with the specified style. Hidden when the consumer is
@@ -76,15 +85,7 @@ pub fn create_spinner(msg: impl Into<String>) -> ProgressBar {
         return ProgressBar::hidden();
     }
     let spinner = multi().add(ProgressBar::new_spinner());
-    spinner.set_style(
-        IndicatifStyle::with_template(if colors_enabled() {
-            "{spinner:.cyan} {msg}"
-        } else {
-            "{spinner} {msg}"
-        })
-        .expect("invalid spinner template")
-        .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
-    );
+    spinner.set_style(spinner_style());
     spinner.enable_steady_tick(Duration::from_millis(80));
     spinner.set_message(msg.into());
     spinner
@@ -107,15 +108,7 @@ impl DelayedSpinner {
             };
         }
         let bar = ProgressBar::with_draw_target(None, ProgressDrawTarget::hidden());
-        bar.set_style(
-            IndicatifStyle::with_template(if colors_enabled() {
-                "{spinner:.cyan} {msg}"
-            } else {
-                "{spinner} {msg}"
-            })
-            .expect("invalid spinner template")
-            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
-        );
+        bar.set_style(spinner_style());
         bar.set_message(msg.into());
 
         let timer_bar = bar.clone();

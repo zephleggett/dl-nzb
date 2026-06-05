@@ -68,6 +68,11 @@ bytes = "1.11"
 async-trait = "0.1"
 # Lock-free MPMC channel for article-granularity work distribution across workers
 flume = "0.11"
+# SIMD CRC32 (IEEE/zlib polynomial) for yEnc per-article verification — an order
+# of magnitude faster than the scalar table CRC on PCLMULQDQ-capable CPUs.
+crc32fast = "1.4"
+# Low-level socket tuning (SO_RCVBUF, TCP keepalive) on the NNTP connections.
+socket2 = { version = "0.5", features = ["all"] }
 
 # Error handling
 anyhow = "1.0"

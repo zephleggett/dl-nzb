@@ -98,10 +98,30 @@ impl PostProcessor {
             }
         }
 
+        // The download is fully integrity-verified on the wire when every segment
+        // of every file carried a yEnc checksum that matched and nothing failed.
+        // In that case the payload is provably intact, so we skip PAR2's
+        // full-payload re-hash (minutes on a large release) — PAR2 is only needed
+        // to *repair*, and there is nothing to repair. Any file with a
+        // checksum-less segment, or any failure, falls through to a real verify.
+        let download_clean = !results.is_empty()
+            && results
+                .iter()
+                .all(|r| r.segments_failed == 0 && r.all_segments_crc_verified);
+
         let par2_status = if self.config.auto_par2_repair && !crate::shutdown::is_requested() {
-            let bar =
-                crate::progress::create_progress_bar(100, crate::progress::ProgressStyle::Par2);
-            par2::repair_with_par2(&self.config, download_dir, &downloaded_par2_files, &bar).await?
+            if download_clean && !downloaded_par2_files.is_empty() {
+                crate::ui::child(
+                    false,
+                    crate::ui::ok_line("Verified on download — skipped PAR2 re-scan"),
+                );
+                Par2Status::Success
+            } else {
+                let bar =
+                    crate::progress::create_progress_bar(100, crate::progress::ProgressStyle::Par2);
+                par2::repair_with_par2(&self.config, download_dir, &downloaded_par2_files, &bar)
+                    .await?
+            }
         } else {
             Par2Status::NoPar2Files
         };
@@ -124,24 +144,18 @@ impl PostProcessor {
             rar_extracted = report.archives_extracted > 0;
             rar_failed = report.archives_failed;
         } else if self.config.auto_extract_rar && !archive_files_with_failures.is_empty() {
-            use crate::ui::{glyph, style};
             crate::ui::child(
                 false,
-                style::warn(&format!(
-                    "{} Skipping RAR extraction — {} archive{} have download failures and PAR2 did not succeed",
-                    glyph::WARN,
+                crate::ui::warn_line(format!(
+                    "Skipping RAR extraction — {} archive{} have download failures and PAR2 did not succeed",
                     archive_files_with_failures.len(),
-                    if archive_files_with_failures.len() == 1 { "" } else { "s" }
+                    crate::ui::plural(archive_files_with_failures.len()),
                 )),
             );
         } else if self.config.auto_extract_rar && par2_status == Par2Status::Failed {
-            use crate::ui::{glyph, style};
             crate::ui::child(
                 false,
-                style::warn(&format!(
-                    "{} Skipping RAR extraction — PAR2 verification failed",
-                    glyph::WARN
-                )),
+                crate::ui::warn_line("Skipping RAR extraction — PAR2 verification failed"),
             );
         }
 

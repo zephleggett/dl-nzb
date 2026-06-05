@@ -49,6 +49,11 @@ pub struct DownloadSummary {
     pub download_time_seconds: f64,
     pub transfer_time_seconds: f64,
     pub average_speed_mib_per_sec: f64,
+    /// Wall clock spent in the pre-flight STAT availability scan (0 when skipped).
+    pub availability_scan_seconds: f64,
+    /// Wall clock spent in post-processing (PAR2 verify/repair, RAR extraction,
+    /// deobfuscation) — the phase that runs after the download settles.
+    pub post_processing_seconds: f64,
     pub files: Vec<DownloadFileResult>,
     pub post_processing: PostProcessingResult,
 }

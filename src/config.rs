@@ -32,9 +32,6 @@ pub struct Config {
     pub download: DownloadConfig,
 
     #[serde(default)]
-    pub memory: MemoryConfig,
-
-    #[serde(default)]
     pub post_processing: PostProcessingConfig,
 
     #[serde(default)]
@@ -116,12 +113,6 @@ pub struct DownloadConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemoryConfig {
-    pub max_segments_in_memory: usize,
-    pub max_concurrent_files: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PostProcessingConfig {
     pub auto_par2_repair: bool,
     pub auto_extract_rar: bool,
@@ -158,12 +149,16 @@ pub struct TuningConfig {
     /// is given up. Transient wire failures are retried separately, uncounted.
     #[serde(default = "default_decode_retry_cap")]
     pub decode_retry_cap: u8,
-    /// Maximum time (seconds) to wait for a pool connection before skipping batch
-    pub connection_wait_timeout: u64,
     /// Maximum concurrent connection creation attempts
     pub max_concurrent_connections: usize,
     /// File size threshold (bytes) above which to show progress during RAR extraction
     pub large_file_threshold: u64,
+    /// `fsync` each finished file at finalize. Default `false`: PAR2 verifies
+    /// integrity and a crash just means re-download, so we skip hundreds of
+    /// fsync barriers (a large wall-clock win on big sets / slow or network
+    /// disks). Set true only if you need crash-durability of partial downloads.
+    #[serde(default)]
+    pub fsync_on_finalize: bool,
 }
 
 fn default_pipeline_depth() -> usize {
@@ -184,7 +179,7 @@ impl Default for UsenetConfig {
             password: String::new(),
             ssl: true, // Default to SSL
             verify_ssl_certs: true,
-            connections: 20,   // Conservative default (users can increase if needed)
+            connections: 30,   // Most providers allow 30-50; saturates a fast link
             timeout: 30,       // Reduced from 45s
             retry_attempts: 2, // Faster failover
             retry_delay: 500,  // Quick retries
@@ -198,15 +193,6 @@ impl Default for DownloadConfig {
             dir: PathBuf::from("downloads"),
             create_subfolders: true,
             force_redownload: false,
-        }
-    }
-}
-
-impl Default for MemoryConfig {
-    fn default() -> Self {
-        Self {
-            max_segments_in_memory: 800, // Conservative: 800 concurrent segments (~20 per connection)
-            max_concurrent_files: 100,   // Max files downloading simultaneously
         }
     }
 }
@@ -239,9 +225,9 @@ impl Default for TuningConfig {
         Self {
             pipeline_depth: default_pipeline_depth(), // in-flight BODY requests per connection
             decode_retry_cap: default_decode_retry_cap(), // bounded yEnc-decode retries
-            connection_wait_timeout: 300,             // 5 minutes max wait
-            max_concurrent_connections: 20,           // Concurrent connection creation limit
+            max_concurrent_connections: 30,           // Concurrent connection creation limit
             large_file_threshold: 10 * 1024 * 1024,   // 10MB for progress monitoring
+            fsync_on_finalize: false,                 // skip fsync; PAR2 verifies integrity
         }
     }
 }
@@ -383,10 +369,6 @@ impl Config {
 # dir               - Where to save downloads
 # create_subfolders - Create a subfolder for each NZB file
 #
-# [memory]
-# max_segments_in_memory - How many segments to buffer (affects memory usage)
-# max_concurrent_files  - How many files to download simultaneously
-#
 # [post_processing]
 # auto_par2_repair        - Automatically verify/repair with PAR2 files
 # auto_extract_rar        - Automatically extract RAR archives
@@ -415,23 +397,6 @@ impl Config {
         {
             return Err(ConfigError::InvalidConnections {
                 count: self.usenet.connections,
-            }
-            .into());
-        }
-
-        // Validate memory settings
-        if self.memory.max_segments_in_memory == 0 {
-            return Err(ConfigError::Invalid {
-                field: "max_segments_in_memory".to_string(),
-                reason: "Must be at least 1".to_string(),
-            }
-            .into());
-        }
-
-        if self.memory.max_concurrent_files == 0 {
-            return Err(ConfigError::Invalid {
-                field: "max_concurrent_files".to_string(),
-                reason: "Must be at least 1".to_string(),
             }
             .into());
         }
@@ -526,8 +491,8 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.usenet.connections, 20); // Conservative default
-        assert_eq!(config.memory.max_concurrent_files, 100);
+        assert_eq!(config.usenet.connections, 30);
+        assert!(!config.tuning.fsync_on_finalize);
     }
 
     #[test]

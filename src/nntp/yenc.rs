@@ -22,6 +22,8 @@ pub(crate) struct YencDecoded {
     pub data: Vec<u8>,
     /// Zero-indexed byte offset into the final assembled file.
     pub offset: u64,
+    /// True iff a pcrc32/crc32 checksum was present and matched (reaching Ok with a present checksum implies it matched).
+    pub crc_verified: bool,
 }
 
 /// `=ypart` header: 1-indexed `begin`, inclusive `end`.
@@ -132,6 +134,7 @@ pub(crate) fn decode_article(body: &[u8]) -> Result<YencDecoded> {
     Ok(YencDecoded {
         data: decoded,
         offset,
+        crc_verified: yend_pcrc32.is_some(),
     })
 }
 
@@ -166,6 +169,9 @@ fn decode_line(line: &[u8], output: &mut Vec<u8>) {
 }
 
 #[cfg(target_arch = "x86_64")]
+// `reserve` + `set_len` leaves the region uninitialized, but the SIMD loop below
+// writes all `simd_len` bytes before any read, so the lint's concern is moot.
+#[allow(clippy::uninit_vec)]
 fn decode_simd(line: &[u8], output: &mut Vec<u8>) {
     use std::arch::x86_64::*;
     let len = line.len();
@@ -173,7 +179,12 @@ fn decode_simd(line: &[u8], output: &mut Vec<u8>) {
     let chunks = len / 16;
     let simd_len = chunks * 16;
     if chunks > 0 {
-        output.resize(start + simd_len, 0);
+        output.reserve(simd_len);
+        // SAFETY: the SIMD loop below writes exactly `simd_len` bytes into this
+        // region before any read; reserve guarantees the capacity.
+        unsafe {
+            output.set_len(start + simd_len);
+        }
         // SAFETY: SSE2 is mandatory on x86_64; output was just resized to hold
         // the SIMD writes; pointers stay in-bounds for `chunks * 16` bytes.
         unsafe {
@@ -192,6 +203,9 @@ fn decode_simd(line: &[u8], output: &mut Vec<u8>) {
 }
 
 #[cfg(target_arch = "aarch64")]
+// `reserve` + `set_len` leaves the region uninitialized, but the SIMD loop below
+// writes all `simd_len` bytes before any read, so the lint's concern is moot.
+#[allow(clippy::uninit_vec)]
 fn decode_simd(line: &[u8], output: &mut Vec<u8>) {
     use std::arch::aarch64::*;
     let len = line.len();
@@ -199,7 +213,12 @@ fn decode_simd(line: &[u8], output: &mut Vec<u8>) {
     let chunks = len / 16;
     let simd_len = chunks * 16;
     if chunks > 0 {
-        output.resize(start + simd_len, 0);
+        output.reserve(simd_len);
+        // SAFETY: the SIMD loop below writes exactly `simd_len` bytes into this
+        // region before any read; reserve guarantees the capacity.
+        unsafe {
+            output.set_len(start + simd_len);
+        }
         // SAFETY: NEON is mandatory on aarch64; output was resized to fit;
         // pointers remain in-bounds for `chunks * 16` bytes.
         unsafe {
@@ -263,35 +282,8 @@ fn find_subseq(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 // --- CRC32 (IEEE 802.3, polynomial 0xEDB88320) ---
 
-const CRC32_TABLE: [u32; 256] = build_crc32_table();
-
-const fn build_crc32_table() -> [u32; 256] {
-    let mut table = [0u32; 256];
-    let mut i = 0;
-    while i < 256 {
-        let mut c = i as u32;
-        let mut j = 0;
-        while j < 8 {
-            c = if c & 1 != 0 {
-                0xEDB88320 ^ (c >> 1)
-            } else {
-                c >> 1
-            };
-            j += 1;
-        }
-        table[i] = c;
-        i += 1;
-    }
-    table
-}
-
 fn crc32_ieee(data: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
-    for &b in data {
-        let idx = ((crc ^ b as u32) & 0xff) as usize;
-        crc = (crc >> 8) ^ CRC32_TABLE[idx];
-    }
-    crc ^ 0xFFFF_FFFF
+    crc32fast::hash(data)
 }
 
 #[cfg(test)]

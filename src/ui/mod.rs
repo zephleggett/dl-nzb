@@ -16,10 +16,32 @@ pub mod layout;
 pub mod style;
 
 pub use layout::{
-    format_duration, format_eta, rule, sanitize_display, truncate_middle, MAX_LISTED_FILES,
+    format_duration, format_eta, plural, rule, sanitize_display, truncate_middle, MAX_LISTED_FILES,
 };
 
 use indicatif::ProgressBar;
+
+/// Build a success status-line body: green `✓ <text>`. Centralises the
+/// glyph↔colour pairing so call sites pass only the message.
+pub fn ok_line(text: impl std::fmt::Display) -> String {
+    format!("{}", style::success(&format!("{} {text}", glyph::OK)))
+}
+
+/// Build a warning status-line body: yellow `⚠ <text>`.
+pub fn warn_line(text: impl std::fmt::Display) -> String {
+    format!("{}", style::warn(&format!("{} {text}", glyph::WARN)))
+}
+
+/// Build an error status-line body: red `✗ <text>`.
+pub fn error_line(text: impl std::fmt::Display) -> String {
+    format!("{}", style::error(&format!("{} {text}", glyph::ERR)))
+}
+
+/// Render a child line `"  ├─ <body>"` / `"  └─ <body>"` (no I/O) so the gutter
+/// grammar lives in one place, usable on either output stream.
+pub fn child_line(last: bool, body: impl std::fmt::Display) -> String {
+    format!("  {} {}", style::dim(glyph::branch(last)), body)
+}
 
 /// Print a flush-left header/banner line (e.g. the release name). No-op in quiet.
 pub fn header(line: impl std::fmt::Display) {
@@ -44,7 +66,7 @@ pub fn child(last: bool, body: impl std::fmt::Display) {
     if crate::output_mode::is_quiet() {
         return;
     }
-    eprintln!("  {} {}", style::dim(glyph::branch(last)), body);
+    eprintln!("{}", child_line(last, body));
 }
 
 /// Finish a stage's progress bar cleanly: clear the live bar (no leftover
@@ -72,10 +94,6 @@ impl Tree {
     pub fn push(&mut self, body: impl Into<String>) -> &mut Self {
         self.rows.push(body.into());
         self
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.rows.is_empty()
     }
 
     /// Emit all rows with correct `├─` / `└─` markers. No-op in quiet/empty.

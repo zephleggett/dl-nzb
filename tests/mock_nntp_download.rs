@@ -16,9 +16,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 
-use dl_nzb::config::{
-    Config, DownloadConfig, MemoryConfig, PostProcessingConfig, TuningConfig, UsenetConfig,
-};
+use dl_nzb::config::{Config, DownloadConfig, PostProcessingConfig, TuningConfig, UsenetConfig};
 use dl_nzb::download::{Downloader, Nzb};
 
 /// Pick a free port by binding to :0 in the std listener and asking the OS.
@@ -230,10 +228,6 @@ fn make_config(server: &str, port: u16, download_dir: PathBuf) -> Config {
             create_subfolders: false,
             force_redownload: true,
         },
-        memory: MemoryConfig {
-            max_segments_in_memory: 100,
-            max_concurrent_files: 10,
-        },
         post_processing: PostProcessingConfig {
             auto_par2_repair: false,
             auto_extract_rar: false,
@@ -246,9 +240,9 @@ fn make_config(server: &str, port: u16, download_dir: PathBuf) -> Config {
         tuning: TuningConfig {
             pipeline_depth: 4,
             decode_retry_cap: 3,
-            connection_wait_timeout: 10,
             max_concurrent_connections: 4,
             large_file_threshold: 1024 * 1024,
+            fsync_on_finalize: false,
         },
         notifications: Default::default(),
     }

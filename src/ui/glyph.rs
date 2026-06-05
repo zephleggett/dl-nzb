@@ -33,6 +33,14 @@ fn unicode() -> bool {
     *UNICODE.get_or_init(|| true)
 }
 
+/// Whether Unicode glyphs (vs the ASCII fallbacks) are in use — the
+/// authoritative answer other modules (e.g. progress-bar fill chars) should ask
+/// instead of inferring it from a rendered glyph.
+#[inline]
+pub fn is_unicode() -> bool {
+    unicode()
+}
+
 /// A semantic glyph. Each maps to one Unicode mark and one ASCII fallback.
 #[derive(Debug, Clone, Copy)]
 pub enum Mark {
@@ -42,8 +50,6 @@ pub enum Mark {
     Info,        // ℹ  / [i]
     Retry,       // ↻  / [~]
     Interrupted, // ■  / [#]
-    Bullet,      // •  / *
-    Doc,         // ▸  / >     (replaces the emoji 📄)
 }
 
 impl Mark {
@@ -61,10 +67,6 @@ impl Mark {
             (Mark::Retry, false) => "[~]",
             (Mark::Interrupted, true) => "■",
             (Mark::Interrupted, false) => "[#]",
-            (Mark::Bullet, true) => "•",
-            (Mark::Bullet, false) => "*",
-            (Mark::Doc, true) => "▸",
-            (Mark::Doc, false) => ">",
         }
     }
 }
@@ -82,8 +84,6 @@ pub const ERR: Mark = Mark::Error;
 pub const INFO: Mark = Mark::Info;
 pub const RETRY: Mark = Mark::Retry;
 pub const INTERRUPTED: Mark = Mark::Interrupted;
-pub const BULLET: Mark = Mark::Bullet;
-pub const DOC: Mark = Mark::Doc;
 
 /// Tree connector for a child line: `├─` for non-last, `└─` for last (ASCII
 /// `|-` / `` `- ``).

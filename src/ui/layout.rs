@@ -68,3 +68,12 @@ pub fn truncate_middle(s: &str, max: usize) -> String {
 pub fn rule(n: usize) -> String {
     std::iter::repeat_n(glyph::rule_char(), n).collect()
 }
+
+/// The plural suffix for a count: `""` for 1, `"s"` otherwise.
+pub fn plural(n: usize) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
+}

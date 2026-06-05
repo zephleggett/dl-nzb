@@ -41,6 +41,10 @@ pub struct DownloadResult {
     pub size: u64,
     pub segments_downloaded: usize,
     pub segments_failed: usize,
+    /// True iff every downloaded segment of this file carried a yEnc checksum
+    /// that matched on the wire — i.e. the file is fully integrity-verified
+    /// without a PAR2 re-hash. False if any segment was size-checked only.
+    pub all_segments_crc_verified: bool,
 }
 
 /// Aggregate outcome of a download. Speed reporting uses
@@ -415,31 +419,17 @@ impl Downloader {
             } else {
                 String::new()
             };
-            use crate::ui::{glyph, style};
             Some(if failed_files == 0 {
-                format!(
-                    "{}",
-                    style::success(&format!(
-                        "{} Downloaded {}{}{}",
-                        glyph::OK,
-                        human_bytes(data_downloaded as f64),
-                        par2_suffix,
-                        speed_suffix,
-                    ))
-                )
+                crate::ui::ok_line(format!(
+                    "Downloaded {}{par2_suffix}{speed_suffix}",
+                    human_bytes(data_downloaded as f64),
+                ))
             } else {
-                format!(
-                    "{}",
-                    style::warn(&format!(
-                        "{} Downloaded {}{} ({} file{} with errors){}",
-                        glyph::WARN,
-                        human_bytes(data_downloaded as f64),
-                        par2_suffix,
-                        failed_files,
-                        if failed_files == 1 { "" } else { "s" },
-                        speed_suffix,
-                    ))
-                )
+                crate::ui::warn_line(format!(
+                    "Downloaded {}{par2_suffix} ({failed_files} file{} with errors){speed_suffix}",
+                    human_bytes(data_downloaded as f64),
+                    crate::ui::plural(failed_files),
+                ))
             })
         } else {
             None
@@ -567,7 +557,7 @@ impl Downloader {
         skip_message_ids: Option<&HashSet<String>>,
         bytes_counter: Arc<AtomicU64>,
     ) -> Result<(Vec<DownloadResult>, Duration, u64)> {
-        let pipeline_depth = config.tuning.pipeline_depth.max(1);
+        let configured_depth = config.tuning.pipeline_depth.max(1);
         let decode_retry_cap = config.tuning.decode_retry_cap.max(1);
         // Transient (connection-level / 412) retries get a more generous budget
         // than article-level retries — a dropped connection usually isn't the
@@ -700,12 +690,27 @@ impl Downloader {
         //   - When `pending` hits zero, `job_tx` is dropped, closing the queue
         //     so idle workers wake and exit cleanly.
         let total_articles = jobs.len();
+
+        // Adaptive pipeline depth: keep ~4 MB of BODY requests in flight per
+        // connection so a high-RTT link stays bandwidth-bound (throughput is
+        // capped by depth*avg_article / RTT until it saturates). Bounded to
+        // [configured, 32] so RAM and retry granularity stay sane; small
+        // articles raise the depth, large ones keep it modest.
+        let avg_article =
+            jobs.iter().map(|j| j.encoded_bytes).sum::<u64>() / (total_articles.max(1) as u64);
+        let adaptive_depth = if avg_article > 0 {
+            ((4 * 1024 * 1024) / avg_article).clamp(4, 32) as usize
+        } else {
+            configured_depth
+        };
+        let pipeline_depth = configured_depth.max(adaptive_depth);
+
         let (job_tx, job_rx) = flume::unbounded::<ArticleJob>();
         let (feedback_tx, mut feedback_rx) = mpsc::unbounded_channel::<WorkerFeedback>();
-        // Bounded write channel sized for decode bursts (independent of pipeline
-        // depth) so workers block if the writer falls behind, capping RAM held
-        // in decoded `Bytes`.
-        let write_capacity = (self.connections.max(1) * 64).max(64);
+        // Bounded write channel: a few decoded segments per connection is enough
+        // to cover decode-burst jitter and one write latency; beyond that just
+        // pins RAM without feeding the writer faster (it drains at disk speed).
+        let write_capacity = (self.connections.max(1) * 4).max(32);
         let (write_tx, write_rx) = mpsc::channel::<WriteJob>(write_capacity);
 
         for job in jobs.drain(..) {
@@ -717,6 +722,7 @@ impl Downloader {
             progress_bar.clone(),
             total_files,
             bytes_counter,
+            config.tuning.fsync_on_finalize,
         ));
 
         let worker_count = self.connections.max(1);
@@ -848,6 +854,8 @@ struct FileState {
     segments_failed: AtomicUsize,
     segments_settled: AtomicUsize,
     max_byte_position: AtomicU64,
+    /// Cleared if any successful segment lacked a matched wire checksum.
+    all_crc_verified: AtomicBool,
     /// Set once when the partial file has been renamed (or deleted on full
     /// failure). Idempotency guard for `finalize_file`.
     finalized: AtomicBool,
@@ -869,6 +877,7 @@ impl FileState {
             segments_failed: AtomicUsize::new(0),
             segments_settled: AtomicUsize::new(0),
             max_byte_position: AtomicU64::new(0),
+            all_crc_verified: AtomicBool::new(true),
             finalized: AtomicBool::new(false),
         }
     }
@@ -896,6 +905,7 @@ impl FileState {
             size: self.max_byte_position.load(Ordering::Relaxed),
             segments_downloaded: self.segments_downloaded.load(Ordering::Relaxed),
             segments_failed: self.segments_failed.load(Ordering::Relaxed),
+            all_segments_crc_verified: self.all_crc_verified.load(Ordering::Relaxed),
         }
     }
 }
@@ -1107,7 +1117,22 @@ async fn retry_transient(mut job: ArticleJob, ctx: &WorkerCtx) {
 /// handled in the worker loop, where the connection's poison state is known.)
 async fn handle_outcome(mut job: ArticleJob, outcome: ArticleOutcome, ctx: &WorkerCtx) {
     match outcome {
-        ArticleOutcome::Ok { offset, data, .. } => {
+        ArticleOutcome::Ok {
+            offset,
+            data,
+            crc_verified,
+            ..
+        } => {
+            // Track wire-CRC coverage per file: if any segment carried no
+            // checksum (size-checked only), the file isn't fully wire-verified,
+            // so post-processing must run a real PAR2 verify rather than trust
+            // the download. (See the skip-verify gate in PostProcessor.)
+            if !crc_verified {
+                job.file
+                    .state
+                    .all_crc_verified
+                    .store(false, Ordering::Relaxed);
+            }
             let _ = ctx
                 .write_tx
                 .send(WriteJob::Write {
@@ -1211,6 +1236,7 @@ async fn run_writer(
     progress_bar: ProgressBar,
     total_files: usize,
     bytes_counter: Arc<AtomicU64>,
+    fsync_on_finalize: bool,
 ) -> Option<TransferWindow> {
     let mut completed_files = 0usize;
     let mut window: Option<TransferWindow> = None;
@@ -1262,7 +1288,7 @@ async fn run_writer(
             // Finalize off the writer task: the `set_len` + `sync_data` +
             // `rename` chain is slow (tens of ms) and would otherwise stall
             // writes to *other* files queued behind us.
-            finalize_tasks.spawn(finalize_file(file, progress_bar.clone()));
+            finalize_tasks.spawn(finalize_file(file, progress_bar.clone(), fsync_on_finalize));
         }
     }
     while finalize_tasks.join_next().await.is_some() {}
@@ -1341,7 +1367,7 @@ async fn handle_write(file: &Arc<FileHandle>, offset: u64, data: Bytes) {
 
 /// Truncate the partial file to the highest written byte and rename it to its
 /// final name. If nothing was written, remove the partial file.
-async fn finalize_file(file: Arc<FileHandle>, progress_bar: ProgressBar) {
+async fn finalize_file(file: Arc<FileHandle>, progress_bar: ProgressBar, fsync: bool) {
     // On Ctrl+C, leave the file as `<name>.partial` rather than truncating it to
     // the bytes received so far and renaming it to its final name — that would
     // present a silently-incomplete file as complete. A later run can resume it.
@@ -1366,7 +1392,12 @@ async fn finalize_file(file: Arc<FileHandle>, progress_bar: ProgressBar) {
             return Ok(());
         }
         file_handle.set_len(max_byte)?;
-        file_handle.sync_data()?;
+        // fsync is opt-in: PAR2 verifies integrity and a crash just means
+        // re-download, so we skip the (potentially hundreds of) fsync barriers
+        // by default — a large wall-clock win on big sets / slow disks.
+        if fsync {
+            file_handle.sync_data()?;
+        }
         drop(file_handle);
         if final_path.exists() {
             std::fs::remove_file(&final_path)?;

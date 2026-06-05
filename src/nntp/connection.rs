@@ -51,6 +51,8 @@ pub enum ArticleOutcome {
         message_id: String,
         offset: u64,
         data: Bytes,
+        /// True iff the article carried a pcrc32/crc32 that matched on decode.
+        crc_verified: bool,
     },
     /// Server reported the article doesn't exist (430/423). Permanent.
     Missing { message_id: String },
@@ -99,6 +101,18 @@ impl AsyncNntpConnection {
             })?;
 
         tcp_stream.set_nodelay(true)?;
+
+        // Enlarge the receive buffer so a single high-RTT connection isn't capped by
+        // the bandwidth-delay product, and enable keepalive so half-open connections
+        // from flaky providers are detected by the OS rather than only by read timeouts.
+        {
+            use socket2::{SockRef, TcpKeepalive};
+            let sref = SockRef::from(&tcp_stream);
+            let _ = sref.set_recv_buffer_size(4 * 1024 * 1024);
+            let _ = sref.set_tcp_keepalive(
+                &TcpKeepalive::new().with_time(std::time::Duration::from_secs(60)),
+            );
+        }
 
         let (reader, writer): (
             Box<dyn AsyncRead + Unpin + Send>,
@@ -294,6 +308,7 @@ impl AsyncNntpConnection {
                     message_id: mid(),
                     offset: decoded.offset,
                     data: Bytes::from(decoded.data),
+                    crc_verified: decoded.crc_verified,
                 },
                 Err(e) => {
                     // The wire is in sync (full body consumed); only the payload

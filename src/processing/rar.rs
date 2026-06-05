@@ -115,29 +115,18 @@ impl RarExtractor {
                 Ok(false) => {
                     report.archives_failed += 1;
                     if !progress_bar.is_hidden() {
-                        use crate::ui::{glyph, style};
                         progress_bar.println(format!(
                             "  {}",
-                            style::error(&format!(
-                                "{} Extraction failed for {}",
-                                glyph::ERR,
-                                filename
-                            ))
+                            crate::ui::error_line(format!("Extraction failed for {filename}"))
                         ));
                     }
                 }
                 Err(e) => {
                     report.archives_failed += 1;
                     if !progress_bar.is_hidden() {
-                        use crate::ui::{glyph, style};
                         progress_bar.println(format!(
                             "  {}",
-                            style::error(&format!(
-                                "{} Extraction error for {}: {}",
-                                glyph::ERR,
-                                filename,
-                                e
-                            ))
+                            crate::ui::error_line(format!("Extraction error for {filename}: {e}"))
                         ));
                     }
                 }
@@ -147,40 +136,27 @@ impl RarExtractor {
         }
 
         let result_line = if !crate::output_mode::is_quiet() {
-            use crate::ui::{glyph, style};
-            let plural = |n: usize| if n == 1 { "" } else { "s" };
+            use crate::ui::plural;
             Some(
                 if report.archives_extracted > 0 && report.archives_failed == 0 {
-                    format!(
-                        "{}",
-                        style::success(&format!(
-                            "{} Extracted {} archive{}",
-                            glyph::OK,
-                            report.archives_extracted,
-                            plural(report.archives_extracted)
-                        ))
-                    )
+                    crate::ui::ok_line(format!(
+                        "Extracted {} archive{}",
+                        report.archives_extracted,
+                        plural(report.archives_extracted)
+                    ))
                 } else if report.archives_extracted > 0 {
-                    format!(
-                        "{}",
-                        style::warn(&format!(
-                            "{} Extracted {} archive{} ({} failed)",
-                            glyph::WARN,
-                            report.archives_extracted,
-                            plural(report.archives_extracted),
-                            report.archives_failed
-                        ))
-                    )
+                    crate::ui::warn_line(format!(
+                        "Extracted {} archive{} ({} failed)",
+                        report.archives_extracted,
+                        plural(report.archives_extracted),
+                        report.archives_failed
+                    ))
                 } else {
-                    format!(
-                        "{}",
-                        style::error(&format!(
-                            "{} Extraction failed for {} archive{}",
-                            glyph::ERR,
-                            report.archives_failed,
-                            plural(report.archives_failed)
-                        ))
-                    )
+                    crate::ui::error_line(format!(
+                        "Extraction failed for {} archive{}",
+                        report.archives_failed,
+                        plural(report.archives_failed)
+                    ))
                 },
             )
         } else {

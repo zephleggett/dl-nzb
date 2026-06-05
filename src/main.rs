@@ -20,8 +20,20 @@ use dl_nzb::{
 
 type Result<T> = std::result::Result<T, DlNzbError>;
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // Explicit runtime so the blocking pool is bounded: per-article writes,
+    // finalize, PAR2 repair and RAR extraction all use spawn_blocking, and the
+    // 512-thread default could balloon thread/stack/fd use. 64 comfortably
+    // covers concurrent writes + finalizes + one PAR2 + one RAR.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .max_blocking_threads(64)
+        .build()
+        .expect("failed to build Tokio runtime");
+    rt.block_on(async_main());
+}
+
+async fn async_main() {
     let cli = Cli::parse_and_validate();
     let use_json = cli.json;
 
@@ -232,7 +244,7 @@ async fn handle_command(command: &Commands, cli: &Cli) -> Result<()> {
                 }
                 println!("{}", serde_json::to_string_pretty(&result)?);
             } else {
-                use dl_nzb::ui::{glyph, style};
+                use dl_nzb::ui;
                 let spinner = dl_nzb::progress::DelayedSpinner::new(
                     "Testing connection…",
                     std::time::Duration::from_millis(150),
@@ -246,26 +258,16 @@ async fn handle_command(command: &Commands, cli: &Cli) -> Result<()> {
                         // consistent with the download run).
                         eprintln!(
                             "{}",
-                            style::success(&format!(
-                                "{} Connected to {}",
-                                glyph::OK,
-                                test_config.server
-                            ))
+                            ui::ok_line(format!("Connected to {}", test_config.server))
                         );
-                        eprintln!(
-                            "  {} Authentication OK",
-                            style::dim(glyph::branch(!healthy))
-                        );
+                        eprintln!("{}", ui::child_line(!healthy, "Authentication OK"));
                         if healthy {
-                            eprintln!("  {} Server healthy", style::dim(glyph::branch(true)));
+                            eprintln!("{}", ui::child_line(true, "Server healthy"));
                         }
                     }
                     Err(e) => {
                         spinner.finish_and_clear();
-                        eprintln!(
-                            "{}",
-                            style::error(&format!("{} Connection failed: {}", glyph::ERR, e))
-                        );
+                        eprintln!("{}", ui::error_line(format!("Connection failed: {e}")));
                         return Err(e);
                     }
                 }
@@ -274,13 +276,12 @@ async fn handle_command(command: &Commands, cli: &Cli) -> Result<()> {
         }
 
         Commands::Config => {
-            use dl_nzb::ui::{self, glyph, style};
+            use dl_nzb::ui::{self, style};
             let config_path = Config::config_path()?;
             println!("{}", style::heading("Configuration"));
             println!(
-                "  {} {}",
-                style::dim(glyph::branch(true)),
-                style::path(&config_path.display().to_string())
+                "{}",
+                ui::child_line(true, style::path(&config_path.display().to_string()))
             );
             println!();
 
@@ -294,12 +295,11 @@ async fn handle_command(command: &Commands, cli: &Cli) -> Result<()> {
                 println!("{}", style::dim(&ui::rule(60)));
             } else {
                 println!(
-                    "  {} {}",
-                    style::dim(glyph::branch(true)),
-                    style::warn(&format!(
-                        "{} No config yet — run any command to create it.",
-                        glyph::WARN
-                    ))
+                    "{}",
+                    ui::child_line(
+                        true,
+                        ui::warn_line("No config yet — run any command to create it.")
+                    )
                 );
             }
             Ok(())
@@ -339,7 +339,7 @@ async fn handle_list_mode(cli: &Cli) -> Result<()> {
         }
         println!("{}", serde_json::to_string_pretty(&results)?);
     } else {
-        use dl_nzb::ui::{self, glyph, style};
+        use dl_nzb::ui::{self, style};
         for nzb_path in &cli.files {
             let nzb = Nzb::from_file(nzb_path)?;
             println!();
@@ -369,18 +369,22 @@ async fn handle_list_mode(cli: &Cli) -> Result<()> {
                     style::accent("DATA")
                 };
                 println!(
-                    "  {} {}  {}  {}",
-                    style::dim(glyph::branch(last)),
-                    tag,
-                    display_name,
-                    style::info(&human_bytes(size as f64)),
+                    "{}",
+                    ui::child_line(
+                        last,
+                        format!(
+                            "{}  {}  {}",
+                            tag,
+                            display_name,
+                            style::info(&human_bytes(size as f64))
+                        )
+                    )
                 );
             }
             if extra > 0 {
                 println!(
-                    "  {} {}",
-                    style::dim(glyph::branch(true)),
-                    style::dim(&format!("… and {extra} more"))
+                    "{}",
+                    ui::child_line(true, style::dim(&format!("… and {extra} more")))
                 );
             }
         }
@@ -482,112 +486,122 @@ async fn handle_download_mode(cli: &Cli, config: Config) -> Result<()> {
         // (so missing articles are never fetched) and estimates whether PAR2 can
         // repair the gap. Runs in every mode; only the interactive abort prompt
         // is gated to interactive runs (JSON/quiet report and continue).
+        let scan_start = std::time::Instant::now();
         let mut skip_message_ids: Option<std::collections::HashSet<String>> = None;
         {
             use dl_nzb::ui::{self, glyph, style};
             let interactive = !cli.json && !cli.quiet;
-            let spinner = interactive.then(|| {
-                dl_nzb::progress::DelayedSpinner::new(
-                    "Checking article availability…",
-                    std::time::Duration::from_millis(150),
-                )
+            // The pre-flight scan's only unique value is the interactive abort
+            // verdict and, when there's no PAR2, learning repair is impossible up
+            // front. On a non-interactive run that has PAR2, skip it: missing
+            // articles are detected inline (430) and on-demand recovery handles
+            // the gap, so the scan would just be latency before the first byte.
+            let has_par2 = nzb.files().iter().any(|f| {
+                let name =
+                    Nzb::get_filename_from_subject(&f.subject).unwrap_or_else(|| f.subject.clone());
+                dl_nzb::patterns::par2::is_par2_file(std::path::Path::new(&name))
             });
-            match downloader.check_all_availability(&nzb).await {
-                Ok(report) => {
-                    if let Some(s) = spinner {
-                        s.finish_and_clear();
-                    }
-                    if !report.missing_ids.is_empty() {
-                        skip_message_ids = Some(report.missing_ids.clone());
-                    }
-                    // If the scan was interrupted (Ctrl+C), don't print a verdict
-                    // from partial data or show the interactive prompt — we're
-                    // about to abort below.
-                    if !report.missing_files.is_empty() && !dl_nzb::shutdown::is_requested() {
-                        let percent = report.data_completion_percent();
-                        let missing_display: Vec<String> = report
-                            .missing_files
-                            .iter()
-                            .map(|n| ui::sanitize_display(n))
-                            .collect();
-                        if report.only_nonessential_missing() {
-                            ui::child(
-                                false,
-                                style::dim(&format!(
+            if interactive || !has_par2 {
+                let spinner = interactive.then(|| {
+                    dl_nzb::progress::DelayedSpinner::new(
+                        "Checking article availability…",
+                        std::time::Duration::from_millis(150),
+                    )
+                });
+                match downloader.check_all_availability(&nzb).await {
+                    Ok(report) => {
+                        if let Some(s) = spinner {
+                            s.finish_and_clear();
+                        }
+                        if !report.missing_ids.is_empty() {
+                            skip_message_ids = Some(report.missing_ids.clone());
+                        }
+                        // If the scan was interrupted (Ctrl+C), don't print a verdict
+                        // from partial data or show the interactive prompt — we're
+                        // about to abort below.
+                        if !report.missing_files.is_empty() && !dl_nzb::shutdown::is_requested() {
+                            let percent = report.data_completion_percent();
+                            let missing_display: Vec<String> = report
+                                .missing_files
+                                .iter()
+                                .map(|n| ui::sanitize_display(n))
+                                .collect();
+                            if report.only_nonessential_missing() {
+                                ui::child(
+                                    false,
+                                    style::dim(&format!(
                                     "{} {:.1}% of data available ({} non-essential missing: {})",
                                     glyph::INFO,
                                     percent,
                                     report.missing_files.len(),
                                     missing_display.join(", ")
                                 )),
-                            );
-                        } else if report.likely_repairable() {
-                            ui::child(
+                                );
+                            } else if report.likely_repairable() {
+                                ui::child(
                                 false,
-                                style::warn(&format!(
-                                    "{} {:.1}% of data available; {} recovery present — PAR2 repair likely.",
-                                    glyph::WARN,
+                                ui::warn_line(format!(
+                                    "{:.1}% of data available; {} recovery present — PAR2 repair likely.",
                                     percent,
                                     human_bytes(report.available_par2_bytes as f64)
                                 )),
                             );
-                        } else {
-                            let reason = if report.has_par2 {
-                                "PAR2 recovery is insufficient"
                             } else {
-                                "no PAR2 files for repair"
-                            };
-                            ui::child(
-                                false,
-                                style::error(&format!(
-                                    "{} {:.1}% of data available; {} — repair unlikely.",
-                                    glyph::ERR,
-                                    percent,
-                                    reason
+                                let reason = if report.has_par2 {
+                                    "PAR2 recovery is insufficient"
+                                } else {
+                                    "no PAR2 files for repair"
+                                };
+                                ui::child(
+                                    false,
+                                    ui::error_line(format!(
+                                    "{percent:.1}% of data available; {reason} — repair unlikely."
                                 )),
-                            );
-
-                            // Only prompt when stdin AND stderr are real TTYs; a
-                            // piped/CI run must never block. Non-interactive skips
-                            // the NZB unless --force is set.
-                            use std::io::IsTerminal;
-                            let can_prompt = interactive
-                                && std::io::stdin().is_terminal()
-                                && std::io::stderr().is_terminal();
-                            if can_prompt {
-                                eprint!("  Continue anyway? [y/N] ");
-                                use std::io::{self, BufRead, Write};
-                                io::stderr().flush().ok();
-                                let proceed = matches!(
-                                    io::stdin().lock().lines().next(),
-                                    Some(Ok(line)) if {
-                                        let a = line.trim().to_ascii_lowercase();
-                                        a == "y" || a == "yes"
-                                    }
                                 );
-                                if !proceed {
-                                    eprintln!("  Aborted.");
+
+                                // Only prompt when stdin AND stderr are real TTYs; a
+                                // piped/CI run must never block. Non-interactive skips
+                                // the NZB unless --force is set.
+                                use std::io::IsTerminal;
+                                let can_prompt = interactive
+                                    && std::io::stdin().is_terminal()
+                                    && std::io::stderr().is_terminal();
+                                if can_prompt {
+                                    eprint!("  Continue anyway? [y/N] ");
+                                    use std::io::{self, BufRead, Write};
+                                    io::stderr().flush().ok();
+                                    let proceed = matches!(
+                                        io::stdin().lock().lines().next(),
+                                        Some(Ok(line)) if {
+                                            let a = line.trim().to_ascii_lowercase();
+                                            a == "y" || a == "yes"
+                                        }
+                                    );
+                                    if !proceed {
+                                        eprintln!("  Aborted.");
+                                        all_succeeded = false;
+                                        continue;
+                                    }
+                                } else if !cli.force {
+                                    eprintln!(
+                                    "  Non-interactive: skipping likely-unrepairable download (re-run with --force to download anyway)."
+                                );
                                     all_succeeded = false;
                                     continue;
                                 }
-                            } else if !cli.force {
-                                eprintln!(
-                                    "  Non-interactive: skipping likely-unrepairable download (re-run with --force to download anyway)."
-                                );
-                                all_succeeded = false;
-                                continue;
                             }
                         }
                     }
-                }
-                Err(e) => {
-                    if let Some(s) = spinner {
-                        s.finish_and_clear();
+                    Err(e) => {
+                        if let Some(s) = spinner {
+                            s.finish_and_clear();
+                        }
+                        eprintln!("Warning: could not check availability: {}", e);
                     }
-                    eprintln!("Warning: could not check availability: {}", e);
                 }
             }
         }
+        let scan_seconds = scan_start.elapsed().as_secs_f64();
 
         // A Ctrl+C during the availability scan should abort before downloading.
         if dl_nzb::shutdown::is_requested() {
@@ -617,6 +631,7 @@ async fn handle_download_mode(cli: &Cli, config: Config) -> Result<()> {
                 };
                 let mut post_outcome: Option<PostProcessingOutcome> = None;
                 let mut post_failed = false;
+                let post_start = std::time::Instant::now();
 
                 // Skip post-processing entirely if a shutdown was requested —
                 // PAR2 repair / RAR extraction on an interrupted, incomplete
@@ -656,11 +671,22 @@ async fn handle_download_mode(cli: &Cli, config: Config) -> Result<()> {
                     }
                 }
 
+                let post_processing_seconds = post_start.elapsed().as_secs_f64();
+
                 // Re-read shutdown: a Ctrl-C *during* post-processing (cancelled
                 // PAR2 repair returns Failed) should read as "interrupted", not a
                 // genuine verification failure.
                 let interrupted = interrupted || dl_nzb::shutdown::is_requested();
-                let download_ok = results.iter().all(|r| r.segments_failed == 0);
+                // PAR2 repair is exactly how download-phase segment failures are
+                // recovered, so a successful verify/repair means the payload is
+                // whole regardless of wire hiccups. Absent that, the download is
+                // still OK if the only failures are non-essential files
+                // (.nfo/.sfv) the user doesn't actually need.
+                let par2_repaired_ok = matches!(post_outcome.as_ref(), Some(o) if o.par2_status == Par2Status::Success);
+                let download_ok = par2_repaired_ok
+                    || results
+                        .iter()
+                        .all(|r| r.segments_failed == 0 || is_auxiliary(&r.filename));
                 let post_ok = if post_failed {
                     false
                 } else if let Some(outcome) = post_outcome.as_ref() {
@@ -700,6 +726,8 @@ async fn handle_download_mode(cli: &Cli, config: Config) -> Result<()> {
                         download_time_seconds: download_time.as_secs_f64(),
                         transfer_time_seconds: transfer_secs,
                         average_speed_mib_per_sec: speed_mib_per_sec,
+                        availability_scan_seconds: scan_seconds,
+                        post_processing_seconds,
                         files: results
                             .iter()
                             .map(|r| DownloadFileResult {
@@ -717,10 +745,7 @@ async fn handle_download_mode(cli: &Cli, config: Config) -> Result<()> {
                 } else if interrupted {
                     use dl_nzb::ui::{self, glyph, style};
                     ui::blank();
-                    ui::header(format!(
-                        "{}",
-                        style::warn(&format!("{} Interrupted", glyph::INTERRUPTED))
-                    ));
+                    ui::header(style::warn(&format!("{} Interrupted", glyph::INTERRUPTED)));
                     ui::child(true, style::path(&output_dir.display().to_string()));
                 } else {
                     print_final_summary(
@@ -780,7 +805,19 @@ fn print_final_summary(
     use dl_nzb::ui::{self, glyph, style};
 
     let total_size: u64 = results.iter().map(|r| r.size).sum();
-    let failed_count = results.iter().filter(|r| r.segments_failed > 0).count();
+    // A successful PAR2 verify/repair means the payload is whole, so download-
+    // phase segment failures were recovered and are no longer errors. Files that
+    // are non-essential (.nfo/.sfv) and never arrived also aren't errors. So
+    // count only essential payload files still broken after post-processing.
+    let par2_ok = matches!(post_outcome, Some(o) if o.par2_status == Par2Status::Success);
+    let failed_count = if par2_ok {
+        0
+    } else {
+        results
+            .iter()
+            .filter(|r| r.segments_failed > 0 && !is_auxiliary(&r.filename))
+            .count()
+    };
 
     // Payload files (what the user actually wanted), failed-first then largest,
     // so the per-file cap never hides a failure.
@@ -809,7 +846,7 @@ fn print_final_summary(
     // Header line: status verb, plus the file name for a single-file release.
     let clean = failed_count == 0 && post_issue.is_none();
     if clean {
-        let verb = format!("{}", style::success(&format!("{} Complete", glyph::OK)));
+        let verb = ui::ok_line("Complete");
         if payload.len() == 1 {
             let name = ui::truncate_middle(&ui::sanitize_display(&payload[0].filename), 56);
             ui::header(format!(
@@ -821,19 +858,12 @@ fn print_final_summary(
             ui::header(verb);
         }
     } else if failed_count == 0 {
-        ui::header(format!(
-            "{}",
-            style::warn(&format!("{} Completed with issues", glyph::WARN))
-        ));
+        ui::header(ui::warn_line("Completed with issues"));
     } else {
-        ui::header(format!(
-            "{}",
-            style::warn(&format!(
-                "{} Completed — {failed_count} file{} with errors",
-                glyph::WARN,
-                if failed_count == 1 { "" } else { "s" }
-            ))
-        ));
+        ui::header(ui::warn_line(format!(
+            "Completed — {failed_count} file{} with errors",
+            ui::plural(failed_count)
+        )));
     }
 
     // Child tree, built then emitted so exactly the last row gets └─.
@@ -844,10 +874,10 @@ fn print_final_summary(
         let shown = payload.len().min(ui::MAX_LISTED_FILES);
         for r in payload.iter().take(shown) {
             let name = ui::truncate_middle(&ui::sanitize_display(&r.filename), 48);
-            let mark = if r.segments_failed == 0 {
-                format!("{}", style::success(glyph::OK.as_str()))
+            let mark = if r.segments_failed == 0 || par2_ok {
+                style::success(glyph::OK.as_str())
             } else {
-                format!("{}", style::error(glyph::ERR.as_str()))
+                style::error(glyph::ERR.as_str())
             };
             tree.push(format!(
                 "{mark}  {name}  {}",
@@ -856,21 +886,14 @@ fn print_final_summary(
         }
         let extra = payload.len().saturating_sub(shown);
         if extra > 0 {
-            tree.push(format!(
-                "{}",
-                style::dim(&format!(
-                    "… and {extra} more file{}",
-                    if extra == 1 { "" } else { "s" }
-                ))
-            ));
+            tree.push(
+                style::dim(&format!("… and {extra} more file{}", ui::plural(extra))).to_string(),
+            );
         }
     }
 
     if let Some(issue) = post_issue {
-        tree.push(format!(
-            "{}",
-            style::warn(&format!("{} {}", glyph::WARN, issue))
-        ));
+        tree.push(ui::warn_line(issue));
     }
 
     tree.push(format!(

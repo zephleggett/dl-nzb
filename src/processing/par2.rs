@@ -213,27 +213,15 @@ pub async fn repair_with_par2(
             }
 
             // A successful verify is green (success), not the bar's working yellow.
-            use crate::ui::{glyph, style};
             let body = if summary.is_empty() {
-                format!(
-                    "{}",
-                    style::success(&format!("{} PAR2 verified", glyph::OK))
-                )
+                crate::ui::ok_line("PAR2 verified")
             } else {
-                format!(
-                    "{}",
-                    style::success(&format!(
-                        "{} PAR2 verified ({})",
-                        glyph::OK,
-                        summary.join(", ")
-                    ))
-                )
+                crate::ui::ok_line(format!("PAR2 verified ({})", summary.join(", ")))
             };
             crate::ui::finish_clean(progress_bar, Some(body));
             Ok(Par2Status::Success)
         }
         Ok(Err(e)) => {
-            use crate::ui::{glyph, style};
             crate::ui::finish_clean(progress_bar, None);
 
             let mut issue_parts = Vec::new();
@@ -256,29 +244,20 @@ pub async fn repair_with_par2(
             if !issue_parts.is_empty() {
                 crate::ui::child(
                     false,
-                    style::warn(&format!(
-                        "{} {} files with issues",
-                        glyph::WARN,
-                        issue_parts.join(", ")
-                    )),
+                    crate::ui::warn_line(format!("{} files with issues", issue_parts.join(", "))),
                 );
             }
             crate::ui::child(
                 true,
-                style::error(&format!("{} PAR2 failed: {}", glyph::ERR, short_error)),
+                crate::ui::error_line(format!("PAR2 failed: {short_error}")),
             );
             Ok(Par2Status::Failed)
         }
         Err(join_err) => {
-            use crate::ui::{glyph, style};
             crate::ui::finish_clean(progress_bar, None);
             crate::ui::child(
                 true,
-                style::error(&format!(
-                    "{} PAR2 failed: internal error: {}",
-                    glyph::ERR,
-                    join_err
-                )),
+                crate::ui::error_line(format!("PAR2 failed: internal error: {join_err}")),
             );
             Ok(Par2Status::Failed)
         }
