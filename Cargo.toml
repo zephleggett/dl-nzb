@@ -1,6 +1,6 @@
 [package]
 name = "dl-nzb"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 rust-version = "1.85.0"
 authors = ["Zeph <zeph@example.com>"]
@@ -91,6 +91,12 @@ tempfile = "3.20"
 unrar = "0.5"
 
 # PAR2 support (pure Rust with SIMD optimizations).
-# v0.3.0 adds Par2Info (read-only metadata), cancellable + temp-file-safe repair,
-# and the multi-block repair fix (correct little-endian File ID ordering).
-par2-rs = { git = "https://github.com/zephleggett/par2-rs.git", tag = "v0.3.0" }
+# v0.3.1 fixes block-count inflation from duplicated FileDescription packets
+# (repair/verify failing on large multi-file / obfuscated sets).
+par2-rs = { git = "https://github.com/zephleggett/par2-rs.git", tag = "v0.3.1" }
+
+# Unix-only: raise the open-file limit at startup. A download holds one fd per
+# output file (large NZBs have hundreds) plus connections, and the inherited
+# soft limit is often only 256 on macOS.
+[target.'cfg(unix)'.dependencies]
+rlimit = "0.10"

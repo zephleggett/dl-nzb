@@ -55,6 +55,12 @@ async fn run(cli: Cli) -> Result<()> {
     // A 10-second backstop hard-exits if the graceful drain hangs.
     spawn_signal_handler();
 
+    // A download holds one open fd per output file (large NZBs have hundreds)
+    // plus one per connection, and PAR2 repair opens a handle per recovery file.
+    // The inherited soft limit is often only 256 on macOS, which produced
+    // "Too many open files" on big releases — raise it (best-effort).
+    raise_fd_limit();
+
     if let Some(command) = &cli.command {
         return handle_command(command, &cli).await;
     }
@@ -79,6 +85,19 @@ async fn run(cli: Cli) -> Result<()> {
 fn throwaway_counter() -> Arc<AtomicU64> {
     Arc::new(AtomicU64::new(0))
 }
+
+/// Best-effort raise of the process open-file (RLIMIT_NOFILE) soft limit toward
+/// the hard limit, so downloads with many files don't hit "Too many open files".
+#[cfg(unix)]
+fn raise_fd_limit() {
+    match rlimit::increase_nofile_limit(u64::MAX) {
+        Ok(limit) => tracing::debug!("Open-file limit raised to {}", limit),
+        Err(e) => tracing::debug!("Could not raise open-file limit: {}", e),
+    }
+}
+
+#[cfg(not(unix))]
+fn raise_fd_limit() {}
 
 /// Spawn the Ctrl+C handler. First interrupt requests a graceful shutdown (and
 /// arms a 10s hard-exit backstop); a second interrupt forces an immediate exit.

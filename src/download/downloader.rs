@@ -424,17 +424,26 @@ impl Downloader {
         skip_message_ids: Option<&HashSet<String>>,
         download_all_par2: bool,
     ) -> Result<DownloadOutcome> {
-        // A "deferred" file is a PAR2 recovery volume (`.volNN+MM.par2`); the
-        // PAR2 index (no `.vol`) stays in Phase 1 so we can verify/deobfuscate
-        // even when the payload is intact.
+        // Classify PAR2 files by NZB byte size and keep the SMALLEST one (the
+        // index — it carries the Main + FileDescription packets but minimal
+        // recovery data, so it is always the smallest par2 in a set) in Phase 1;
+        // defer the larger recovery volumes. This is name-independent, so it also
+        // works for obfuscated releases whose par2 files lack the `.volNN+MM`
+        // marker (where a name-based check would defer nothing and download all
+        // recovery up front).
+        let par2_total = |f: &NzbFile| -> Option<u64> {
+            let name = Nzb::get_filename_from_subject(&f.subject)?;
+            crate::patterns::par2::is_par2_file(Path::new(&name))
+                .then(|| f.segments.segment.iter().map(|s| s.bytes).sum())
+        };
+        let keep_subject: Option<String> = nzb
+            .files()
+            .iter()
+            .filter_map(|f| par2_total(f).map(|b| (b, &f.subject)))
+            .min_by_key(|(b, _)| *b)
+            .map(|(_, s)| s.clone());
         let is_deferred = |f: &NzbFile| {
-            Nzb::get_filename_from_subject(&f.subject)
-                .map(|n| {
-                    let p = Path::new(&n);
-                    crate::patterns::par2::is_par2_file(p)
-                        && !crate::patterns::par2::is_main_par2(p)
-                })
-                .unwrap_or(false)
+            par2_total(f).is_some() && keep_subject.as_deref() != Some(f.subject.as_str())
         };
         let deferred_count = nzb.files().iter().filter(|f| is_deferred(f)).count();
 

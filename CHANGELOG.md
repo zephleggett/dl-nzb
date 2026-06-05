@@ -5,6 +5,23 @@ All notable changes to dl-nzb will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-06-05
+
+### Fixed
+- **"Too many open files" on NZBs with many files.** A download keeps one open
+  file descriptor per output file (large releases have hundreds) plus one per
+  connection, and the inherited soft limit is often only 256 on macOS. The limit
+  is now raised at startup (best-effort, Unix).
+- **PAR2 recovery is now correctly deferred for obfuscated releases.** PAR2-on-
+  demand keyed off the `.volNN+MM` filename to tell the index from the recovery
+  volumes; obfuscated releases lack that marker, so every recovery volume was
+  downloaded up front even when the data was complete. Deferral is now by size
+  (keep the smallest par2 — the index — and defer the larger volumes), so it
+  works regardless of filenames.
+- **PAR2 repair of large multi-file releases** (via par2-rs 0.3.1): fixes
+  `Total data blocks exceed GF(2^16) limit` caused by duplicated FileDescription
+  packets being counted multiple times.
+
 ## [0.6.0] - 2026-06-01
 
 ### Changed — download engine rewrite (reliability & throughput)

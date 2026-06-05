@@ -329,7 +329,7 @@ dependencies = [
 
 [[package]]
 name = "dl-nzb"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -347,6 +347,7 @@ dependencies = [
  "openssl",
  "par2-rs",
  "regex",
+ "rlimit",
  "serde",
  "serde_json",
  "tempfile",
@@ -951,8 +952,8 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "par2-rs"
-version = "0.3.0"
-source = "git+https://github.com/zephleggett/par2-rs.git?tag=v0.3.0#3a97b32b84529a03b8b8e0d7d4de2b0fdeadaa39"
+version = "0.3.1"
+source = "git+https://github.com/zephleggett/par2-rs.git?tag=v0.3.1#8bafb20a6065a4a9ce87c68a5dd2ec3585f73d55"
 dependencies = [
  "crc32fast",
  "md-5",
@@ -1069,6 +1070,15 @@ name = "regex-syntax"
 version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a2d987857b319362043e95f5353c0535c1f58eec5336fdfcf626430af7def58"
+
+[[package]]
+name = "rlimit"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7043b63bd0cd1aaa628e476b80e6d4023a3b50eb32789f2728908107bd0c793a"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "roxmltree"
