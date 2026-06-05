@@ -5,6 +5,37 @@ All notable changes to dl-nzb will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-06-05
+
+A polish-and-speed release: a refreshed interface, faster and lighter downloads,
+and more accurate results.
+
+### Changed
+- **Refreshed terminal output.** Each download now opens with a clear title line,
+  the progress bar tidies itself away as each step finishes (no more leftover
+  "100%" bars stacking up), and you get a clean completion summary that lists your
+  files. Colours and symbols are consistent from start to finish.
+- **Colour control.** New `--color` option (`auto`, `always`, `never`) plus
+  support for the `NO_COLOR` standard. Output is now clean — no stray colour
+  codes — when you pipe dl-nzb into a file or another program.
+- **Readable time estimates.** The download ETA reads like "2h 5m" instead of a
+  raw number of seconds.
+- **Quieter by default.** The terminal bell at the end of a download is now off
+  by default (re-enable it with `notify_on_complete` in your config).
+
+### Performance
+- **Faster downloads**, especially against distant or busy servers, with a higher
+  default connection count.
+- **Finishes sooner after the last byte.** When everything arrives intact, dl-nzb
+  skips a redundant integrity re-scan that used to run after downloading, and it
+  begins downloading more quickly.
+- **Much lower memory use** on large downloads.
+
+### Fixed
+- **Accurate completion status.** A download that needed PAR2 repair now correctly
+  reports "Complete" instead of falsely warning about errors, and missing optional
+  files (such as `.nfo`) no longer count as errors.
+
 ## [0.6.1] - 2026-06-05
 
 ### Fixed
