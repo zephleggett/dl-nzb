@@ -57,7 +57,8 @@ Markdown or `site/` alone builds nothing.
 - Rust on Ubuntu and macOS: `cargo fmt --check`, `cargo clippy -D warnings`,
   `cargo test --workspace`.
 - The Rust engine for the four Apple targets, built once and shared by the
-  next three jobs.
+  next three jobs. It is cached by the Rust sources, so a push that leaves the
+  Rust alone skips the build, and so does a release of a commit CI built.
 - Swift: the DlNzbKit tests, the Mac app's tests and the iPhone app's tests
   on a simulator. It also checks that the committed Xcode projects match
   `project.yml`. Run `make -C apple mac-project ios-project` and commit when

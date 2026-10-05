@@ -166,6 +166,16 @@ jobs:
       - name: Select Xcode
         uses: ./.github/actions/select-xcode
 
+      # A new simulator's first boot takes about four minutes. Started now, it
+      # boots while the projects are checked and the Kit and Mac tests run,
+      # and the iPhone tests find it ready (xcodebuild waits for the rest).
+      - name: Start the iPhone simulator
+        run: |
+          if xcrun simctl list runtimes available | grep -q '^iOS '; then
+            udid="$(apple/ios/scripts/simulator.sh)"
+            nohup xcrun simctl boot "$udid" > /dev/null 2>&1 &
+          fi
+
       - name: Install xcodegen
         run: brew install xcodegen
 
