@@ -5,7 +5,9 @@ All notable changes to dl-nzb will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.8.0-rc.1] - 2026-10-05
+
+The first test release of the Mac and iPhone apps.
 
 ### Added
 - **dl-nzb for Mac.** An app for macOS 26 or later, on Apple silicon and Intel.
@@ -16,9 +18,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Safari. Downloads keep going in the background and land in the Files app.
 - On a Mac, the app can import your server from the command line's `config.toml`.
 - Both apps ask for a RAR password when an archive needs one.
+- **Command line:** run the same command again to pick up an interrupted
+  download where it stopped.
+- **Command line:** `--password` for password-protected archives (passwords in
+  the NZB are used by themselves), and `--limit-rate` or `speed_limit` in the
+  config to cap the download speed.
 
 ### Changed
 - Each release has a `SHA256SUMS` file for checking downloads.
+- Clearer errors: a wrong password, an unreachable server and a connection that
+  keeps dropping each say so.
+- Safer with untrusted NZBs and servers.
 
 ## [0.7.0] - 2026-06-05
 

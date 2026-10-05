@@ -17,7 +17,7 @@ You need a Usenet server account and an NZB file.
 | Command line | `cargo install` or [release binaries](https://github.com/zephleggett/dl-nzb/releases/latest) | [Command line](#command-line) |
 
 Open the app and add an NZB. It downloads, repairs and extracts; then you're
-done. You bring the server and the NZB; dl-nzb has no indexer or search.
+done.
 
 PAR2 repair uses [par2-rs](https://github.com/zephleggett/par2-rs), a pure-Rust
 PAR2 library with SIMD.
