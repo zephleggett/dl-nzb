@@ -111,8 +111,14 @@ impl DelayedSpinner {
         bar.set_style(spinner_style());
         bar.set_message(msg.into());
 
+        // Outside a runtime (no timer available) just show it right away.
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            bar.set_draw_target(ProgressDrawTarget::stderr());
+            bar.enable_steady_tick(Duration::from_millis(80));
+            return Self { bar, promote: None };
+        };
         let timer_bar = bar.clone();
-        let promote = tokio::spawn(async move {
+        let promote = runtime.spawn(async move {
             tokio::time::sleep(delay).await;
             if !timer_bar.is_finished() {
                 timer_bar.set_draw_target(ProgressDrawTarget::stderr());

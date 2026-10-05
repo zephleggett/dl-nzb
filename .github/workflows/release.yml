@@ -1,96 +1,65 @@
+# Everything a v* tag produces: the command-line binaries, the Mac app (one
+# universal DMG, signed, notarized and with its update feed), the GitHub
+# release that carries them, and then the iPhone and iPad app on TestFlight
+# (testflight.yml). docs/releasing.md says how to cut one.
+#
+# The release is created at the end, once every build has passed, so a failed
+# build leaves no half-filled release behind.
+#
+# Signing and notarizing need six secrets (docs/publishing.md lists them).
+# Without them a fork's build still runs and ships an ad hoc signed zip
+# labelled unsigned, no DMG and no update feed. zephleggett/dl-nzb's release
+# stops instead, as it does without SPARKLE_ED_PRIVATE_KEY.
 name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    tags: ["v*"]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
 
+env:
+  # zephleggett/dl-nzb's release stops where a fork's carries on without a key.
+  UPSTREAM: ${{ github.repository == 'zephleggett/dl-nzb' }}
+  # rust-toolchain.toml says stable; the release builds with what CI tests.
+  RUSTUP_TOOLCHAIN: "1.92.0"
+  CARGO_TERM_COLOR: always
+  # OWNER: the TestFlight public link of the Public group (App Store Connect >
+  # TestFlight > Public > Public Link). While it is the placeholder, the notes
+  # leave the iPhone badge out.
+  TESTFLIGHT_LINK: https://testflight.apple.com/join/XXXXXXXX
+
 jobs:
-  create-release:
-    name: Create Release
-    runs-on: ubuntu-latest
+  check:
+    name: Check the tag
+    runs-on: ubuntu-24.04
     outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
-      version: ${{ steps.get_version.outputs.version }}
+      prerelease: ${{ steps.kind.outputs.prerelease }}
     steps:
-      - name: Checkout code
+      - name: Check out the repository
         uses: actions/checkout@v4
 
-      - name: Get version from tag
-        id: get_version
-        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+      - name: Check the tag matches the crate version
+        run: apple/scripts/check-version.sh "$GITHUB_REF_NAME"
 
-      - name: Extract changelog for this version
-        id: changelog
+      - name: Check for a prerelease
+        id: kind
         run: |
-          VERSION="${{ steps.get_version.outputs.version }}"
+          # A semver prerelease has a hyphen: v0.8.0-rc.1.
+          case "$GITHUB_REF_NAME" in
+            *-*) echo "prerelease=true" ;;
+            *) echo "prerelease=false" ;;
+          esac >> "$GITHUB_OUTPUT"
 
-          # Extract changelog section for this version
-          CHANGELOG=$(awk "/^## \[${VERSION}\]/{flag=1; next} /^## \[/{flag=0} flag" CHANGELOG.md)
-
-          # If changelog is empty, use a default message
-          if [ -z "$CHANGELOG" ]; then
-            CHANGELOG="See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details."
-          fi
-
-          # Save to file to preserve formatting
-          echo "$CHANGELOG" > /tmp/changelog.txt
-
-          # Set output (escape for GitHub Actions)
-          {
-            echo 'CHANGELOG<<EOF'
-            cat /tmp/changelog.txt
-            echo 'EOF'
-          } >> $GITHUB_OUTPUT
-
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref }}
-          release_name: Release ${{ github.ref_name }}
-          draft: false
-          prerelease: false
-          body: |
-            ## Downloads
-
-            ### Linux
-            - **x86_64**: `dl-nzb-linux-x86_64`
-            - **ARM64**: `dl-nzb-linux-aarch64`
-
-            ### macOS
-            - **x86_64 (Intel)**: `dl-nzb-macos-x86_64`
-            - **ARM64 (Apple Silicon)**: `dl-nzb-macos-aarch64`
-
-            ### Windows
-            - **x86_64**: `dl-nzb-windows-x86_64.exe`
-
-            ## Installation
-
-            Download the appropriate binary for your platform:
-
-            ```bash
-            # macOS/Linux - make executable
-            chmod +x dl-nzb-*
-            ./dl-nzb-* --version
-
-            # Move to PATH (optional)
-            sudo mv dl-nzb-* /usr/local/bin/dl-nzb
-            ```
-
-            ## Changelog
-
-            ${{ steps.changelog.outputs.CHANGELOG }}
-
-  build-linux:
-    name: Build Linux ${{ matrix.arch }}
-    needs: create-release
-    runs-on: ubuntu-latest
+  cli-linux:
+    name: CLI for Linux ${{ matrix.arch }}
+    needs: check
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -103,14 +72,14 @@ jobs:
             target: aarch64-unknown-linux-gnu
             name: dl-nzb-linux-aarch64
             cross_compile: true
-
     steps:
-      - name: Checkout code
+      - name: Check out the repository
         uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
           targets: ${{ matrix.target }}
 
       - name: Install build dependencies
@@ -120,132 +89,119 @@ jobs:
 
       - name: Install cross-compilation tools (ARM64)
         if: matrix.cross_compile
-        run: |
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-
-          # Install ARM64 OpenSSL development libraries
-          # Use cross-compilation package instead of multi-arch to avoid apt mirror issues
-          sudo apt-get install -y libssl-dev
+        run: sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libssl-dev
 
       - name: Set up cross-compilation environment (ARM64)
         if: matrix.cross_compile
         run: |
-          echo "CC=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-          echo "CXX=aarch64-linux-gnu-g++" >> $GITHUB_ENV
-          echo "AR=aarch64-linux-gnu-ar" >> $GITHUB_ENV
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          {
+            echo "CC=aarch64-linux-gnu-gcc"
+            echo "CXX=aarch64-linux-gnu-g++"
+            echo "AR=aarch64-linux-gnu-ar"
+            echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc"
+          } >> "$GITHUB_ENV"
 
       - name: Build
-        run: |
-          # Use vendored OpenSSL feature for ARM64 cross-compilation
-          if [ "${{ matrix.cross_compile }}" = "true" ]; then
-            cargo build --release --target ${{ matrix.target }} --features vendored-openssl
-          else
-            cargo build --release --target ${{ matrix.target }}
-          fi
-
-      - name: Strip binary
-        run: |
-          if [ "${{ matrix.cross_compile }}" = "true" ]; then
-            aarch64-linux-gnu-strip target/${{ matrix.target }}/release/dl-nzb || true
-          else
-            strip target/${{ matrix.target }}/release/dl-nzb || true
-          fi
-
-      - name: Prepare binary
-        run: |
-          cp target/${{ matrix.target }}/release/dl-nzb ${{ matrix.name }}
-          chmod +x ${{ matrix.name }}
-          ls -lh ${{ matrix.name }}
-
-      - name: Upload Release Asset
-        uses: actions/upload-release-asset@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./${{ matrix.name }}
-          asset_name: ${{ matrix.name }}
-          asset_content_type: application/octet-stream
+          TARGET: ${{ matrix.target }}
+          # vendored OpenSSL for the ARM64 cross build
+          FEATURES: ${{ matrix.cross_compile && '--features vendored-openssl' || '' }}
+        run: |
+          # FEATURES is two words or none.
+          # shellcheck disable=SC2086
+          cargo build --release --locked --target "$TARGET" $FEATURES
 
-  build-macos:
-    name: Build macOS ${{ matrix.arch }}
-    needs: create-release
+      - name: Strip and name the binary
+        env:
+          TARGET: ${{ matrix.target }}
+          NAME: ${{ matrix.name }}
+          STRIP: ${{ matrix.cross_compile && 'aarch64-linux-gnu-strip' || 'strip' }}
+        run: |
+          "$STRIP" "target/$TARGET/release/dl-nzb" || true
+          cp "target/$TARGET/release/dl-nzb" "$NAME"
+          chmod +x "$NAME"
+          ls -lh "$NAME"
+
+      - name: Upload the binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.name }}
+          path: ${{ matrix.name }}
+          if-no-files-found: error
+          retention-days: 7
+
+  cli-macos:
+    name: CLI for macOS ${{ matrix.arch }}
+    needs: check
     runs-on: macos-15
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Cross-compile for Intel Macs from ARM64 runner
+          # Cross-compiled for Intel Macs on the ARM64 runner
           - arch: x86_64
             target: x86_64-apple-darwin
             name: dl-nzb-macos-x86_64
             cross_compile: true
 
-          # Native build for Apple Silicon
           - arch: aarch64
             target: aarch64-apple-darwin
             name: dl-nzb-macos-aarch64
-
     steps:
-      - name: Checkout code
+      - name: Check out the repository
         uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
           targets: ${{ matrix.target }}
 
       - name: Install build dependencies
         run: brew install autoconf automake libtool
 
-      - name: Clean build directory
-        run: |
-          rm -rf .build
-          rm -rf target
-
       - name: Build
-        run: |
-          if [ "${{ matrix.cross_compile }}" = "true" ]; then
-            cargo build --release --target ${{ matrix.target }} --features vendored-openssl
-          else
-            cargo build --release --target ${{ matrix.target }}
-          fi
-
-      - name: Strip binary
-        run: strip target/${{ matrix.target }}/release/dl-nzb || true
-
-      - name: Prepare binary
-        run: |
-          cp target/${{ matrix.target }}/release/dl-nzb ${{ matrix.name }}
-          chmod +x ${{ matrix.name }}
-          ls -lh ${{ matrix.name }}
-          file ${{ matrix.name }}
-
-      - name: Upload Release Asset
-        uses: actions/upload-release-asset@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./${{ matrix.name }}
-          asset_name: ${{ matrix.name }}
-          asset_content_type: application/octet-stream
+          TARGET: ${{ matrix.target }}
+          FEATURES: ${{ matrix.cross_compile && '--features vendored-openssl' || '' }}
+        run: |
+          # shellcheck disable=SC2086
+          cargo build --release --locked --target "$TARGET" $FEATURES
 
-  build-windows:
-    name: Build Windows x86_64
-    needs: create-release
+      - name: Strip and name the binary
+        env:
+          TARGET: ${{ matrix.target }}
+          NAME: ${{ matrix.name }}
+        run: |
+          strip "target/$TARGET/release/dl-nzb" || true
+          cp "target/$TARGET/release/dl-nzb" "$NAME"
+          chmod +x "$NAME"
+          ls -lh "$NAME"
+          file "$NAME"
+
+      - name: Upload the binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.name }}
+          path: ${{ matrix.name }}
+          if-no-files-found: error
+          retention-days: 7
+
+  cli-windows:
+    name: CLI for Windows x86_64
+    needs: check
     runs-on: windows-latest
     steps:
-      - name: Checkout code
+      - name: Check out the repository
         uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
           targets: x86_64-pc-windows-gnu
 
-      - name: Setup MSYS2
+      - name: Set up MSYS2
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
@@ -263,21 +219,301 @@ jobs:
       - name: Build
         shell: msys2 {0}
         run: |
-          # Add Windows paths to find cargo
+          # cargo is Windows', outside MSYS2's PATH
           export PATH="/c/Users/runneradmin/.cargo/bin:/mingw64/bin:$PATH"
-          cargo build --release --target x86_64-pc-windows-gnu
+          cargo build --release --locked --target x86_64-pc-windows-gnu
 
-      - name: Prepare binary
+      - name: Name the binary
         run: |
           copy target\x86_64-pc-windows-gnu\release\dl-nzb.exe dl-nzb-windows-x86_64.exe
           dir dl-nzb-windows-x86_64.exe
 
-      - name: Upload Release Asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload the binary
+        uses: actions/upload-artifact@v4
         with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./dl-nzb-windows-x86_64.exe
-          asset_name: dl-nzb-windows-x86_64.exe
-          asset_content_type: application/octet-stream
+          name: cli-dl-nzb-windows-x86_64.exe
+          path: dl-nzb-windows-x86_64.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  macos-app:
+    name: Mac app
+    needs: check
+    runs-on: macos-26
+    env:
+      HAVE_SIGNING: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 != '' && secrets.NOTARY_KEY_ID != '' }}
+      HAVE_UPDATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY != '' }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          # the build number is the commit count
+          fetch-depth: 0
+
+      - name: Select Xcode
+        uses: ./.github/actions/select-xcode
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
+          targets: aarch64-apple-darwin, x86_64-apple-darwin, aarch64-apple-ios, aarch64-apple-ios-sim
+
+      # CI's build of the same sources, when main has one; a tag cannot save
+      # a cache anyone else could use, so this only restores.
+      - name: Restore the Rust build
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: xcframework-${{ env.RUSTUP_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('Cargo.toml', '.cargo/config.toml', 'src/**', 'ffi/**') }}
+          restore-keys: |
+            xcframework-${{ env.RUSTUP_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}-
+            xcframework-${{ env.RUSTUP_TOOLCHAIN }}-
+
+      - name: Report the signing mode
+        run: |
+          if [ "$HAVE_SIGNING" = true ]; then
+            echo "signing with a Developer ID certificate and notarizing"
+          elif [ "$UPSTREAM" = true ]; then
+            echo "error: no MACOS_CERTIFICATE_P12_BASE64 or NOTARY_KEY_ID secret (docs/publishing.md#signing-secrets)" >&2
+            exit 1
+          else
+            echo "no signing secrets: this build will be ad hoc signed and labelled unsigned"
+          fi
+
+      - name: Import the signing certificate
+        if: env.HAVE_SIGNING == 'true'
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          NOTARY_PRIVATE_KEY_P8_BASE64: ${{ secrets.NOTARY_PRIVATE_KEY_P8_BASE64 }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          echo "KEYCHAIN_PATH=$KEYCHAIN" >> "$GITHUB_ENV"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          echo "$MACOS_CERTIFICATE_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          rm -f "$RUNNER_TEMP/cert.p12"
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | grep 'Developer ID Application' | head -1 | sed -E 's/.*"(.*)"/\1/')"
+          if [ -z "$IDENTITY" ]; then
+            echo "error: the keychain has no Developer ID Application identity" >&2
+            exit 1
+          fi
+          echo "SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          echo "$NOTARY_PRIVATE_KEY_P8_BASE64" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
+          echo "NOTARY_KEY_PATH=$RUNNER_TEMP/AuthKey.p8" >> "$GITHUB_ENV"
+
+      - name: Build the Rust engine
+        run: make -C apple xcframework
+
+      - name: Build and sign the app
+        env:
+          # The feed installed copies check, this repository's latest release.
+          # Only a build signed with both keys gets one; without it the app
+          # does not update itself.
+          DLNZB_UPDATE_FEED_URL: ${{ env.HAVE_SIGNING == 'true' && env.HAVE_UPDATE_KEY == 'true' && format('https://github.com/{0}/releases/latest/download/appcast.xml', github.repository) || '' }}
+        run: |
+          # The app carries X.Y.Z alone: a prerelease tag (v0.8.0-rc.1) builds
+          # 0.8.0. The build number is the commit count (build-mac.sh).
+          VERSION="${GITHUB_REF_NAME#v}"
+          export DLNZB_VERSION="${VERSION%%-*}"
+          # SIGN_IDENTITY is in the environment only when the step above ran;
+          # the Makefile defaults it to "-" (ad hoc) otherwise.
+          make -C apple mac-direct
+
+      - name: Check the app is universal
+        run: |
+          archs="$(lipo -archs apple/build/direct/dl-nzb.app/Contents/MacOS/dl-nzb)"
+          echo "dl-nzb.app: $archs"
+          [[ " $archs " == *" arm64 "* && " $archs " == *" x86_64 "* ]] || { echo "error: want arm64 and x86_64" >&2; exit 1; }
+
+      - name: Notarize the app
+        if: env.HAVE_SIGNING == 'true'
+        env:
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: make -C apple mac-notarize
+
+      - name: Build the DMG
+        env:
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          # notarize.sh deletes its submission zip, but a failed run's would
+          # match the upload pattern.
+          rm -f apple/build/direct/dl-nzb-notarize.zip
+          # Signed: the DMG, itself notarized and stapled. Ad hoc: the DMG and
+          # a zip.
+          make -C apple mac-dmg
+
+      - name: Write the update feed
+        # An unsigned build does not update itself, so it has no feed.
+        if: env.HAVE_SIGNING == 'true'
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          # appcast.xml goes on the release with the DMG. Installed copies
+          # find it at releases/latest/download/appcast.xml, so without it no
+          # one would be offered this release.
+          if [ "$HAVE_UPDATE_KEY" != true ]; then
+            if [ "$UPSTREAM" = true ]; then
+              echo "error: SPARKLE_ED_PRIVATE_KEY is not set; installed copies would never see this release" >&2
+              exit 1
+            fi
+            echo "::warning::no SPARKLE_ED_PRIVATE_KEY, so this release has no update feed"
+            exit 0
+          fi
+          make -C apple mac-appcast
+
+      - name: Label an unsigned build
+        if: env.HAVE_SIGNING != 'true'
+        run: |
+          # An ad hoc signature cannot be notarized, so a DMG of it would only
+          # invite people to install something Gatekeeper refuses. Ship the zip
+          # alone; the release job reads a missing DMG as an unsigned build.
+          rm -f apple/build/direct/dl-nzb-*-macOS.dmg
+
+      - name: Delete the temporary keychain
+        if: always()
+        run: |
+          # KEYCHAIN_PATH is set by the import step, so it is empty when that
+          # step did not run and this is a no-op.
+          if [ -n "${KEYCHAIN_PATH:-}" ] && [ -f "$KEYCHAIN_PATH" ]; then
+            security delete-keychain "$KEYCHAIN_PATH" || true
+          fi
+          rm -f "$RUNNER_TEMP/AuthKey.p8"
+
+      - name: Upload the app
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-app
+          path: |
+            apple/build/direct/dl-nzb-*-macOS.dmg
+            apple/build/direct/dl-nzb-*-macOS.zip
+            apple/build/direct/appcast.xml
+          if-no-files-found: error
+
+  release:
+    name: GitHub release
+    needs: [check, cli-linux, cli-macos, cli-windows, macos-app]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      # Named, not the whole run: the step below releases every file it
+      # finds, so only what belongs on the release comes down.
+      - name: Download the Mac app
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-app
+          path: artifacts/macos-app
+
+      - name: Download the command-line binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cli-*
+          path: artifacts/cli
+          merge-multiple: true
+
+      - name: Write SHA256SUMS
+        run: |
+          # Every download: the DMG (or an unsigned build's zip) and the
+          # binaries. Not the feed, which Sparkle checks by its signature.
+          mkdir -p artifacts/sums
+          for file in artifacts/macos-app/dl-nzb-* artifacts/cli/*; do
+            (cd "$(dirname "$file")" && sha256sum "$(basename "$file")")
+          done > artifacts/sums/SHA256SUMS
+          cat artifacts/sums/SHA256SUMS
+
+      - name: List what is being released
+        run: find artifacts -type f -exec ls -lh {} +
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ needs.check.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          mapfile -t FILES < <(find artifacts -type f | sort)
+          # The notes are the tag's section of CHANGELOG.md, less the heading
+          # the release title repeats. A tag without a section gets GitHub's
+          # generated notes. The Mac app's update window shows the same
+          # section (apple/scripts/make-appcast.sh).
+          python3 scripts/changelog.py notes "$GITHUB_REF_NAME" > release-notes.md
+          if [ -s release-notes.md ]; then
+            ARGS=(--notes-file release-notes.md --title "dl-nzb $GITHUB_REF_NAME")
+          else
+            ARGS=(--generate-notes --title "dl-nzb $GITHUB_REF_NAME")
+          fi
+          if [ "$PRERELEASE" = true ]; then
+            ARGS+=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" "${ARGS[@]}" "${FILES[@]}"
+
+          # Append the footer to the notes, rather than replacing them.
+          NOTES="$(gh release view "$GITHUB_REF_NAME" --json body --jq .body)"
+          DOWNLOAD="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME"
+          # The DMG when signed, else the zip.
+          MAC="$(find artifacts/macos-app -name 'dl-nzb-*-macOS.dmg' | head -1)"
+          [ -n "$MAC" ] || MAC="$(find artifacts/macos-app -name 'dl-nzb-*-macOS.zip' | head -1)"
+          MAC="$(basename "$MAC")"
+          case "$TESTFLIGHT_LINK" in
+            *XXXXXXXX)
+              echo "::warning::TESTFLIGHT_LINK in release.yml is still the placeholder; the notes leave out the iPhone app"
+              BADGE="" ;;
+            *) BADGE="https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/docs/images/testflight-badge.svg" ;;
+          esac
+          # The backticks below are Markdown, not command substitutions.
+          # shellcheck disable=SC2016
+          {
+            printf '%s\n\n' "$NOTES"
+            printf '## Install\n\n'
+            printf 'Mac (Apple silicon and Intel, macOS 26 or later): [%s](%s/%s)\n\n' "$MAC" "$DOWNLOAD" "$MAC"
+            if [ -n "$BADGE" ]; then
+              printf 'iPhone and iPad:\n\n[![Available on TestFlight](%s)](%s)\n\n' "$BADGE" "$TESTFLIGHT_LINK"
+            fi
+            printf 'Command line:\n\n| System | File |\n| --- | --- |\n'
+            for row in \
+              "macOS, Apple silicon|dl-nzb-macos-aarch64" \
+              "macOS, Intel|dl-nzb-macos-x86_64" \
+              "Linux x86_64|dl-nzb-linux-x86_64" \
+              "Linux ARM64|dl-nzb-linux-aarch64" \
+              "Windows x86_64|dl-nzb-windows-x86_64.exe"; do
+              printf '| %s | [%s](%s/%s) |\n' "${row%%|*}" "${row#*|}" "$DOWNLOAD" "${row#*|}"
+            done
+            # A browser's download of an unsigned binary is quarantined, and
+            # macOS will not run it; curl's is not.
+            printf '\nOn a Mac or Linux, download it with curl, then put it on your PATH. This is the Apple silicon file; use your own from the table:\n\n'
+            printf '```bash\ncurl -LO %s/dl-nzb-macos-aarch64\nchmod +x dl-nzb-macos-aarch64\nsudo mv dl-nzb-macos-aarch64 /usr/local/bin/dl-nzb\n```\n\n' "$DOWNLOAD"
+            printf 'Check a download against `SHA256SUMS`:\n\n'
+            printf '```bash\nshasum -a 256 -c --ignore-missing SHA256SUMS\n```\n'
+            if [ "${MAC%.zip}" != "$MAC" ]; then
+              printf '\n## Mac app is unsigned\n\n'
+              printf 'macOS blocks the first open. Right-click dl-nzb in Applications > **Open**, or **System Settings > Privacy & Security > Open Anyway**. Or:\n\n'
+              printf '```bash\nxattr -d com.apple.quarantine /Applications/dl-nzb.app\n```\n'
+            fi
+          } > notes.md
+          gh release edit "$GITHUB_REF_NAME" --notes-file notes.md
+
+  testflight:
+    name: TestFlight
+    # After the release, so TestFlight never has a version GitHub does not.
+    # The App Store takes X.Y.Z alone, so a prerelease stays off it.
+    needs: [check, release]
+    if: needs.check.outputs.prerelease == 'false'
+    uses: ./.github/workflows/testflight.yml
+    secrets: inherit

@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>dl-nzb · Usenet downloads without a daemon</title>
+<meta name="description" content="dl-nzb downloads from your Usenet server with an NZB, then repairs and extracts. For Mac, iPhone, iPad and the command line. No daemon, no web UI." />
+<meta name="color-scheme" content="dark" />
+<meta name="theme-color" content="#2d2d2d" />
+<meta property="og:type" content="website" />
+<meta property="og:title" content="dl-nzb" />
+<meta property="og:description" content="Download from your Usenet server with an NZB. No daemon, no web UI." />
+<!-- TODO(owner): og:image. Add media/og.png (1200×630) and the site's absolute URL, then uncomment:
+<meta property="og:url" content="https://EXAMPLE/" />
+<meta property="og:image" content="https://EXAMPLE/media/og.png" />
+<meta name="twitter:card" content="summary_large_image" />
+-->
+<link rel="icon" type="image/png" href="favicon.png" />
+<link rel="stylesheet" href="css/styles.css" />
+</head>
+
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <a class="topbar__brand" href="#top" aria-label="dl-nzb, back to top">
+    <img class="topbar__icon" src="favicon.png" alt="" width="20" height="20" />
+    <span class="topbar__name">dl-nzb</span>
+    <span class="chip">v0.7.0</span>
+  </a>
+  <nav class="topbar__nav" aria-label="Sections">
+    <a href="#apps"     data-nav="apps">apps</a>
+    <a href="#features" data-nav="features">features</a>
+    <a href="#cli"      data-nav="cli">cli</a>
+    <a href="#install"  data-nav="install">install</a>
+  </nav>
+  <a class="ghbtn" href="https://github.com/zephleggett/dl-nzb">github ↗</a>
+</header>
+
+<main id="main">
+
+<!-- hero -->
+<section id="top" class="hero" data-section="top" aria-label="Introduction">
+  <div class="hero__top">
+    <div class="hero__intro">
+      <h1 class="hero__tag"><b>Download from your Usenet server with an NZB.</b> No daemon, no web UI.</h1>
+      <p class="hero__sub">For Mac, iPhone, iPad and the command line. It downloads, repairs and
+        extracts, then it's done. PAR2 repair is
+        <a href="https://github.com/zephleggett/par2-rs">par2-rs</a>, a pure-Rust PAR2 library I wrote.</p>
+      <ul class="facts">
+        <li><b>apps</b> macOS 26 · iOS 26</li>
+        <li><b>cli</b> Rust 1.85+</li>
+        <li><b>license</b> GPL-2.0</li>
+      </ul>
+    </div>
+
+    <!-- a sped-up replay of one command-line run; output mirrors src/cli and src/main.rs -->
+    <div class="hero__demo term" id="replay" role="group" aria-label="Terminal replay">
+      <div class="term__bar" aria-hidden="true">
+        <span class="term__dots"><i></i><i></i><i></i></span>
+        <span class="term__title">dl-nzb · terminal</span>
+      </div>
+      <div class="term__screen" id="screen" role="img"
+           aria-label="Replay of the dl-nzb command line downloading Sintel.2010.2160p.nzb: it checks article availability, downloads, fetches PAR2 recovery data for 47 missing articles, repairs, extracts, and lists the files.">
+        <div class="scr-buf" id="scrBuf" aria-hidden="true"></div>
+      </div>
+      <div class="term__foot">
+        <button type="button" class="ctrl" data-act="toggle" aria-label="Pause replay">pause</button>
+        <button type="button" class="ctrl" data-act="restart" aria-label="Restart replay">↻ replay</button>
+        <span>sped up</span>
+        <span class="term__clock" id="replayClock" aria-hidden="true">00:00</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="hero__actions">
+    <a class="btn btn--primary" href="https://github.com/zephleggett/dl-nzb/releases/latest">Download for Mac</a>
+    <!-- TODO(owner): TestFlight code. Replace XXXXXXXX, as in the README. -->
+    <a class="btn" href="https://testflight.apple.com/join/XXXXXXXX">iPhone and iPad</a>
+    <div class="cmd">
+      <span class="cmd__prompt" aria-hidden="true">$</span>
+      <code id="installCmd">cargo install --git https://github.com/zephleggett/dl-nzb dl-nzb</code>
+      <button type="button" class="copy" data-copy="#installCmd" aria-label="Copy the install command">
+        <span class="copy__idle">copy</span><span class="copy__done">copied</span>
+      </button>
+    </div>
+  </div>
+</section>
+
+<!-- apps -->
+<section id="apps" class="sec" data-section="apps" aria-labelledby="apps-h">
+  <div class="sec__head">
+    <h2 id="apps-h">apps</h2>
+    <p>Bring your own Usenet server and NZB. dl-nzb has no indexer or search.</p>
+  </div>
+
+  <div class="apps">
+    <article class="app">
+      <figure class="demo demo--mac">
+        <div class="demo__frame">
+          <video controls playsinline preload="none" poster="media/mac-demo-poster.png"
+                 data-fallback="media/mac-demo.webp"
+                 aria-label="dl-nzb for Mac: an NZB dropped on the window downloads, repairs and extracts, then Show in Finder opens its folder">
+            <source src="media/mac-demo.mp4" type="video/mp4" />
+            <a href="media/mac-demo.webp">Watch the Mac demo</a>
+          </video>
+          <p class="demo__ph" aria-hidden="true">demo video coming soon</p>
+        </div>
+        <figcaption>Drop an NZB on the window. When it’s done, Show in Finder opens the folder.</figcaption>
+      </figure>
+      <h3>Mac</h3>
+      <p>A native app. Open an NZB, it downloads, you’re done. No service, no web UI.</p>
+      <p class="app__cta">
+        <a class="btn btn--primary" href="https://github.com/zephleggett/dl-nzb/releases/latest">Download for Mac</a>
+        <a class="app__guide" href="https://github.com/zephleggett/dl-nzb/blob/main/docs/mac-app.md">setup guide</a>
+      </p>
+      <p class="req"><b>needs</b> macOS 26 or later. Universal: Apple silicon and Intel.</p>
+    </article>
+
+    <article class="app">
+      <figure class="demo demo--iphone">
+        <div class="demo__frame">
+          <video controls playsinline preload="none" poster="media/iphone-demo-poster.png"
+                 data-fallback="media/iphone-demo.webp"
+                 aria-label="dl-nzb for iPhone: an NZB added with the plus button downloads with a progress ring, then its files open in the Files app">
+            <source src="media/iphone-demo.mp4" type="video/mp4" />
+            <a href="media/iphone-demo.webp">Watch the iPhone demo</a>
+          </video>
+          <p class="demo__ph" aria-hidden="true">demo video coming soon</p>
+        </div>
+        <figcaption>Add an NZB with the plus button. When it’s done, its files open in Files.</figcaption>
+      </figure>
+      <h3>iPhone and iPad</h3>
+      <p>The same app on iPhone and iPad. Downloads land in the Files app.</p>
+      <p class="app__cta">
+        <!-- TODO(owner): TestFlight code. Replace XXXXXXXX, as in the README. -->
+        <a class="btn" href="https://testflight.apple.com/join/XXXXXXXX">Join the TestFlight beta</a>
+        <a class="app__guide" href="https://github.com/zephleggett/dl-nzb/blob/main/docs/iphone-app.md">setup guide</a>
+      </p>
+      <p class="req"><b>needs</b> iOS 26 or iPadOS 26 or later.</p>
+    </article>
+  </div>
+</section>
+
+<!-- features -->
+<section id="features" class="sec" data-section="features" aria-labelledby="features-h">
+  <div class="sec__head"><h2 id="features-h">features</h2></div>
+  <ul class="grid">
+    <li class="card" style="--c:var(--base0D)">
+      <h3><span class="g" aria-hidden="true">❯</span> No daemon</h3>
+      <p>Nothing runs in the background. Open it, it downloads, it's done.</p>
+    </li>
+    <li class="card" style="--c:var(--base0C)">
+      <h3><span class="g" aria-hidden="true">⇉</span> Fast</h3>
+      <p>Parallel connections and SIMD yEnc decoding keep the line full.</p>
+    </li>
+    <li class="card card--hot" style="--c:var(--base0C)">
+      <h3><span class="g" aria-hidden="true">✓</span> PAR2 repair</h3>
+      <p>With <a href="https://github.com/zephleggett/par2-rs">par2-rs</a>, my pure-Rust PAR2 library.
+        Recovery data downloads only when it's needed.</p>
+    </li>
+    <li class="card" style="--c:var(--base0B)">
+      <h3><span class="g" aria-hidden="true">↻</span> Resumes</h3>
+      <p>Quit mid-download. Next time it carries on where it stopped.</p>
+    </li>
+    <li class="card" style="--c:var(--base0A)">
+      <h3><span class="g" aria-hidden="true">%</span> Availability check</h3>
+      <p>Asks the server what it has first, and warns before a download that can't be repaired.</p>
+    </li>
+    <li class="card" style="--c:var(--base0B)">
+      <h3><span class="g" aria-hidden="true">⊞</span> RAR extraction</h3>
+      <p>Password-protected archives too. Passwords in the NZB are used automatically.</p>
+    </li>
+    <li class="card" style="--c:var(--base0E)">
+      <h3><span class="g" aria-hidden="true">⌥</span> Deobfuscation</h3>
+      <p>Scrambled file names get their real names back from the PAR2 data.</p>
+    </li>
+    <li class="card" style="--c:var(--base0D)">
+      <h3><span class="g" aria-hidden="true">≤</span> Speed limit</h3>
+      <p>Cap the download speed so the rest of the network stays usable.</p>
+    </li>
+  </ul>
+</section>
+
+<!-- command line -->
+<section id="cli" class="sec" data-section="cli" aria-labelledby="cli-h">
+  <div class="sec__head">
+    <h2 id="cli-h">command line</h2>
+    <p>Run it, it downloads, it exits.</p>
+  </div>
+  <div class="cols">
+    <div>
+      <h3>commands</h3>
+      <div class="snip">
+<pre><code><span class="c-pmt">$</span> dl-nzb Sintel.nzb     <span class="c-com"># download</span>
+<span class="c-pmt">$</span> dl-nzb test           <span class="c-com"># test the server</span>
+<span class="c-pmt">$</span> dl-nzb config         <span class="c-com"># show the config</span></code></pre>
+      </div>
+      <h3>options</h3>
+      <table class="flags">
+        <caption class="sr-only">Command line options</caption>
+        <tbody>
+        <tr><th scope="row"><code>-o &lt;DIR&gt;</code></th><td>output folder</td></tr>
+        <tr><th scope="row"><code>-l</code></th><td>list the contents only</td></tr>
+        <tr><th scope="row"><code>-f</code></th><td>download even if it can't be repaired</td></tr>
+        <tr><th scope="row"><code>--limit-rate 10M</code></th><td>cap the speed</td></tr>
+        <tr><th scope="row"><code>--password &lt;PW&gt;</code></th><td>archive password; repeat to try several</td></tr>
+        <tr><th scope="row"><code>--json</code></th><td>results as JSON on stdout</td></tr>
+        <tr><th scope="row"><code>-q</code> · <code>-v</code></th><td>quieter · louder</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div>
+      <h3>config.toml</h3>
+      <div class="snip">
+<pre><code><span class="c-sec">[usenet]</span>
+<span class="c-key">server</span>      = <span class="c-str">"news.example.com"</span>
+<span class="c-key">port</span>        = <span class="c-num">563</span>
+<span class="c-key">username</span>    = <span class="c-str">"you"</span>
+<span class="c-key">password</span>    = <span class="c-str">"••••••••"</span>
+<span class="c-key">ssl</span>         = <span class="c-num">true</span>
+<span class="c-key">connections</span> = <span class="c-num">20</span>
+
+<span class="c-sec">[download]</span>
+<span class="c-key">dir</span>         = <span class="c-str">"downloads"</span>
+<span class="c-key">speed_limit</span> = <span class="c-str">"10M"</span>  <span class="c-com"># optional</span></code></pre>
+      </div>
+      <p class="note">The first run creates this file; <code>dl-nzb config</code> shows where.
+        <code>DL_NZB_*</code> environment variables override it. Progress goes to stderr,
+        <code>--json</code> to stdout.</p>
+    </div>
+  </div>
+</section>
+
+<!-- install the command line -->
+<section id="install" class="sec" data-section="install" aria-labelledby="install-h">
+  <div class="sec__head"><h2 id="install-h">install</h2><p>The command line tool.</p></div>
+  <div class="snip">
+    <div class="snip__head"><span>shell</span>
+      <button type="button" class="copy" data-copy="#cargoCmd" aria-label="Copy the cargo command">
+        <span class="copy__idle">copy</span><span class="copy__done">copied</span>
+      </button>
+    </div>
+<pre><code><span class="c-pmt">$</span> <span id="cargoCmd">cargo install --git https://github.com/zephleggett/dl-nzb dl-nzb</span></code></pre>
+  </div>
+  <p class="note">Needs Rust 1.85 or later. Or download a binary from
+    <a href="https://github.com/zephleggett/dl-nzb/releases/latest">Releases</a>.
+    PAR2 and RAR are built in; there's nothing else to install.</p>
+</section>
+
+</main>
+
+<footer class="footer">
+  <div class="footer__brand">❯ dl-nzb<br /><span>usenet, decoded.</span></div>
+  <nav aria-label="Project">
+    <h2>project</h2>
+    <a href="https://github.com/zephleggett/dl-nzb">github ↗</a>
+    <a href="https://github.com/zephleggett/dl-nzb/releases/latest">releases ↗</a>
+    <a href="https://github.com/zephleggett/dl-nzb/issues">issues ↗</a>
+  </nav>
+  <nav aria-label="Help">
+    <h2>help</h2>
+    <a href="https://github.com/zephleggett/dl-nzb/blob/main/docs/mac-app.md">mac guide ↗</a>
+    <a href="https://github.com/zephleggett/dl-nzb/blob/main/docs/iphone-app.md">iphone guide ↗</a>
+    <a href="privacy.html">privacy</a>
+  </nav>
+  <nav aria-label="Built with">
+    <h2>built with</h2>
+    <a href="https://github.com/zephleggett/par2-rs">par2-rs ↗</a>
+    <a href="https://tokio.rs">tokio ↗</a>
+  </nav>
+  <p class="footer__meta">GPL-2.0<br />made by Zeph</p>
+</footer>
+
+<script src="js/replay.js" defer></script>
+<script src="js/app.js" defer></script>
+</body>
+</html>

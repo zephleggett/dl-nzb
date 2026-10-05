@@ -1,0 +1,28 @@
+# The Xcode the apps are built and tested with, in one place for every job
+# that builds Swift (ci.yml, release.yml and testflight.yml). A runner image
+# that has dropped it fails here, by name, rather than building with whatever
+# is the default.
+name: Select Xcode
+description: Point xcode-select at the pinned Xcode, or fail when the runner lacks it
+inputs:
+  version:
+    description: The Xcode version, as the runner image names its app bundle
+    default: "26.6"
+runs:
+  using: composite
+  steps:
+    - name: Select Xcode
+      shell: bash
+      env:
+        XCODE_APP: /Applications/Xcode_${{ inputs.version }}.app
+      run: |
+        echo "Xcode versions on this runner:"
+        for app in /Applications/Xcode*.app; do
+          [ -e "$app" ] && echo "  $(basename "$app")"
+        done
+        if [ ! -d "$XCODE_APP" ]; then
+          echo "error: $XCODE_APP is missing on this runner image" >&2
+          exit 1
+        fi
+        sudo xcode-select -s "$XCODE_APP"
+        xcodebuild -version

@@ -1,0 +1,14 @@
+// Signing for dl-nzb for iPhone and iPad. The committed values build for no
+// one in particular; your own team goes in Local.xcconfig beside this file,
+// which git ignores (copy Local.xcconfig.example). Set it there rather than in
+// Xcode's Signing & Capabilities, which would write it into the committed
+// project file.
+//
+// Simulator builds need no team. A device build or an archive does: Xcode
+// signs automatically once DEVELOPMENT_TEAM is set.
+
+CODE_SIGN_STYLE = Automatic
+DEVELOPMENT_TEAM =
+PRODUCT_BUNDLE_IDENTIFIER = com.zephleggett.dl-nzb
+
+#include? "Local.xcconfig"

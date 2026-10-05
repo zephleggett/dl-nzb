@@ -1,0 +1,79 @@
+{
+  "kind": "iphone",
+  "take": {
+    "appearance": "dark",
+    "cli_config": {
+      "post_processing": {"delete_rar_after_extract": true, "delete_par2_after_repair": true}
+    },
+    "folder": "Downloads",
+    "nzbs": [
+      "Big.Buck.Bunny.2008.1080p.BluRay.x264",
+      "Cosmos.Laundromat.2015.1080p",
+      "Sintel.2010.2160p.UHD.BluRay.x265",
+      "Tears.of.Steel.2012.1080p.WEB-DL",
+      "ubuntu-24.04.1-desktop-amd64"
+    ],
+    "setup": [
+      ["launch", ["-importCLIConfig", "{take}/demo-server.toml"]],
+      ["wait", 3],
+      ["open", "Cosmos.Laundromat.2015.1080p"],
+      ["wait", 1],
+      ["open", "Big.Buck.Bunny.2008.1080p.BluRay.x264"],
+      ["wait-file", "Downloads/Big.Buck.Bunny.2008.1080p.BluRay.x264/Big.Buck.Bunny.2008.1080p.BluRay.x264.mkv", 180],
+      ["wait", 1],
+      ["quit-app"],
+      ["files", "Downloads"],
+      ["wait", 3]
+    ],
+    "steps": [
+      ["wait", 1.6],
+      ["mark", "tap"],
+      ["wait", 0.3],
+      ["open", "Tears.of.Steel.2012.1080p.WEB-DL"],
+      ["mark", "opened"],
+      ["wait", 3.5],
+      ["mark", "away"],
+      ["files", "Downloads"],
+      ["wait", 9],
+      ["mark", "back"],
+      ["app"],
+      ["wait-file", "Downloads/Tears.of.Steel.2012.1080p.WEB-DL/Tears.of.Steel.2012.1080p.WEB-DL.mkv", 120],
+      ["mark", "finished"],
+      ["size-files", "Downloads/Tears.of.Steel.2012.1080p.WEB-DL"],
+      ["wait", 2.5],
+      ["mark", "results"],
+      ["app-files", "Downloads/Tears.of.Steel.2012.1080p.WEB-DL"],
+      ["wait", 5],
+      ["mark", "done"]
+    ]
+  },
+  "cut": {
+    "segments": [
+      {"from": "start+0.4", "to": "tap", "caption": "Open an NZB from Files"},
+      {"from": "opened-0.7", "to": "away-0.1", "caption": "Open an NZB from Files"},
+      {"from": "back+2.4", "to": "finished-7.4", "speed": 5, "badge": "Sped up", "caption": "Downloads, repairs and extracts",
+       "zoom": {"focus": [0.5, 0.31], "scale": 1.75}},
+      {"from": "finished-7.4", "to": "finished-4.1", "speed": 3, "badge": "Sped up", "caption": "Downloads, repairs and extracts",
+       "zoom": {"focus": [0.5, 0.31], "scale": 1.75}},
+      {"from": "finished-4.1", "to": "finished-2.8", "speed": 1.25, "badge": "Sped up", "caption": "Downloads, repairs and extracts",
+       "zoom": {"focus": [0.5, 0.31], "scale": 1.75}},
+      {"from": "finished-2.8", "to": "finished-0.3", "speed": 3, "badge": "Sped up", "caption": "Downloads, repairs and extracts",
+       "zoom": {"focus": [0.5, 0.31], "scale": 1.75}},
+      {"from": "finished-0.3", "to": "finished+1", "caption": "Downloads, repairs and extracts",
+       "zoom": {"focus": [0.5, 0.31], "scale": 1.75}},
+      {"from": "finished+1", "to": "finished+2.1", "caption": "Downloads, repairs and extracts"},
+      {"from": "results+1.2", "to": "done", "caption": "Your files, in the Files app", "fade": 0.5,
+       "zoom": {"focus": [0.35, 0.24], "scale": 1.5, "ease": 1.2}}
+    ],
+    "taps": [
+      {"at": "opened-0.6", "x": 0.18, "y": 0.49}
+    ],
+    "end": {
+      "icon": "../../Resources/AppIcon.icon",
+      "name": "dl-nzb",
+      "tagline": "Download from your Usenet server with an NZB",
+      "duration": 3.5,
+      "fade": 0.8
+    }
+  }
+}

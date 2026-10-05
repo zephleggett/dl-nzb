@@ -1,0 +1,182 @@
+# xcodegen spec for dl-nzb for iPhone and iPad.
+#
+# Regenerate with `make -C apple ios-project`, which exports DLNZB_VERSION and
+# DLNZB_BUILD as placeholders; a release passes the real ones to xcodebuild.
+# The generated dl-nzb.xcodeproj is committed so `open dl-nzb.xcodeproj` works
+# without installing xcodegen. Signing comes from Config/Signing.xcconfig, and
+# your own team from Config/Local.xcconfig beside it, which git ignores;
+# nothing about you lands in the committed project.
+name: dl-nzb
+options:
+  bundleIdPrefix: com.zephleggett
+  deploymentTarget: { iOS: "26.0" }
+  xcodeVersion: "26.6"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+  groupSortPosition: top
+packages:
+  DlNzbKit:
+    path: ../DlNzbKit
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    MARKETING_VERSION: ${DLNZB_VERSION}
+    CURRENT_PROJECT_VERSION: ${DLNZB_BUILD}
+    TARGETED_DEVICE_FAMILY: "1,2"
+    ARCHS: arm64
+    DEAD_CODE_STRIPPING: YES
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    ENABLE_MODULE_VERIFIER: NO
+    SWIFT_EMIT_LOC_STRINGS: NO
+targets:
+  dl-nzb:
+    type: application
+    platform: iOS
+    configFiles:
+      Debug: Config/Signing.xcconfig
+      Release: Config/Signing.xcconfig
+    sources:
+      - path: DlNzb
+      - path: ../Resources/AppIcon.icon
+        buildPhase: resources
+      - path: ../Resources/Shared.xcassets
+      - path: Resources/PrivacyInfo.xcprivacy
+        buildPhase: resources
+    dependencies:
+      - package: DlNzbKit
+        products: [DlNzbKit, DlNzbUI, DlNzbRust]
+      # Linked so the App Intents metadata step finds its framework instead
+      # of warning on every build that it skipped.
+      - sdk: AppIntents.framework
+    info:
+      path: Resources/Info.plist
+      properties:
+        CFBundleName: dl-nzb
+        CFBundleDisplayName: dl-nzb
+        CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        CFBundleIconName: AppIcon
+        LSRequiresIPhoneOS: true
+        LSApplicationCategoryType: public.app-category.utilities
+        NSHumanReadableCopyright: Copyright © 2026 Zeph Leggett.
+        UILaunchScreen: {}
+        # One window: opening an NZB adds it to the list that is already open.
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        # Every orientation and no UIRequiresFullScreen, so on an iPad the app
+        # runs beside others in Split View and Stage Manager, and an iPhone
+        # app can be resized when iOS 27 allows it. Layout follows size
+        # classes, never the device.
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # A trackpad or mouse on an iPad drives the app as a pointer.
+        UIApplicationSupportsIndirectInputEvents: true
+        # TLS to the Usenet server only, which is exempt.
+        ITSAppUsesNonExemptEncryption: false
+        # Downloads land in Documents/Downloads, which the Files app shows as
+        # On My iPhone › dl-nzb. Opening in place means an NZB in iCloud Drive
+        # or Downloads is read where it is (the queue keeps its own copy)
+        # instead of being copied into Documents/Inbox first.
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        # .nzb is imported, not exported: dl-nzb did not invent the format,
+        # and another app may declare it too. Viewer at Default rank, so the
+        # app is offered for NZBs without claiming them from the user's choice.
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: NZB File
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Default
+            LSItemContentTypes: [com.zephleggett.dl-nzb.nzb]
+        UTImportedTypeDeclarations:
+          - UTTypeIdentifier: com.zephleggett.dl-nzb.nzb
+            UTTypeDescription: NZB File
+            UTTypeConformsTo: [public.xml, public.data]
+            UTTypeTagSpecification:
+              public.filename-extension: [nzb]
+              public.mime-type: [application/x-nzb]
+        # BGContinuedProcessingTask: one task per queue run, submitted with a
+        # fresh suffix each time (BackgroundRunner). Apple's documentation for
+        # continued processing ("Performing long-running tasks on iOS and
+        # iPadOS", WWDC25 session 227) asks only for this wildcard identifier,
+        # which must start with the bundle identifier (so a Personal Team's
+        # own identifier works too); unlike BGProcessingTask it needs no
+        # UIBackgroundModes entry, so none is declared.
+        BGTaskSchedulerPermittedIdentifiers:
+          - $(PRODUCT_BUNDLE_IDENTIFIER).download.*
+    settings:
+      base:
+        PRODUCT_NAME: dl-nzb
+        # The tests import the app under this name.
+        PRODUCT_MODULE_NAME: DlNzbApp
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: ""
+        SUPPORTS_MACCATALYST: NO
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+        SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: NO
+
+  DlNzbTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [DlNzbTests]
+    dependencies:
+      - target: dl-nzb
+      # As for the app: the App Intents step warns without it.
+      - sdk: AppIntents.framework
+    configFiles:
+      Debug: Config/Signing.xcconfig
+      Release: Config/Signing.xcconfig
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zephleggett.dl-nzb.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/dl-nzb.app/dl-nzb
+        BUNDLE_LOADER: $(TEST_HOST)
+schemes:
+  # Run builds Release, as on a phone: download and repair speed from an
+  # unoptimized build mean little. dl-nzb Debug is for the debugger.
+  dl-nzb:
+    build:
+      targets:
+        dl-nzb: all
+        DlNzbTests: [test]
+    run:
+      config: Release
+      commandLineArguments:
+        "-simulate YES": false
+    test:
+      config: Debug
+      targets: [DlNzbTests]
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
+  dl-nzb Debug:
+    build:
+      targets:
+        dl-nzb: all
+        DlNzbTests: [test]
+    run:
+      config: Debug
+      commandLineArguments:
+        "-simulate YES": false
+    test:
+      config: Debug
+      targets: [DlNzbTests]
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release

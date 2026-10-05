@@ -1,0 +1,10 @@
+# Swift bindings: the generated Swift module is DlNzbFFI (a SwiftPM target in
+# apple/DlNzbKit); the C module it imports, DlNzbCore, ships inside
+# DlNzbCore.xcframework with its header DlNzbCoreFFI.h.
+[bindings.swift]
+module_name = "DlNzbFFI"
+ffi_module_name = "DlNzbCore"
+ffi_module_filename = "DlNzbCoreFFI"
+# Plain enums (JobPhase, Outcome, ErrorKind, ...) get CaseIterable, which the
+# Swift mapping tests walk.
+generate_case_iterable_conformance = true

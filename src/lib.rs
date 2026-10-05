@@ -7,31 +7,56 @@
 //! - Async/await support via Tokio
 //! - Connection pooling with automatic health checks
 //! - Optimized yEnc decoding
-//! - Progress reporting
+//! - Per-job progress events, pause/resume and prompt stop
 //! - PAR2 verification and repair
 //! - RAR extraction
+//!
+//! The entry point is [`engine::Engine`]; the `dl-nzb` CLI is one observer of it.
 //!
 //! # Example
 //!
 //! ```no_run
-//! use dl_nzb::{config::Config, nntp::NntpPoolBuilder};
+//! use std::sync::Arc;
+//! use dl_nzb::engine::{Engine, JobEvent, JobObserver, JobRequest};
+//!
+//! struct Print;
+//! impl JobObserver for Print {
+//!     fn on_event(&self, event: JobEvent) {
+//!         if let JobEvent::Finished(summary) = event {
+//!             println!("{:?}: {:?}", summary.outcome, summary.message);
+//!         }
+//!     }
+//! }
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let config = Config::load()?;
-//!     let pool = NntpPoolBuilder::new(config.usenet.clone()).build()?;
-//!     // Use the pool for downloading...
+//!     let engine = Engine::new(dl_nzb::Config::load()?)?;
+//!     let job = engine.start(
+//!         JobRequest::new("release.nzb", "/tmp/downloads/release"),
+//!         Arc::new(Print),
+//!     );
+//!     let summary = job.wait().await;
+//!     println!("{} bytes", summary.data_bytes);
 //!     Ok(())
 //! }
 //! ```
 
 // Core modules
-pub mod cli;
 pub mod config;
+pub mod engine;
 pub mod error;
-pub mod json_output;
 pub mod patterns;
+pub mod util;
+
+// Terminal front end (the `cli` feature): argument parsing, progress bars,
+// styling and the JSON output shapes. Never used by the engine itself.
+#[cfg(feature = "cli")]
+pub mod cli;
+#[cfg(feature = "cli")]
+pub mod json_output;
+#[cfg(feature = "cli")]
 pub mod progress;
+#[cfg(feature = "cli")]
 pub mod ui;
 
 // Feature modules organized by functionality
@@ -42,48 +67,18 @@ pub mod processing;
 // Re-export commonly used types
 pub use config::Config;
 pub use download::{DownloadOutcome, DownloadResult, Downloader, Nzb};
-pub use error::{DlNzbError, Result};
+pub use engine::{Engine, JobEvent, JobHandle, JobObserver, JobRequest, JobSummary};
+pub use error::{DlNzbError, ErrorKind, Result};
 pub use nntp::{NntpPool, NntpPoolBuilder, NntpPoolExt};
 pub use processing::PostProcessor;
 
 // Re-export serde_json for binary
 pub use serde_json;
 
-/// Shutdown coordination for graceful Ctrl+C handling.
-///
-/// Backed by a shared `Arc<AtomicBool>` so synchronous, CPU-bound work running
-/// on blocking threads (PAR2 repair via par2-rs, RAR extraction via unrar) can
-/// poll the same flag the async download workers observe.
-pub mod shutdown {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, OnceLock};
-
-    static FLAG: OnceLock<Arc<AtomicBool>> = OnceLock::new();
-
-    fn flag() -> &'static Arc<AtomicBool> {
-        FLAG.get_or_init(|| Arc::new(AtomicBool::new(false)))
-    }
-
-    /// Signal that a graceful shutdown has been requested.
-    pub fn request() {
-        flag().store(true, Ordering::Release);
-    }
-
-    /// Check whether a graceful shutdown has been requested.
-    pub fn is_requested() -> bool {
-        flag().load(Ordering::Acquire)
-    }
-
-    /// A clonable handle to the shutdown flag, for blocking work that needs to
-    /// poll cancellation itself (e.g. handed to par2-rs / unrar loops).
-    pub fn handle() -> Arc<AtomicBool> {
-        flag().clone()
-    }
-}
-
-/// Output suppression: when `set_quiet(true)` is called, the download and
-/// post-processing modules skip their decorative human-readable prints so the
-/// JSON consumer's stdout stays clean.
+/// Output suppression for the terminal front end: when `set_quiet(true)` is
+/// called, the CLI's decorative human-readable prints are skipped so the JSON
+/// consumer's output stays clean. (The engine never prints.)
+#[cfg(feature = "cli")]
 pub mod output_mode {
     use std::sync::atomic::{AtomicBool, Ordering};
 

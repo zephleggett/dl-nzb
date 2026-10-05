@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  dl-nzb's privacy manifest, for both flavours (Sparkle ships its own inside
+  its framework). Nothing is tracked or collected: the app talks only to the
+  Usenet server the user configures.
+
+  Required-reason APIs:
+  - UserDefaults, CA92.1: the app's own settings, read and written by the app.
+  - Disk space, E174.1: before a download starts the engine checks there is
+    room for the payload, recovery data and extraction, and refuses with Not
+    Enough Space instead of failing part way through. That is "check whether
+    there is sufficient disk space to write files" with behaviour the user can
+    see. 85F4.1 (display disk space) does not apply: the app never shows the
+    volume's free space, only the shortfall of one download.
+  - File timestamps, C617.1 and 3B52.1: the Rust engine and par2-rs stat files
+    (std::fs::metadata, which is stat/fstat) for sizes while resuming,
+    verifying and extracting. C617.1 for the queue's own copies in the app
+    container; 3B52.1 for the download folder and NZBs the user granted
+    access to through an open panel or the Downloads entitlement.
+-->
+<plist version="1.0">
+<dict>
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array/>
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>CA92.1</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryDiskSpace</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>E174.1</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>C617.1</string>
+				<string>3B52.1</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

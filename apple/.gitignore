@@ -1,0 +1,13 @@
+# SwiftPM / Xcode build output
+.build/
+.swiftpm/
+DerivedData/
+build/
+xcuserdata/
+*.xcuserstate
+
+# Built by scripts/build-xcframework.sh; never committed
+DlNzbKit/Frameworks/
+
+# Local signing (team id, bundle ids); see Config/Local.xcconfig.example
+**/Config/Local.xcconfig

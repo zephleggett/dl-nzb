@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Export options for the App Store flavour, used by scripts/archive-appstore.sh.
+  destination "export" writes a signed .pkg next to the archive and never
+  uploads; submitting is the owner's step, through Xcode's Organizer or
+  Transporter. TEAM_ID is replaced from DEVELOPMENT_TEAM (Config/Local.xcconfig).
+-->
+<plist version="1.0">
+<dict>
+	<key>method</key>
+	<string>app-store-connect</string>
+	<key>destination</key>
+	<string>export</string>
+	<key>teamID</key>
+	<string>TEAM_ID</string>
+	<key>signingStyle</key>
+	<string>automatic</string>
+	<key>uploadSymbols</key>
+	<true/>
+	<key>manageAppVersionAndBuildNumber</key>
+	<false/>
+</dict>
+</plist>

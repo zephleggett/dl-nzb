@@ -5,6 +5,21 @@ All notable changes to dl-nzb will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **dl-nzb for Mac.** An app for macOS 26 or later, on Apple silicon and Intel.
+  Open an NZB or drop it on the window; pause, resume, or set a speed limit.
+  Downloads carry on after you quit and reopen. The app offers each new release
+  and installs it when you agree.
+- **dl-nzb for iPhone and iPad**, on TestFlight. Open an NZB from Files or
+  Safari. Downloads keep going in the background and land in the Files app.
+- On a Mac, the app can import your server from the command line's `config.toml`.
+- Both apps ask for a RAR password when an archive needs one.
+
+### Changed
+- Each release has a `SHA256SUMS` file for checking downloads.
+
 ## [0.7.0] - 2026-06-05
 
 A polish-and-speed release: a refreshed interface, faster and lighter downloads,

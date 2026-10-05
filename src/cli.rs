@@ -1,3 +1,8 @@
+//! The `dl-nzb` command line: arguments, and (in [`observer`]) the terminal
+//! front end that renders an engine job's events as progress bars.
+
+pub mod observer;
+
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
@@ -47,6 +52,9 @@ const LONG_VERSION: &str = concat!(
     Download to specific directory:
         dl-nzb -o /downloads file.nzb
 
+    Extract a password-protected release:
+        dl-nzb --password s3cret file.nzb
+
     List contents without downloading:
         dl-nzb -l file.nzb
 
@@ -90,6 +98,17 @@ pub struct Cli {
     #[arg(short, long)]
     pub force: bool,
 
+    /// Cap the download speed in bytes per second; K, M and G suffixes are
+    /// 1024-based (e.g. 500K, 10M). 0 = unlimited. Overrides `speed_limit`
+    /// in the config file.
+    #[arg(long, value_name = "RATE", value_parser = crate::config::parse_speed)]
+    pub limit_rate: Option<u64>,
+
+    /// Password for encrypted RAR archives; repeat to try several (in order,
+    /// before the NZB's own)
+    #[arg(long = "password", value_name = "PW")]
+    pub passwords: Vec<String>,
+
     /// Subcommands
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -131,6 +150,7 @@ impl Cli {
     pub fn get_config_overrides(&self) -> crate::config::ConfigOverrides {
         crate::config::ConfigOverrides {
             download_dir: self.output.clone(),
+            speed_limit: self.limit_rate,
         }
     }
 }

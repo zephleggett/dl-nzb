@@ -24,6 +24,9 @@ pub(crate) struct YencDecoded {
     pub offset: u64,
     /// True iff a pcrc32/crc32 checksum was present and matched (reaching Ok with a present checksum implies it matched).
     pub crc_verified: bool,
+    /// The whole file's size as `=ybegin size=` gives it, if it does. The
+    /// part lies inside it.
+    pub file_size: Option<u64>,
 }
 
 /// `=ypart` header: 1-indexed `begin`, inclusive `end`.
@@ -64,10 +67,14 @@ pub(crate) fn decode_article(body: &[u8]) -> Result<YencDecoded> {
                 .ok_or_else(|| NntpError::YencDecode("=ypart missing begin=".to_string()))?;
             let end = parse_decimal_attr(line, b"end=")
                 .ok_or_else(|| NntpError::YencDecode("=ypart missing end=".to_string()))?;
-            if begin == 0 || end < begin {
+            // The part must lie inside the file `=ybegin size=` describes.
+            // (The downloader also holds it to a limit the NZB sets: the
+            // article sets both numbers, so this alone can't stop a part
+            // placed far past the end.)
+            if begin == 0 || end < begin || ybegin_size.is_some_and(|size| end > size) {
                 return Err(NntpError::YencDecode(format!(
-                    "=ypart invalid range begin={} end={}",
-                    begin, end
+                    "=ypart invalid range begin={} end={} (size={:?})",
+                    begin, end, ybegin_size
                 ))
                 .into());
             }
@@ -135,6 +142,7 @@ pub(crate) fn decode_article(body: &[u8]) -> Result<YencDecoded> {
         data: decoded,
         offset,
         crc_verified: yend_pcrc32.is_some(),
+        file_size: ybegin_size,
     })
 }
 
@@ -395,6 +403,20 @@ mod tests {
         let body = build_multipart(1, 1, 20, &data, false);
         let err = decode_article(&body).unwrap_err();
         assert!(err.to_string().contains("size mismatch"));
+    }
+
+    #[test]
+    fn rejects_a_part_ending_past_the_file_size() {
+        let data: Vec<u8> = (0u8..10).collect();
+        // `=ybegin size=` says the file is 20 bytes; the part claims 91..=100.
+        let mut body = b"=ybegin part=2 line=128 size=20 name=test.bin\r\n".to_vec();
+        body.extend_from_slice(b"=ypart begin=91 end=100\r\n");
+        body.extend_from_slice(&encode_line(&data));
+        body.extend_from_slice(b"\r\n");
+        let crc = crc32_ieee(&data);
+        body.extend_from_slice(format!("=yend size=10 part=2 pcrc32={crc:08x}\r\n").as_bytes());
+        let err = decode_article(&body).unwrap_err();
+        assert!(err.to_string().contains("invalid range"), "{err}");
     }
 
     #[test]

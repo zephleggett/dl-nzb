@@ -33,8 +33,9 @@ pub struct FileInfo {
 /// - `download_time_seconds`: wall clock from before the availability check to
 ///   after the download settled — useful for "how long did the CLI invocation
 ///   spend on the download phase".
-/// - `transfer_time_seconds`: wall clock from the first segment landing to
-///   the last — excludes pool warmup, availability checks, and finalization.
+/// - `transfer_time_seconds`: wall clock from the download workers starting
+///   to the last segment landing — excludes availability checks and
+///   finalization.
 /// - `average_speed_mib_per_sec`: `wire_bytes / transfer_time_seconds`, in
 ///   1024-based MiB/s, matching the units shown by the live progress bar.
 #[derive(Debug, Serialize)]
@@ -42,6 +43,12 @@ pub struct DownloadSummary {
     pub nzb: PathBuf,
     pub output_dir: PathBuf,
     pub success: bool,
+    /// How the job ended: `completed`, `completed_with_issues`, `failed`,
+    /// `stopped`, `needs_password` (an archive no password opened; re-run with
+    /// `--password`) or `unrepairable`.
+    pub outcome: &'static str,
+    /// One sentence when the outcome is not `completed`.
+    pub message: Option<String>,
     pub total_size: u64,
     pub data_bytes: u64,
     pub par2_bytes: u64,

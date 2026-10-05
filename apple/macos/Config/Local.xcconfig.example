@@ -1,0 +1,17 @@
+// Copy to Local.xcconfig (git-ignored) and fill in your own. The team is the
+// ten-character ID under Xcode > Settings > Accounts > your Apple ID > your
+// team. With a team, Xcode signs Debug builds as Apple Development and
+// `xcodebuild archive` can export for App Store Connect (ExportOptions).
+//
+// Direct (Developer ID) releases are still built ad hoc and signed afterwards
+// by apple/scripts/sign.sh with SIGN_IDENTITY, as jetlink does.
+
+// Manual: a Mac app with only sandbox entitlements needs no provisioning
+// profile, and no Xcode account has to be signed in.
+DEVELOPMENT_TEAM = ABCDE12345
+CODE_SIGN_STYLE = Manual
+CODE_SIGN_IDENTITY = Apple Development
+PROVISIONING_PROFILE_SPECIFIER =
+
+// A real signature has a Team ID, so library validation can stay on.
+DLNZB_DIRECT_ENTITLEMENTS = Resources/dl-nzb-Direct.entitlements

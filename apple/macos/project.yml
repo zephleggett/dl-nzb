@@ -1,0 +1,216 @@
+# xcodegen spec for dl-nzb for Mac.
+#
+# Regenerate with `make -C apple mac-project`, which exports DLNZB_VERSION and
+# DLNZB_BUILD as placeholders; the real version reaches a release build as an
+# xcodebuild setting (scripts/build-mac.sh). The generated dl-nzb.xcodeproj is
+# committed so `open dl-nzb.xcodeproj` works without installing xcodegen.
+#
+# Two flavours from one source tree, one bundle identifier:
+#
+#   dl-nzb         App Store. Sandboxed, no Sparkle. Configurations Debug and
+#                  Release; archived with scripts/archive-appstore.sh.
+#   dl-nzb Direct  Developer ID. Sandboxed, Sparkle through its Installer
+#                  Launcher service, compile condition DIRECT. Configurations
+#                  Debug-Direct and Release-Direct, so its products land in
+#                  their own folder and never overwrite the App Store app.
+#
+# Signing lives only in Config/Signing.xcconfig (ad hoc by default) and the
+# ignored Config/Local.xcconfig it includes; nothing about a team lands here.
+name: dl-nzb
+options:
+  bundleIdPrefix: com.zephleggett
+  deploymentTarget: { macOS: "26.0" }
+  xcodeVersion: "26.6"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+  groupSortPosition: top
+configs:
+  Debug: debug
+  Release: release
+  Debug-Direct: debug
+  Release-Direct: release
+packages:
+  DlNzbKit:
+    path: ../DlNzbKit
+  # Updates for the Direct flavour. Pinned exactly: the release that signs the
+  # feed uses the generate_appcast this version ships.
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    exactVersion: 2.10.0
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    MARKETING_VERSION: ${DLNZB_VERSION}
+    CURRENT_PROJECT_VERSION: ${DLNZB_BUILD}
+    ENABLE_HARDENED_RUNTIME: YES
+    DEAD_CODE_STRIPPING: YES
+    # Universal: Apple silicon and Intel (macOS 26 is the last Intel release).
+    # Debug builds only the machine's own architecture.
+    ARCHS: arm64 x86_64
+    ONLY_ACTIVE_ARCH: NO
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    ENABLE_MODULE_VERIFIER: NO
+    SWIFT_EMIT_LOC_STRINGS: NO
+  configs:
+    Debug:
+      ONLY_ACTIVE_ARCH: YES
+    Debug-Direct:
+      ONLY_ACTIVE_ARCH: YES
+targetTemplates:
+  MacApp:
+    type: application
+    platform: macOS
+    configFiles:
+      Debug: Config/Signing.xcconfig
+      Release: Config/Signing.xcconfig
+      Debug-Direct: Config/Signing.xcconfig
+      Release-Direct: Config/Signing.xcconfig
+    sources:
+      - path: DlNzb
+      - path: ../Resources/AppIcon.icon
+        buildPhase: resources
+      - path: ../Resources/Shared.xcassets
+      - path: Resources/PrivacyInfo.xcprivacy
+        buildPhase: resources
+    dependencies:
+      - package: DlNzbKit
+        products: [DlNzbKit, DlNzbUI, DlNzbRust]
+    info:
+      properties:
+        CFBundleName: dl-nzb
+        CFBundleDisplayName: dl-nzb
+        CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        CFBundleIconName: AppIcon
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
+        LSApplicationCategoryType: public.app-category.utilities
+        LSArchitecturePriority: [arm64, x86_64]
+        NSHumanReadableCopyright: Copyright © 2026 Zeph Leggett.
+        NSPrincipalClass: NSApplication
+        # Quitting with downloads running asks first and stops them where they
+        # can continue (AppDelegate.applicationShouldTerminate).
+        NSSupportsSuddenTermination: false
+        NSSupportsAutomaticTermination: false
+        # TLS to the Usenet server only, which is exempt.
+        ITSAppUsesNonExemptEncryption: false
+        # .nzb is imported, not exported: dl-nzb did not invent the format,
+        # and another app may declare it too. Viewer at Default rank, so the
+        # app is offered for NZBs without claiming them from the user's choice.
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: NZB File
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Default
+            LSItemContentTypes: [com.zephleggett.dl-nzb.nzb]
+        UTImportedTypeDeclarations:
+          - UTTypeIdentifier: com.zephleggett.dl-nzb.nzb
+            UTTypeDescription: NZB File
+            UTTypeConformsTo: [public.xml, public.data]
+            UTTypeTagSpecification:
+              public.filename-extension: [nzb]
+              public.mime-type: [application/x-nzb]
+    settings:
+      base:
+        PRODUCT_NAME: dl-nzb
+        # Both flavours compile the same module, which the tests import.
+        PRODUCT_MODULE_NAME: DlNzbApp
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: ""
+        # The sandbox, as build settings too: Xcode merges them with the
+        # entitlements file, which adds the bookmarks entitlement they lack.
+        ENABLE_APP_SANDBOX: YES
+        ENABLE_OUTGOING_NETWORK_CONNECTIONS: YES
+        ENABLE_USER_SELECTED_FILES: readwrite
+        ENABLE_FILE_ACCESS_DOWNLOADS_FOLDER: readwrite
+        COMBINE_HIDPI_IMAGES: YES
+targets:
+  dl-nzb:
+    templates: [MacApp]
+    info:
+      path: Resources/Info-AppStore.plist
+    settings:
+      base:
+        CODE_SIGN_ENTITLEMENTS: Resources/dl-nzb.entitlements
+
+  dl-nzb Direct:
+    templates: [MacApp]
+    sources:
+      - path: Resources/Sparkle-LICENSE.txt
+        buildPhase: resources
+    dependencies:
+      - package: Sparkle
+    info:
+      path: Resources/Info-Direct.plist
+      properties:
+        # Sparkle: the feed and its key are build settings (below). Checks run
+        # daily without the second-launch prompt; nothing installs unless the
+        # user says so.
+        SUFeedURL: $(DLNZB_UPDATE_FEED_URL)
+        SUPublicEDKey: $(DLNZB_UPDATE_PUBLIC_KEY)
+        SUEnableAutomaticChecks: true
+        SUVerifyUpdateBeforeExtraction: true
+        SURequireSignedFeed: true
+        # Sandboxed: Sparkle launches its installer through this XPC service.
+        SUEnableInstallerLauncherService: true
+    settings:
+      base:
+        CODE_SIGN_ENTITLEMENTS: $(DLNZB_DIRECT_ENTITLEMENTS)
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) DIRECT
+        # No feed, no updates: only a release sets the feed (it signs the
+        # update with the private key, a repo secret), so no other build
+        # offers to replace itself. The public key is dl-nzb's own, from
+        # Sparkle's generate_keys. UpdateController needs both.
+        DLNZB_UPDATE_FEED_URL: ""
+        DLNZB_UPDATE_PUBLIC_KEY: "bqUEjDzD7+L6g+cuxGdeKp4TzewXQ5zbgElwFKwk9UE="
+
+  DlNzbTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources: [DlNzbTests]
+    dependencies:
+      - target: dl-nzb
+    configFiles:
+      Debug: Config/Signing.xcconfig
+      Release: Config/Signing.xcconfig
+      Debug-Direct: Config/Signing.xcconfig
+      Release-Direct: Config/Signing.xcconfig
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zephleggett.dl-nzb.tests
+        # Without this xcodebuild refuses to sign the test bundle: "the target
+        # does not have an Info.plist file and one is not being generated".
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  dl-nzb:
+    build:
+      targets:
+        dl-nzb: all
+        DlNzbTests: [test]
+    run:
+      config: Debug
+      commandLineArguments:
+        "-simulate YES": false
+    test:
+      config: Debug
+      targets: [DlNzbTests]
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
+  dl-nzb Direct:
+    build:
+      targets:
+        dl-nzb Direct: all
+    run:
+      config: Debug-Direct
+      commandLineArguments:
+        "-simulate YES": false
+    profile:
+      config: Release-Direct
+    analyze:
+      config: Debug-Direct
+    archive:
+      config: Release-Direct

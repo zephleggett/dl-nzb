@@ -1,29 +1,61 @@
-# dl-nzb
+<p align="center"><img src="docs/images/icon.png" width="128" alt="dl-nzb icon"></p>
 
-NZB downloader written in Rust. Downloads from Usenet with parallel connections, PAR2 repair, and RAR extraction.
+<h1 align="center">dl-nzb</h1>
 
-PAR2 uses [par2-rs](https://github.com/zephleggett/par2-rs) (pure Rust with SIMD). RAR extraction built in.
+<p align="center">Download from your Usenet server with an NZB. No daemon, no web UI.</p>
 
-## Install
+## Quick start
 
-Download from [releases](https://github.com/zephleggett/dl-nzb/releases) or build from source:
+You need a Usenet server account and an NZB file.
+
+<!-- TODO(owner): replace XXXXXXXX in both TestFlight links with the public beta code. -->
+
+| Platform | Get it | Guide |
+| --- | --- | --- |
+| Mac | [DMG from Releases](https://github.com/zephleggett/dl-nzb/releases/latest) | [Set up a Mac](docs/mac-app.md) |
+| iPhone and iPad | [TestFlight](https://testflight.apple.com/join/XXXXXXXX) | [Set up iPhone or iPad](docs/iphone-app.md) |
+| Command line | `cargo install` or [release binaries](https://github.com/zephleggett/dl-nzb/releases/latest) | [Command line](#command-line) |
+
+Open the app and add an NZB. It downloads, repairs and extracts; then you're
+done. You bring the server and the NZB; dl-nzb has no indexer or search.
+
+PAR2 repair uses [par2-rs](https://github.com/zephleggett/par2-rs), a pure-Rust
+PAR2 library with SIMD.
+
+## Demos
+
+Simulator demos.
+
+### Mac
+
+<a href="docs/images/mac-demo.mp4"><img src="docs/images/mac-demo.webp" width="100%" alt="dl-nzb for Mac: an NZB opens into the list, pauses and resumes, carries on after the app quits and reopens, then repairs 12 damaged blocks and extracts. Simulated engine, sped up where marked."></a>
+
+### iPhone
+
+<a href="docs/images/iphone-demo.mp4"><img src="docs/images/iphone-demo.webp" width="100%" alt="dl-nzb for iPhone: an NZB opened from Files downloads, repairs 12 damaged blocks and extracts, then its files appear in the Files app. Simulated engine, sped up where marked."></a>
+
+<a href="https://testflight.apple.com/join/XXXXXXXX"><img src="docs/images/testflight-badge.svg" alt="Available on TestFlight" height="40"></a>
+
+## Command line
+
+The apps and the command line share nothing. The Mac app can import the
+command line's server once, in **Settings > Advanced > Import from dl-nzb CLI…**.
+
+### Install
+
+Download a binary from [Releases](https://github.com/zephleggett/dl-nzb/releases/latest),
+or build it with Rust 1.85 or later:
 
 ```bash
-git clone https://github.com/zephleggett/dl-nzb.git
-cd dl-nzb
-cargo build --release
-cp target/release/dl-nzb /usr/local/bin/
+cargo install --git https://github.com/zephleggett/dl-nzb dl-nzb
 ```
 
-## Setup
+### Setup
 
-First run creates a config file. Add your Usenet credentials:
+The first run creates a config file; `dl-nzb config` shows where. Add your
+Usenet account to it.
 
-```bash
-dl-nzb config  # shows config path
-```
-
-Config locations (checked in order):
+Config locations, checked in order:
 - Local: `./dl-nzb.toml` (project-local override)
 - Linux: `~/.config/dl-nzb/config.toml`
 - macOS: `~/Library/Application Support/dl-nzb/config.toml`
@@ -40,19 +72,21 @@ ssl = true
 connections = 20
 ```
 
-## Usage
+### Usage
 
 ```bash
 dl-nzb file.nzb                    # download
 dl-nzb -o /path/to/dir file.nzb   # custom output dir
 dl-nzb -l file.nzb                # list contents only
-dl-nzb -f file.nzb                # force re-download
+dl-nzb -f file.nzb                # download even if the availability check says it can't be repaired
+dl-nzb --limit-rate 10M file.nzb  # cap the download speed at 10 MiB/s
+dl-nzb --password s3cret file.nzb # extract a password-protected release
 dl-nzb test                        # test server connection
 dl-nzb config                      # show config location and values
 dl-nzb --json file.nzb            # JSON output for scripting
 ```
 
-## Config Reference
+### Config reference
 
 ```toml
 [usenet]
@@ -71,6 +105,7 @@ retry_delay = 500
 dir = "downloads"
 create_subfolders = true      # folder per NZB
 force_redownload = false
+# speed_limit = "10M"         # bytes/s cap; K/M/G are 1024-based; absent or 0 = unlimited
 
 [post_processing]
 auto_par2_repair = true
@@ -95,12 +130,12 @@ format = "pretty"
 # file = "/path/to/dl-nzb.log"  # optional log file
 ```
 
-Environment variables override config with `DL_NZB_` prefix:
+Environment variables with the `DL_NZB_` prefix override the config:
 ```bash
 DL_NZB_USENET_SERVER=news.example.com dl-nzb file.nzb
 ```
 
-## CLI Options
+### CLI options
 
 ```
 dl-nzb [OPTIONS] [FILE]...
@@ -109,20 +144,48 @@ dl-nzb <COMMAND>
 Commands:
   test     Test server connection
   config   Show configuration
-  version  Show version information
 
 Options:
   -o, --output <DIR>    Output directory
   -l, --list            List NZB contents
-  -q, --quiet           Suppress output
+  -q, --quiet           Errors only (also skips the availability prompt)
   -v, --verbose         Verbose (-vv for debug)
-  -f, --force           Force re-download (overwrite existing)
+  -f, --force           Download even when the availability check finds too
+                        many missing articles for PAR2 to repair
+  --limit-rate <RATE>   Cap the download speed: bytes/s, or K, M, G
+                        (1024-based, as curl), e.g. 500K, 10M; 0 = unlimited.
+                        Overrides `speed_limit` in the config
+  --password <PW>       Password for encrypted RAR archives (repeatable)
   --json                JSON output for scripting
+  --color <WHEN>        auto (default), always, never
+  -V, --version         Show version information
 ```
 
-## JSON Output
+Each NZB downloads into its own folder under the output directory. An
+interactive run checks article availability first and asks before fetching a
+release PAR2 can't repair. `--json` and `-q` runs check only when the NZB has
+no PAR2 files, and skip unrepairable releases unless `--force`.
 
-With `--json`, outputs structured data for scripting:
+`--limit-rate` (or `speed_limit`) caps the total across all connections, so
+the speed shown settles at the limit. Only article bodies are throttled;
+logins and health checks never wait on it.
+
+Encrypted RAR archives, hidden file names included, extract with the first
+password that works: each `--password` in order, then the NZB's own
+(`<meta type="password">`, or `{{password}}` in its file name, as in
+`Release{{s3cret}}.nzb`; the folder is named `Release`). If none works, the
+download is kept and the run ends with "Archive needs a password"; re-run with
+`--password`. Files move into place only once the whole archive is intact, and
+`delete_rar_after_extract` deletes only archives that extracted.
+
+Ctrl+C stops the download promptly. Data already received is kept, incomplete
+files stay `<name>.partial`, and post-processing is skipped. Press it again to
+quit immediately.
+
+The engine is also a library, `dl_nzb::engine`, which the apps use. Build it
+without the terminal front end: `cargo build --lib --no-default-features`.
+
+### JSON output
 
 ```bash
 dl-nzb --json -l file.nzb      # list as JSON
@@ -130,9 +193,17 @@ dl-nzb --json file.nzb         # download results as JSON
 dl-nzb --json test             # test results as JSON
 ```
 
-## Requirements
+Download results carry `outcome` (`completed`, `completed_with_issues`,
+`failed`, `stopped`, `needs_password`, `unrepairable`) and a one-sentence
+`message` when it isn't `completed`.
 
-Usenet provider with NNTP access. Nothing else to install.
+### Requirements
+
+A Usenet provider with NNTP access. Nothing else to install.
+
+## Help
+
+[Mac guide](docs/mac-app.md) · [iPhone guide](docs/iphone-app.md) · [Issues](https://github.com/zephleggett/dl-nzb/issues)
 
 ## License
 

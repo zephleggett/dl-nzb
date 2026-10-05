@@ -1,0 +1,154 @@
+# The iPhone and iPad app on TestFlight. The Release workflow runs this once a
+# v* tag's GitHub release is out: the internal group gets the build as soon as
+# Apple has processed it, and the public link (the Public group) once it
+# passes Beta App Review. Actions > TestFlight > Run workflow runs it on any
+# branch: unticked, "upload" only archives and exports, which checks the
+# signing.
+#
+# It needs APPLE_TEAM_ID and the notary key (docs/publishing.md), and the key
+# needs the Admin role: xcodebuild makes the signing certificates and profiles
+# with it. Without them it does nothing, so a fork's release still finishes.
+name: TestFlight
+
+on:
+  workflow_call:
+    inputs:
+      upload:
+        type: boolean
+        default: true
+      group:
+        type: string
+        default: Public
+  workflow_dispatch:
+    inputs:
+      upload:
+        description: Upload to App Store Connect (unticked, archive and export only)
+        type: boolean
+        default: false
+      group:
+        description: External group to add the build to and submit for Beta App Review (empty for the internal group alone)
+        type: string
+        default: Public
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_TOOLCHAIN: "1.92.0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  testflight:
+    name: iPhone app on TestFlight
+    runs-on: macos-26
+    # the Rust build, then Apple's processing, usually 5 to 30 minutes
+    timeout-minutes: 150
+    env:
+      HAVE_KEY: ${{ secrets.APPLE_TEAM_ID != '' && secrets.NOTARY_KEY_ID != '' && secrets.NOTARY_PRIVATE_KEY_P8_BASE64 != '' }}
+    steps:
+      - name: Report the mode
+        env:
+          UPLOAD: ${{ inputs.upload }}
+          GROUP: ${{ inputs.group }}
+        run: |
+          if [ "$HAVE_KEY" != true ]; then
+            echo "::notice::No APPLE_TEAM_ID or App Store Connect key: nothing goes to TestFlight"
+          elif [ "$UPLOAD" != true ]; then
+            echo "archiving and exporting only"
+          elif [ -n "$GROUP" ]; then
+            echo "uploading, then adding the build to $GROUP and submitting it for Beta App Review"
+          else
+            echo "uploading for the internal group"
+          fi
+
+      - name: Check out the repository
+        if: env.HAVE_KEY == 'true'
+        uses: actions/checkout@v4
+        with:
+          # the build number is the commit count
+          fetch-depth: 0
+
+      - name: Select Xcode
+        if: env.HAVE_KEY == 'true'
+        uses: ./.github/actions/select-xcode
+
+      - name: Install xcodegen
+        if: env.HAVE_KEY == 'true'
+        run: brew install xcodegen
+
+      - name: Install Rust
+        if: env.HAVE_KEY == 'true'
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
+          targets: aarch64-apple-darwin, x86_64-apple-darwin, aarch64-apple-ios, aarch64-apple-ios-sim
+
+      - name: Restore the Rust build
+        if: env.HAVE_KEY == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: xcframework-${{ env.RUSTUP_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('Cargo.toml', '.cargo/config.toml', 'src/**', 'ffi/**') }}
+          restore-keys: |
+            xcframework-${{ env.RUSTUP_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}-
+            xcframework-${{ env.RUSTUP_TOOLCHAIN }}-
+
+      - name: Build the Rust engine
+        if: env.HAVE_KEY == 'true'
+        run: make -C apple xcframework
+
+      - name: Install the App Store Connect key
+        if: env.HAVE_KEY == 'true'
+        env:
+          NOTARY_PRIVATE_KEY_P8_BASE64: ${{ secrets.NOTARY_PRIVATE_KEY_P8_BASE64 }}
+        run: |
+          echo "$NOTARY_PRIVATE_KEY_P8_BASE64" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
+          echo "ASC_KEY_PATH=$RUNNER_TEMP/AuthKey.p8" >> "$GITHUB_ENV"
+          # xcodebuild makes an Apple Development certificate for the archive,
+          # since its key cannot come from another Mac, and keeps the key in
+          # the default keychain: an unlocked one of the run's own.
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          echo "KEYCHAIN_PATH=$KEYCHAIN" >> "$GITHUB_ENV"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          security default-keychain -d user -s "$KEYCHAIN"
+          /usr/bin/python3 scripts/asc.py dev-certs > "$RUNNER_TEMP/dev-certs-before.txt"
+
+      - name: Archive, upload and publish
+        if: env.HAVE_KEY == 'true'
+        env:
+          DLNZB_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+          ASC_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+          UPLOAD: ${{ inputs.upload && '1' || '0' }}
+          TESTFLIGHT_GROUP: ${{ inputs.group }}
+        run: make -C apple ios-testflight
+        # On a rerun after the upload went through, it publishes that build
+        # rather than making another.
+
+      - name: Revoke the development certificate
+        if: always() && env.HAVE_KEY == 'true'
+        env:
+          ASC_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          # The one this run made: its key goes with the runner, and each
+          # release would otherwise leave another on the team.
+          if [ -f "$RUNNER_TEMP/dev-certs-before.txt" ]; then
+            /usr/bin/python3 scripts/asc.py revoke-dev-certs --keep "$RUNNER_TEMP/dev-certs-before.txt"
+          fi
+
+      - name: Delete the key and the keychain
+        if: always()
+        run: |
+          if [ -n "${KEYCHAIN_PATH:-}" ] && [ -f "$KEYCHAIN_PATH" ]; then
+            security delete-keychain "$KEYCHAIN_PATH" || true
+          fi
+          rm -f "$RUNNER_TEMP/AuthKey.p8"

@@ -1,0 +1,140 @@
+# The Mac App Store flavour, archived and exported for App Store Connect on a
+# runner, which checks its signing. Run it from Actions > Mac App Store > Run
+# workflow; nothing runs it on its own. It never uploads: the exported .pkg is
+# the run's artifact, and submitting it (Transporter, or Xcode's Organizer)
+# stays the owner's step.
+#
+# It needs APPLE_TEAM_ID and the notary key with the Admin role, as the
+# TestFlight workflow does (docs/publishing.md). Without them it does nothing.
+name: Mac App Store
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_TOOLCHAIN: "1.92.0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  archive:
+    name: Archive and export the App Store flavour
+    runs-on: macos-26
+    timeout-minutes: 120
+    env:
+      HAVE_KEY: ${{ secrets.APPLE_TEAM_ID != '' && secrets.NOTARY_KEY_ID != '' && secrets.NOTARY_PRIVATE_KEY_P8_BASE64 != '' }}
+    steps:
+      - name: Report the mode
+        run: |
+          if [ "$HAVE_KEY" != true ]; then
+            echo "::notice::No APPLE_TEAM_ID or App Store Connect key: nothing to sign with"
+          fi
+
+      - name: Check out the repository
+        if: env.HAVE_KEY == 'true'
+        uses: actions/checkout@v4
+        with:
+          # the build number is the commit count
+          fetch-depth: 0
+
+      - name: Select Xcode
+        if: env.HAVE_KEY == 'true'
+        uses: ./.github/actions/select-xcode
+
+      - name: Install xcodegen
+        if: env.HAVE_KEY == 'true'
+        run: brew install xcodegen
+
+      - name: Install Rust
+        if: env.HAVE_KEY == 'true'
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
+          targets: aarch64-apple-darwin, x86_64-apple-darwin, aarch64-apple-ios, aarch64-apple-ios-sim
+
+      - name: Restore the Rust build
+        if: env.HAVE_KEY == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: xcframework-${{ env.RUSTUP_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('Cargo.toml', '.cargo/config.toml', 'src/**', 'ffi/**') }}
+          restore-keys: |
+            xcframework-${{ env.RUSTUP_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}-
+            xcframework-${{ env.RUSTUP_TOOLCHAIN }}-
+
+      - name: Build the Rust engine
+        if: env.HAVE_KEY == 'true'
+        run: make -C apple xcframework
+
+      - name: Install the App Store Connect key and the team
+        if: env.HAVE_KEY == 'true'
+        env:
+          NOTARY_PRIVATE_KEY_P8_BASE64: ${{ secrets.NOTARY_PRIVATE_KEY_P8_BASE64 }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          echo "$NOTARY_PRIVATE_KEY_P8_BASE64" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
+          echo "ASC_KEY_PATH=$RUNNER_TEMP/AuthKey.p8" >> "$GITHUB_ENV"
+          # As for the iPhone app: xcodebuild makes an Apple Development
+          # certificate for the archive and keeps its key in the default
+          # keychain, an unlocked one of the run's own.
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          echo "KEYCHAIN_PATH=$KEYCHAIN" >> "$GITHUB_ENV"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          security default-keychain -d user -s "$KEYCHAIN"
+          /usr/bin/python3 scripts/asc.py dev-certs > "$RUNNER_TEMP/dev-certs-before.txt"
+          # The team, where a Mac keeps it (git-ignored). Automatic, unlike
+          # Local.xcconfig.example's Manual: a runner has no Apple Development
+          # certificate until xcodebuild makes one with the key. A sandboxed
+          # app needs no profile for the archive.
+          {
+            echo "DEVELOPMENT_TEAM = $APPLE_TEAM_ID"
+            echo "CODE_SIGN_STYLE = Automatic"
+            echo "CODE_SIGN_IDENTITY = Apple Development"
+          } > apple/macos/Config/Local.xcconfig
+
+      - name: Archive and export
+        if: env.HAVE_KEY == 'true'
+        env:
+          ASC_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: make -C apple mac-archive
+        # archive-appstore.sh adds -allowProvisioningUpdates and the key
+        # (ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_PATH) to the archive and the
+        # export, so no Xcode account has to be signed in.
+
+      - name: Upload the package
+        if: env.HAVE_KEY == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dl-nzb-mac-app-store
+          path: apple/build/appstore/export/*.pkg
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Revoke the development certificate
+        if: always() && env.HAVE_KEY == 'true'
+        env:
+          ASC_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          if [ -f "$RUNNER_TEMP/dev-certs-before.txt" ]; then
+            /usr/bin/python3 scripts/asc.py revoke-dev-certs --keep "$RUNNER_TEMP/dev-certs-before.txt"
+          fi
+
+      - name: Delete the key, the keychain and the team
+        if: always()
+        run: |
+          if [ -n "${KEYCHAIN_PATH:-}" ] && [ -f "$KEYCHAIN_PATH" ]; then
+            security delete-keychain "$KEYCHAIN_PATH" || true
+          fi
+          rm -f "$RUNNER_TEMP/AuthKey.p8" apple/macos/Config/Local.xcconfig

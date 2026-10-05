@@ -110,6 +110,135 @@ pub struct DownloadConfig {
     pub create_subfolders: bool,
     #[serde(default)]
     pub force_redownload: bool,
+    /// Cap on the engine's total download speed, in bytes per second; `None`
+    /// is unlimited. In the file: an integer, or a string with a K, M or G
+    /// suffix (1024-based, as curl's `--limit-rate`), e.g. `"500K"`, `"10M"`;
+    /// absent or 0 is unlimited. The CLI's `--limit-rate` overrides it, and
+    /// `Engine::set_speed_limit` changes it live.
+    #[serde(
+        default,
+        with = "speed_limit_serde",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub speed_limit: Option<u64>,
+}
+
+/// Parse a speed such as `"10M"`, `"500K"`, `"1.5M"` or `"250000"` into bytes
+/// per second. Suffixes K, M, G and T are 1024-based (as curl's
+/// `--limit-rate`) and may be followed by `B`, `iB` or `/s`
+/// (`"10MB/s"`, `"10MiB"`). 0 means unlimited.
+pub fn parse_speed(text: &str) -> std::result::Result<u64, String> {
+    let invalid = || {
+        format!("invalid speed {text:?}: use bytes per second, or a number with K, M or G (e.g. 500K, 10M)")
+    };
+    let mut s = text.trim().to_ascii_lowercase();
+    if let Some(rest) = s.strip_suffix("/s") {
+        s = rest.trim_end().to_string();
+    }
+    if let Some(rest) = s.strip_suffix("ib").or_else(|| s.strip_suffix('b')) {
+        s = rest.to_string();
+    }
+    let (number, multiplier) = match s.chars().last() {
+        Some('k') => (&s[..s.len() - 1], 1u64 << 10),
+        Some('m') => (&s[..s.len() - 1], 1 << 20),
+        Some('g') => (&s[..s.len() - 1], 1 << 30),
+        Some('t') => (&s[..s.len() - 1], 1 << 40),
+        _ => (s.as_str(), 1),
+    };
+    let number = number.trim();
+    if number.is_empty() || number.starts_with(['-', '+']) {
+        return Err(invalid());
+    }
+    if let Ok(n) = number.parse::<u64>() {
+        return n.checked_mul(multiplier).ok_or_else(invalid);
+    }
+    let value: f64 = number.parse().map_err(|_| invalid())?;
+    let bytes = value * multiplier as f64;
+    if !bytes.is_finite() || bytes < 0.0 || bytes >= u64::MAX as f64 {
+        return Err(invalid());
+    }
+    Ok(bytes.round() as u64)
+}
+
+/// Format bytes per second the way [`parse_speed`] reads it: `"10M"`,
+/// `"500K"`, or a plain number when no suffix divides it exactly.
+pub fn format_speed(bytes_per_sec: u64) -> String {
+    for (suffix, unit) in [
+        ("T", 1u64 << 40),
+        ("G", 1 << 30),
+        ("M", 1 << 20),
+        ("K", 1 << 10),
+    ] {
+        if bytes_per_sec >= unit && bytes_per_sec % unit == 0 {
+            return format!("{}{suffix}", bytes_per_sec / unit);
+        }
+    }
+    bytes_per_sec.to_string()
+}
+
+/// `download.speed_limit`: an integer or a suffixed string in, a suffixed
+/// string out; 0 reads as unlimited.
+mod speed_limit_serde {
+    use serde::de::{self, Visitor};
+    use serde::{Deserializer, Serializer};
+    use std::fmt;
+
+    pub fn serialize<S: Serializer>(value: &Option<u64>, s: S) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(n) => s.serialize_str(&super::format_speed(*n)),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+        struct SpeedVisitor;
+
+        impl<'de> Visitor<'de> for SpeedVisitor {
+            type Value = Option<u64>;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("bytes per second, or a string such as \"10M\" or \"500K\"")
+            }
+
+            fn visit_u64<E: de::Error>(self, n: u64) -> Result<Self::Value, E> {
+                Ok((n > 0).then_some(n))
+            }
+
+            fn visit_i64<E: de::Error>(self, n: i64) -> Result<Self::Value, E> {
+                u64::try_from(n)
+                    .map_err(|_| E::custom("a speed limit can't be negative"))
+                    .and_then(|n| self.visit_u64(n))
+            }
+
+            fn visit_f64<E: de::Error>(self, n: f64) -> Result<Self::Value, E> {
+                if n.is_finite() && n >= 0.0 && n < u64::MAX as f64 {
+                    self.visit_u64(n.round() as u64)
+                } else {
+                    Err(E::custom("invalid speed limit"))
+                }
+            }
+
+            fn visit_str<E: de::Error>(self, s: &str) -> Result<Self::Value, E> {
+                super::parse_speed(s)
+                    .map_err(E::custom)
+                    .and_then(|n| self.visit_u64(n))
+            }
+
+            fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+
+            fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+                d.deserialize_any(self)
+            }
+        }
+
+        d.deserialize_any(SpeedVisitor)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,6 +322,7 @@ impl Default for DownloadConfig {
             dir: PathBuf::from("downloads"),
             create_subfolders: true,
             force_redownload: false,
+            speed_limit: None,
         }
     }
 }
@@ -281,10 +411,18 @@ impl Config {
         Ok(config_dir.join("dl-nzb").join("config.toml"))
     }
 
-    /// Load configuration from local or standard location
+    /// Load configuration from local or standard location, creating the
+    /// standard file with defaults if neither exists.
     pub fn load() -> Result<Self> {
+        Self::load_or_create().map(|(config, _)| config)
+    }
+
+    /// [`load`](Self::load), also returning the path of the default file if
+    /// this call had to create it (so the CLI can tell the user to edit it).
+    pub fn load_or_create() -> Result<(Self, Option<PathBuf>)> {
         let local_config = PathBuf::from("dl-nzb.toml");
         let standard_config = Self::config_path()?;
+        let mut created = None;
 
         // Check for local config first (for development/testing)
         let config_path = if local_config.exists() {
@@ -305,13 +443,7 @@ impl Config {
 
                 // Create default config file
                 Self::create_sample(&standard_config)?;
-
-                println!(
-                    "📝 Created default configuration at: {}",
-                    standard_config.display()
-                );
-                println!("⚙️  Please edit this file with your Usenet server credentials.");
-                println!();
+                created = Some(standard_config.clone());
             }
             tracing::debug!("Loaded configuration from: {}", standard_config.display());
             standard_config
@@ -319,19 +451,25 @@ impl Config {
 
         // Load and parse TOML file
         let content = std::fs::read_to_string(&config_path)?;
-        let mut config: Config = toml::from_str(&content)
-            .map_err(|e| ConfigError::ParseError(format!("Failed to parse config: {}", e)))?;
+        let mut config = Self::from_toml_str(&content)?;
 
-        // Apply environment variable overrides
+        // Apply environment variable overrides (which may bring their own `~`)
         config = load_env_overrides(config);
+        config.download.dir = expand_tilde(&config.download.dir);
 
-        // Expand tilde in paths
+        config.validate()?;
+        Ok((config, created))
+    }
+
+    /// Parse a configuration file's contents (no environment overrides, no
+    /// validation), expanding `~` in paths.
+    pub fn from_toml_str(content: &str) -> Result<Self> {
+        let mut config: Config = toml::from_str(content)
+            .map_err(|e| ConfigError::ParseError(format!("Failed to parse config: {}", e)))?;
         config.download.dir = expand_tilde(&config.download.dir);
         if let Some(log_file) = config.logging.file.as_ref() {
             config.logging.file = Some(expand_tilde(log_file));
         }
-
-        config.validate()?;
         Ok(config)
     }
 
@@ -368,6 +506,8 @@ impl Config {
 # [download]
 # dir               - Where to save downloads
 # create_subfolders - Create a subfolder for each NZB file
+# speed_limit       - Cap the download speed, e.g. "10M" or "500K" (bytes/s;
+#                     K/M/G are 1024-based). Absent or 0 = unlimited.
 #
 # [post_processing]
 # auto_par2_repair        - Automatically verify/repair with PAR2 files
@@ -450,22 +590,13 @@ impl Config {
         Ok(())
     }
 
-    /// Ensure required directories exist
-    pub fn ensure_dirs(&self) -> Result<()> {
-        std::fs::create_dir_all(&self.download.dir)?;
-
-        if let Some(log_file) = &self.logging.file {
-            if let Some(parent) = log_file.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Display the configuration as TOML
+    /// The configuration as TOML, for showing: a password reads `********`.
     pub fn display_toml(&self) -> Result<String> {
-        toml::to_string_pretty(self).map_err(|e| {
+        let mut shown = self.clone();
+        if !shown.usenet.password.is_empty() {
+            shown.usenet.password = "********".to_string();
+        }
+        toml::to_string_pretty(&shown).map_err(|e| {
             ConfigError::ParseError(format!("Failed to serialize config: {}", e)).into()
         })
     }
@@ -475,6 +606,9 @@ impl Config {
         if let Some(dir) = overrides.download_dir {
             self.download.dir = dir;
         }
+        if let Some(rate) = overrides.speed_limit {
+            self.download.speed_limit = (rate > 0).then_some(rate);
+        }
     }
 }
 
@@ -482,6 +616,8 @@ impl Config {
 #[derive(Debug, Default)]
 pub struct ConfigOverrides {
     pub download_dir: Option<PathBuf>,
+    /// Bytes per second; `Some(0)` removes the configured limit.
+    pub speed_limit: Option<u64>,
 }
 
 #[cfg(test)]
@@ -503,6 +639,69 @@ mod tests {
 
         // But download validation should fail without credentials
         assert!(config.validate_for_download().is_err());
+    }
+
+    #[test]
+    fn speeds_parse_like_curl_limit_rate() {
+        assert_eq!(parse_speed("250000"), Ok(250_000));
+        assert_eq!(parse_speed("500K"), Ok(500 * 1024));
+        assert_eq!(parse_speed("10M"), Ok(10 * 1024 * 1024));
+        assert_eq!(parse_speed("10m"), Ok(10 * 1024 * 1024));
+        assert_eq!(parse_speed("1.5M"), Ok(1024 * 1024 * 3 / 2));
+        assert_eq!(parse_speed("2G"), Ok(2 << 30));
+        assert_eq!(parse_speed(" 10MB/s "), Ok(10 << 20));
+        assert_eq!(parse_speed("10MiB"), Ok(10 << 20));
+        assert_eq!(parse_speed("0"), Ok(0));
+        for bad in ["", "M", "fast", "-1M", "10X", "1e400", "99999999999T"] {
+            assert!(parse_speed(bad).is_err(), "{bad:?} should not parse");
+        }
+        for n in [1, 1000, 1024, 500 * 1024, 10 << 20, 3 << 30, 1_500_000] {
+            assert_eq!(parse_speed(&format_speed(n)), Ok(n));
+        }
+        assert_eq!(format_speed(10 << 20), "10M");
+    }
+
+    #[test]
+    fn speed_limit_reads_strings_and_integers_and_round_trips() {
+        let read = |download: &str| {
+            let toml = format!("[download]\ndir = \"d\"\ncreate_subfolders = true\n{download}");
+            Config::from_toml_str(&toml).map(|c| c.download.speed_limit)
+        };
+        assert_eq!(read("").unwrap(), None);
+        assert_eq!(read("speed_limit = 0").unwrap(), None);
+        assert_eq!(read("speed_limit = \"0\"").unwrap(), None);
+        assert_eq!(read("speed_limit = 1048576").unwrap(), Some(1 << 20));
+        assert_eq!(read("speed_limit = \"10M\"").unwrap(), Some(10 << 20));
+        assert_eq!(read("speed_limit = \"500K\"").unwrap(), Some(500 << 10));
+        assert!(read("speed_limit = \"lots\"").is_err());
+        assert!(read("speed_limit = -5").is_err());
+
+        let mut config = Config::default();
+        assert!(!config.display_toml().unwrap().contains("speed_limit"));
+        config.download.speed_limit = Some(10 << 20);
+        let text = config.display_toml().unwrap();
+        assert!(text.contains("speed_limit = \"10M\""), "{text}");
+        let back = Config::from_toml_str(&text).unwrap();
+        assert_eq!(back.download.speed_limit, Some(10 << 20));
+
+        config.apply_overrides(ConfigOverrides {
+            speed_limit: Some(0),
+            ..Default::default()
+        });
+        assert_eq!(config.download.speed_limit, None);
+    }
+
+    #[test]
+    fn display_toml_hides_the_password() {
+        let mut config = Config::default();
+        config.usenet.username = "zeph".to_string();
+        config.usenet.password = "hunter2".to_string();
+        let text = config.display_toml().unwrap();
+        assert!(!text.contains("hunter2"), "{text}");
+        assert!(text.contains("password = \"********\""), "{text}");
+        assert!(text.contains("username = \"zeph\""), "{text}");
+        // The configuration itself is untouched.
+        assert_eq!(config.usenet.password, "hunter2");
     }
 
     #[test]

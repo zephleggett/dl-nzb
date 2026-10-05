@@ -22,6 +22,16 @@ path = "src/lib.rs"
 [[bin]]
 name = "dl-nzb"
 path = "src/main.rs"
+# The binary is the terminal front end; the library builds without it
+# (`cargo build --lib --no-default-features`) for the Apple apps.
+required-features = ["cli"]
+
+# `ffi/` (crate `dl-nzb-ffi`) wraps the engine for the Apple apps with UniFFI.
+# Plain `cargo build`/`cargo test` here still mean the CLI crate only (the root
+# package is the default member); `--workspace` or `-p dl-nzb-ffi` reaches the
+# bindings.
+[workspace]
+members = [".", "ffi"]
 
 [profile.release]
 # Optimize for speed (trading ~2MB for ~20% performance gain)
@@ -31,6 +41,13 @@ codegen-units = 1   # Better optimization (slower compile, faster runtime)
 panic = "abort"     # Smaller binary size
 strip = true        # Remove debug symbols
 
+# Release build for the FFI static library embedded in the Apple apps. Panics
+# must unwind so UniFFI can turn them into errors at the boundary instead of
+# aborting the host app.
+[profile.release-ffi]
+inherits = "release"
+panic = "unwind"
+
 # Fast release build for development/testing
 [profile.release-fast]
 inherits = "release"
@@ -38,6 +55,11 @@ opt-level = 3       # Maximum speed optimization
 lto = "thin"        # Faster LTO, good balance
 
 [features]
+default = ["cli"]
+# The terminal front end: argument parsing, progress bars, log formatting and
+# signal handling. Off for library consumers (the Apple apps via `ffi/`), so
+# nothing terminal-related is compiled into them.
+cli = ["dep:clap", "dep:indicatif", "dep:human_bytes", "dep:tracing-subscriber", "tokio/signal"]
 # Enable vendored OpenSSL for cross-compilation
 vendored-openssl = ["openssl/vendored"]
 
@@ -45,8 +67,9 @@ vendored-openssl = ["openssl/vendored"]
 # OpenSSL (explicit dependency for vendored feature support)
 openssl = { version = "0.10", optional = true }
 # Async runtime and networking
-tokio = { version = "1.45", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros", "fs", "signal"] }
-tokio-util = { version = "0.7", features = ["io", "codec"] }
+tokio = { version = "1.45", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros"] }
+# CancellationToken for per-job stop
+tokio-util = "0.7"
 tokio-native-tls = "0.3"
 native-tls = "0.2"
 
@@ -54,7 +77,7 @@ native-tls = "0.2"
 deadpool = { version = "0.12", features = ["managed", "rt_tokio_1"] }
 
 # CLI and configuration
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.5", features = ["derive"], optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.8"
@@ -75,12 +98,11 @@ crc32fast = "1.4"
 socket2 = { version = "0.5", features = ["all"] }
 
 # Error handling
-anyhow = "1.0"
 thiserror = "1.0"
 
-# Progress and UI
-indicatif = "0.17"
-human_bytes = "0.4"
+# Progress and UI (terminal front end only)
+indicatif = { version = "0.17", optional = true }
+human_bytes = { version = "0.4", optional = true }
 
 # System utilities
 dirs = "5.0"
@@ -89,19 +111,27 @@ regex = "1.11"
 
 # Logging and tracing
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"], optional = true }
 
 # Post-processing dependencies
-tempfile = "3.20"
 unrar = "0.5"
+# The raw unRAR DLL API (already built by `unrar`): extraction goes through it
+# directly so its data callback can stop mid-member and report progress, and
+# passwords reach unRAR as wide strings.
+unrar_sys = "0.5"
+widestring = "1"
 
 # PAR2 support (pure Rust with SIMD optimizations).
 # v0.3.1 fixes block-count inflation from duplicated FileDescription packets
 # (repair/verify failing on large multi-file / obfuscated sets).
 par2-rs = { git = "https://github.com/zephleggett/par2-rs.git", tag = "v0.3.1" }
 
-# Unix-only: raise the open-file limit at startup. A download holds one fd per
-# output file (large NZBs have hundreds) plus connections, and the inherited
-# soft limit is often only 256 on macOS.
+# Unix-only: the engine raises the open-file limit (a download holds one fd per
+# output file, and large NZBs have hundreds, plus connections; the inherited soft
+# limit is often only 256 on macOS) and checks free disk space with statvfs.
 [target.'cfg(unix)'.dependencies]
 rlimit = "0.10"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3.20"

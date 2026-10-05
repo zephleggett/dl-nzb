@@ -3,8 +3,8 @@
 //! This module provides the core download functionality including NZB parsing,
 //! segment downloading, and file assembly.
 
-mod downloader;
+pub(crate) mod downloader;
 mod nzb;
 
 pub use downloader::{AvailabilityReport, DownloadOutcome, DownloadResult, Downloader};
-pub use nzb::Nzb;
+pub use nzb::{split_password, Nzb, NzbMeta};

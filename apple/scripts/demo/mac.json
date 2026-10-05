@@ -1,0 +1,67 @@
+{
+  "kind": "mac",
+  "take": {
+    "app": "com.zephleggett.dl-nzb",
+    "record_windows": {},
+    "setup": [
+      ["launch", ["-simulate", "YES", "-scratchState", "YES", "-scratchStateName", "demo", "-appearance", "dark", "-serverHost", "news.example.com", "-serverUsername", "user", "-notifyWhenFinished", "NO", "-deleteArchivesAfterExtracting", "YES", "-deletePar2AfterRepairing", "YES", "-downloadFolderBookmark", "{bookmark}"]],
+      ["wait", 3],
+      ["activate"],
+      ["window", [1040, 680]],
+      ["open", "{nzbs}/Cosmos.Laundromat.2015.1080p.nzb"],
+      ["wait", 1],
+      ["open", "{nzbs}/Big.Buck.Bunny.2008.1080p.BluRay.x264.nzb"],
+      ["wait-file", "{downloads}/Big.Buck.Bunny.2008.1080p.BluRay.x264/Big.Buck.Bunny.2008.1080p.BluRay.x264.mkv", 180],
+      ["wait", 1],
+      ["activate"],
+      ["move", {"window": [0.5, 0.62]}, 0.6],
+      ["wait", 1.5]
+    ],
+    "steps": [
+      ["wait", 1.5],
+      ["mark", "begin"],
+      ["open", "{nzbs}/Tears.of.Steel.2012.1080p.WEB-DL.nzb"],
+      ["mark", "opened"],
+      ["wait", 3],
+      ["click", {"label": "Pause"}, 0.8],
+      ["mark", "paused"],
+      ["wait", 1.4],
+      ["click", {"label": "Resume"}, 0.5],
+      ["mark", "resumed"],
+      ["wait", 1.5],
+      ["key", "cmd+q"],
+      ["mark", "quit"],
+      ["wait", 1],
+      ["click", {"label": "Quit"}, 0.6],
+      ["mark", "quitting"],
+      ["wait", 1.5],
+      ["launch", ["-simulate", "YES", "-scratchState", "YES", "-scratchStateName", "demo", "-appearance", "dark", "-serverHost", "news.example.com", "-serverUsername", "user", "-notifyWhenFinished", "NO", "-deleteArchivesAfterExtracting", "YES", "-deletePar2AfterRepairing", "YES", "-downloadFolderBookmark", "{bookmark}"]],
+      ["wait", 1],
+      ["window", [1040, 680]],
+      ["mark", "relaunched"],
+      ["wait", 1.2],
+      ["click", {"text": "Tears of Steel 2012"}, 0.8],
+      ["mark", "selected"],
+      ["wait-file", "{downloads}/Tears.of.Steel.2012.1080p.WEB-DL/Tears.of.Steel.2012.1080p.WEB-DL.mkv", 180],
+      ["mark", "finished"],
+      ["wait", 3],
+      ["mark", "done"]
+    ]
+  },
+  "cut": {
+    "segments": [
+      {"from": "start+0.3", "to": "opened", "caption": "Open an NZB"},
+      {"from": "opened+0.55", "to": "opened+1.8", "caption": "Open an NZB", "fade": 0.25},
+      {"from": "paused-0.6", "to": "resumed+0.6", "caption": "Pause and resume"},
+      {"from": "quit-0.2", "to": "quitting+0.9", "caption": "Quit and pick up later"},
+      {"from": "relaunched-0.75", "to": "selected+0.3", "caption": "Quit and pick up later"},
+      {"from": "selected+0.3", "to": "finished-7.4", "speed": 10, "badge": "Sped up", "caption": "Downloads, repairs and extracts", "zoom": {"focus": [0.8, 0.42], "scale": 1.6, "target": [1060, 560]}},
+      {"from": "finished-7.4", "to": "finished-4.1", "speed": 3, "badge": "Sped up", "caption": "Downloads, repairs and extracts", "zoom": {"focus": [0.8, 0.42], "scale": 1.6, "target": [1060, 560]}},
+      {"from": "finished-4.1", "to": "finished-2.8", "speed": 1.25, "badge": "Sped up", "caption": "Downloads, repairs and extracts", "zoom": {"focus": [0.8, 0.42], "scale": 1.6, "target": [1060, 560]}},
+      {"from": "finished-2.8", "to": "finished-0.3", "speed": 3, "badge": "Sped up", "caption": "Downloads, repairs and extracts", "zoom": {"focus": [0.8, 0.42], "scale": 1.6, "target": [1060, 560]}},
+      {"from": "finished-0.3", "to": "finished+1", "caption": "Downloads, repairs and extracts", "zoom": {"focus": [0.8, 0.42], "scale": 1.6, "target": [1060, 560]}},
+      {"from": "finished+1", "to": "finished+2.6", "caption": "Downloads, repairs and extracts"}
+    ],
+    "end": {"icon": "../../Resources/AppIcon.icon", "name": "dl-nzb", "tagline": "Download from your Usenet server with an NZB", "duration": 3.5, "fade": 0.8}
+  }
+}

@@ -1,0 +1,3 @@
+# Xcode's record of the resolved packages: project.yml pins Sparkle exactly,
+# and DlNzbKit is local.
+dl-nzb.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/

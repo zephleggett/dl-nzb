@@ -26,7 +26,13 @@ pub struct Par2NameRecovery {
 /// the most reliable deobfuscation method (this is what SABnzbd does). It must
 /// run BEFORE PAR2 repair so the repairer's name-match fast path sees real names
 /// and before any `delete_par2_after_repair` purge removes the par2 files.
-pub fn recover_par2_names(directory: &Path, par2_files: &[PathBuf]) -> Result<Par2NameRecovery> {
+///
+/// `on_rename(from, to)` is called after each file renamed.
+pub fn recover_par2_names(
+    directory: &Path,
+    par2_files: &[PathBuf],
+    on_rename: &mut dyn FnMut(&Path, &Path),
+) -> Result<Par2NameRecovery> {
     // Prefer the index par2 (no `.vol`), else any par2 file; `Par2Info::load`
     // discovers sibling volumes by recovery-set id regardless.
     let index = par2_files
@@ -100,6 +106,17 @@ pub fn recover_par2_names(directory: &Path, par2_files: &[PathBuf]) -> Result<Pa
         if real_name == cur_name {
             continue;
         }
+        // The name comes from the PAR2 set: only accept a plain file name, so
+        // a crafted `../x` or absolute path can't move a file out of the job
+        // folder (sub-folder names are skipped too; their parent may not exist).
+        let mut components = Path::new(real_name).components();
+        if !matches!(
+            (components.next(), components.next()),
+            (Some(std::path::Component::Normal(_)), None)
+        ) {
+            tracing::debug!("PAR2 name recovery: unsafe name {:?} skipped", real_name);
+            continue;
+        }
         let target = path.with_file_name(real_name);
         // Authoritative rename: if the destination already exists, skip rather
         // than create a `name_1` variant that par2 verify can't match by name.
@@ -114,6 +131,7 @@ pub fn recover_par2_names(directory: &Path, par2_files: &[PathBuf]) -> Result<Pa
             Ok(()) => {
                 tracing::debug!("PAR2 name recovery: {} -> {}", path.display(), real_name);
                 files_renamed += 1;
+                on_rename(&path, &target);
             }
             Err(e) => tracing::debug!("PAR2 name recovery rename failed: {}", e),
         }
@@ -282,31 +300,117 @@ fn rename_file(old_path: &Path, new_path: &Path) -> Result<PathBuf> {
     Ok(new_path.to_path_buf())
 }
 
-/// Sanitize a name to be filesystem-safe
+/// A job's title made safe as a file name stem: no path separators or
+/// characters file systems refuse, no control or invisible characters, no
+/// leading or trailing spaces or dots, at most 200 bytes. `None` when nothing
+/// is left.
+pub(crate) fn name_from_title(title: &str) -> Option<String> {
+    let edge = |c: char| c.is_whitespace() || c == '.';
+    let cleaned = sanitize_name(title);
+    let trimmed = cleaned.trim_matches(edge);
+    let mut end = trimmed.len().min(200);
+    while !trimmed.is_char_boundary(end) {
+        end -= 1;
+    }
+    let name = trimmed[..end].trim_end_matches(edge);
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// Sanitize a name to be filesystem-safe: path separators and characters
+/// file systems refuse become `_`, control characters and line separators
+/// too, and characters that show as nothing ([`is_invisible`]) are dropped:
+/// they can disguise how a name reads ("evil\u{202E}vkm.exe" shows as
+/// "evilexe.mkv"), or make a name of nothing at all ("\u{200B}.mkv").
 fn sanitize_name(name: &str) -> String {
     name.chars()
+        .filter(|c| !is_invisible(*c))
         .map(|c| match c {
             '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            '\u{2028}' | '\u{2029}' => '_',
             c if c.is_control() => '_',
             c => c,
         })
         .collect()
 }
 
-pub struct DeobfuscateResult {
-    pub files_renamed: usize,
-    pub extensions_fixed: usize,
+/// Whether `c` shows as nothing: a format character (Unicode category Cf:
+/// the soft hyphen, zero-width space and joiners, direction marks, the
+/// bidirectional embeddings, overrides and isolates, the word joiner and
+/// invisible operators, the byte order mark, tags...), or another default-
+/// ignorable one (the combining grapheme joiner, Hangul fillers, Khmer
+/// inherent vowels, Mongolian and other variation selectors).
+fn is_invisible(c: char) -> bool {
+    matches!(
+        c,
+        // Category Cf.
+        '\u{00AD}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061C}'
+            | '\u{06DD}'
+            | '\u{070F}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08E2}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{110BD}'
+            | '\u{110CD}'
+            | '\u{13430}'..='\u{1343F}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0001}'
+            | '\u{E0020}'..='\u{E007F}'
+            // Other default-ignorable characters, the fillers among them.
+            | '\u{034F}'
+            | '\u{115F}'
+            | '\u{1160}'
+            | '\u{17B4}'
+            | '\u{17B5}'
+            | '\u{180B}'..='\u{180F}'
+            | '\u{3164}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{FFA0}'
+            | '\u{E0100}'..='\u{E01EF}'
+    )
 }
 
-/// Deobfuscate files in a directory
+/// `stem` without a trailing `ext` (".mkv", any case), so a title that
+/// already ends in the file's extension doesn't get it twice. Unchanged
+/// when nothing would be left.
+fn without_extension<'a>(stem: &'a str, ext: &str) -> &'a str {
+    if ext.is_empty() || stem.len() <= ext.len() {
+        return stem;
+    }
+    let cut = stem.len() - ext.len();
+    if !stem.is_char_boundary(cut) || !stem[cut..].eq_ignore_ascii_case(ext) {
+        return stem;
+    }
+    let rest = stem[..cut].trim_end_matches(|c: char| c.is_whitespace() || c == '.');
+    if rest.is_empty() {
+        stem
+    } else {
+        rest
+    }
+}
+
+/// Deobfuscate files in a directory, returning how many were renamed (adding
+/// an extension doesn't count).
 ///
 /// This function:
 /// 1. Adds missing extensions to files based on magic bytes
 /// 2. Renames the largest obfuscated file to a meaningful name
 /// 3. Renames related files (same basename) to match
-pub fn deobfuscate_files(directory: &Path, useful_name: &str) -> Result<DeobfuscateResult> {
+///
+/// `on_rename(from, to)` is called after each file renamed.
+pub fn deobfuscate_files(
+    directory: &Path,
+    useful_name: &str,
+    on_rename: &mut dyn FnMut(&Path, &Path),
+) -> Result<usize> {
     let mut files_renamed = 0;
-    let mut extensions_fixed = 0;
 
     // Get all files in directory (not recursively)
     let mut file_list: Vec<PathBuf> = fs::read_dir(directory)?
@@ -316,10 +420,7 @@ pub fn deobfuscate_files(directory: &Path, useful_name: &str) -> Result<Deobfusc
         .collect();
 
     if file_list.is_empty() {
-        return Ok(DeobfuscateResult {
-            files_renamed: 0,
-            extensions_fixed: 0,
-        });
+        return Ok(0);
     }
 
     // Check for DVD/Bluray directories - skip deobfuscation if found
@@ -334,10 +435,7 @@ pub fn deobfuscate_files(directory: &Path, useful_name: &str) -> Result<Deobfusc
                         "Skipping deobfuscation due to DVD/Bluray directory: {}",
                         parent_str
                     );
-                    return Ok(DeobfuscateResult {
-                        files_renamed: 0,
-                        extensions_fixed: 0,
-                    });
+                    return Ok(0);
                 }
             }
         }
@@ -361,8 +459,8 @@ pub fn deobfuscate_files(directory: &Path, useful_name: &str) -> Result<Deobfusc
             );
             match rename_file(file, &new_path) {
                 Ok(renamed) => {
+                    on_rename(file, &renamed);
                     new_file_list.push(renamed);
-                    extensions_fixed += 1;
                 }
                 Err(e) => {
                     tracing::debug!("Failed to rename {}: {}", file.display(), e);
@@ -377,10 +475,7 @@ pub fn deobfuscate_files(directory: &Path, useful_name: &str) -> Result<Deobfusc
 
     // Step 2: Find biggest file and check if it needs deobfuscation
     let Some((biggest_file, biggest_size)) = get_biggest_file(&file_list) else {
-        return Ok(DeobfuscateResult {
-            files_renamed,
-            extensions_fixed,
-        });
+        return Ok(files_renamed);
     };
 
     // Check if biggest file should be excluded
@@ -390,10 +485,7 @@ pub fn deobfuscate_files(directory: &Path, useful_name: &str) -> Result<Deobfusc
             "Biggest file {} excluded due to extension",
             biggest_file.display()
         );
-        return Ok(DeobfuscateResult {
-            files_renamed,
-            extensions_fixed,
-        });
+        return Ok(files_renamed);
     }
 
     // Check if filename looks obfuscated
@@ -407,10 +499,7 @@ pub fn deobfuscate_files(directory: &Path, useful_name: &str) -> Result<Deobfusc
             "Biggest file {} doesn't look obfuscated",
             biggest_file.display()
         );
-        return Ok(DeobfuscateResult {
-            files_renamed,
-            extensions_fixed,
-        });
+        return Ok(files_renamed);
     }
 
     // Check if it's significantly bigger than the second biggest file
@@ -428,14 +517,12 @@ pub fn deobfuscate_files(directory: &Path, useful_name: &str) -> Result<Deobfusc
             biggest_size,
             second_biggest_size
         );
-        return Ok(DeobfuscateResult {
-            files_renamed,
-            extensions_fixed,
-        });
+        return Ok(files_renamed);
     }
 
     // Step 3: Rename the biggest file
-    let sanitized_name = sanitize_name(useful_name);
+    let sanitized = sanitize_name(useful_name);
+    let sanitized_name = without_extension(&sanitized, &ext);
     let new_name = format!("{}{}", sanitized_name, ext);
     let new_path = biggest_file
         .parent()
@@ -445,10 +532,7 @@ pub fn deobfuscate_files(directory: &Path, useful_name: &str) -> Result<Deobfusc
     // If the destination resolves to the same file we already have, there's
     // nothing to rename — and forcing _1 suffix would be worse than doing nothing.
     if new_path == biggest_file {
-        return Ok(DeobfuscateResult {
-            files_renamed,
-            extensions_fixed,
-        });
+        return Ok(files_renamed);
     }
     let new_path = get_unique_filename(&new_path);
 
@@ -461,13 +545,11 @@ pub fn deobfuscate_files(directory: &Path, useful_name: &str) -> Result<Deobfusc
     match rename_file(&biggest_file, &new_path) {
         Ok(_) => {
             files_renamed += 1;
+            on_rename(&biggest_file, &new_path);
         }
         Err(e) => {
             tracing::debug!("Failed to rename {}: {}", biggest_file.display(), e);
-            return Ok(DeobfuscateResult {
-                files_renamed,
-                extensions_fixed,
-            });
+            return Ok(files_renamed);
         }
     }
 
@@ -503,16 +585,16 @@ pub fn deobfuscate_files(directory: &Path, useful_name: &str) -> Result<Deobfusc
             );
 
             match rename_file(file, &new_path) {
-                Ok(_) => files_renamed += 1,
+                Ok(_) => {
+                    files_renamed += 1;
+                    on_rename(file, &new_path);
+                }
                 Err(e) => tracing::debug!("Failed to rename {}: {}", file.display(), e),
             }
         }
     }
 
-    Ok(DeobfuscateResult {
-        files_renamed,
-        extensions_fixed,
-    })
+    Ok(files_renamed)
 }
 
 #[cfg(test)]
@@ -532,5 +614,69 @@ mod tests {
     fn test_sanitize_name() {
         assert_eq!(sanitize_name("File/Name:Test"), "File_Name_Test");
         assert_eq!(sanitize_name("Normal_File-123"), "Normal_File-123");
+        assert_eq!(
+            sanitize_name("evil\u{202E}vkm.exe\u{2066}\u{200E}\u{061C}"),
+            "evilvkm.exe"
+        );
+        assert_eq!(name_from_title("\u{202E}.\u{200F}"), None);
+    }
+
+    /// Characters that show as nothing are dropped, so a title of only
+    /// them makes no name, and one hiding the extension keeps one.
+    #[test]
+    fn invisible_characters_are_dropped() {
+        for title in [
+            "\u{200B}",
+            "\u{FEFF}",
+            "\u{2060}",
+            "\u{200D}",
+            "\u{00AD}",
+            "\u{3164}",
+            "\u{FFA0}",
+            "\u{115F}\u{1160}",
+            "\u{FE0F}",
+            "\u{E0041}",
+            "\u{180E}",
+            " \u{200C} . ",
+        ] {
+            assert_eq!(name_from_title(title), None, "{title:?}");
+        }
+        assert_eq!(
+            sanitize_name("Na\u{200B}me\u{FEFF}.mkv\u{2060}"),
+            "Name.mkv"
+        );
+        assert_eq!(
+            without_extension(&sanitize_name("Name.mkv\u{200B}"), ".mkv"),
+            "Name"
+        );
+        assert_eq!(sanitize_name("a\u{2028}b"), "a_b");
+        // Visible text in any script stays.
+        assert_eq!(sanitize_name("日本語 Ünïcødé ㅎ"), "日本語 Ünïcødé ㅎ");
+    }
+
+    #[test]
+    fn a_title_keeps_one_extension() {
+        assert_eq!(without_extension("Name.mkv", ".mkv"), "Name");
+        assert_eq!(without_extension("Big Movie.MKV", ".mkv"), "Big Movie");
+        assert_eq!(without_extension("Name .mkv", ".mkv"), "Name");
+        assert_eq!(without_extension(".mkv", ".mkv"), ".mkv");
+        assert_eq!(without_extension("Name.mkv", ""), "Name.mkv");
+        assert_eq!(without_extension("Name.avi", ".mkv"), "Name.avi");
+        assert_eq!(without_extension("日本.mkv", ".mkv"), "日本");
+    }
+
+    #[test]
+    fn titles_become_safe_file_names() {
+        assert_eq!(
+            name_from_title(" Big Buck Bunny (2008) ").as_deref(),
+            Some("Big Buck Bunny (2008)")
+        );
+        assert_eq!(name_from_title("../a/b").as_deref(), Some("_a_b"));
+        assert_eq!(name_from_title("..").as_deref(), None);
+        assert_eq!(name_from_title("  \n").as_deref(), Some("_"));
+        assert_eq!(name_from_title("   ").as_deref(), None);
+        let long = "é".repeat(150);
+        let name = name_from_title(&long).unwrap();
+        assert!(name.len() <= 200 && long.starts_with(&name));
     }
 }

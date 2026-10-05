@@ -51,8 +51,9 @@ pub mod rar {
         true
     }
 
-    /// Check if a file is part of a RAR archive set (for deletion).
-    fn is_rar_related(filename: &str) -> bool {
+    /// Whether `filename` is a RAR volume: `.rar` (any `.partNN.rar`) or an
+    /// old-style `.rNN` split.
+    pub fn is_rar_related(filename: &str) -> bool {
         let lower = filename.to_lowercase();
         lower.ends_with(".rar") || OLD_STYLE_SPLIT_REGEX.is_match(filename)
     }
@@ -96,6 +97,19 @@ pub mod par2 {
                 .map(|name| !name.to_lowercase().contains(".vol"))
                 .unwrap_or(false)
     }
+}
+
+/// Files the user doesn't need: recovery data and release metadata
+/// (`.par2`, `.nfo`, `.sfv`, `.srr`) plus in-progress `.partial` files. A
+/// download whose only failures are in these is still a good download, and
+/// they are not listed as output.
+pub fn is_auxiliary_name(name: &str) -> bool {
+    let n = name.to_lowercase();
+    n.ends_with(".par2")
+        || n.ends_with(".nfo")
+        || n.ends_with(".sfv")
+        || n.ends_with(".srr")
+        || n.ends_with(".partial")
 }
 
 #[cfg(test)]
@@ -151,6 +165,15 @@ mod tests {
             rar::extract_base_name("my.file.name.part05.rar"),
             Some("my.file.name")
         );
+    }
+
+    #[test]
+    fn test_is_rar_related() {
+        assert!(rar::is_rar_related("a.rar"));
+        assert!(rar::is_rar_related("a.part01.RAR"));
+        assert!(rar::is_rar_related("a.r07"));
+        assert!(!rar::is_rar_related("a.mkv"));
+        assert!(!rar::is_rar_related("a.rx7"));
     }
 
     #[test]

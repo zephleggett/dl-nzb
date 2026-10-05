@@ -1,0 +1,8 @@
+// Copy to Local.xcconfig (git-ignored) and fill in your own. The team is the
+// ten-character ID under Xcode > Settings > Accounts > your Apple ID > your
+// team; a free Personal Team works for running on your own iPhone or iPad.
+// A Personal Team cannot use the shared bundle identifier, so give it one
+// nobody else on your team uses.
+
+DEVELOPMENT_TEAM = ABCDE12345
+PRODUCT_BUNDLE_IDENTIFIER = com.yourname.dl-nzb

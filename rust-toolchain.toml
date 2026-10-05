@@ -1,4 +1,5 @@
 [toolchain]
-channel = "stable"
+# The toolchain the apps, CI and clippy are checked with (MSRV stays 1.85).
+channel = "1.92.0"
 components = ["rustfmt", "clippy"]
 profile = "minimal"

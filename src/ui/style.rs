@@ -3,7 +3,7 @@
 //! Call sites name *intent* (`success`, `warn`, `path`, …) and never embed raw
 //! SGR escapes. Colour is resolved exactly once at startup via [`init`] and read
 //! everywhere through [`colors_enabled`], mirroring the global-state pattern used
-//! by `crate::output_mode` / `crate::shutdown`.
+//! by `crate::output_mode`.
 
 use std::sync::OnceLock;
 

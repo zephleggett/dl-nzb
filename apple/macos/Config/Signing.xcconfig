@@ -1,0 +1,21 @@
+// Signing for dl-nzb for Mac, both flavours. The committed values sign ad hoc
+// and build for no one in particular; your own team goes in Local.xcconfig
+// beside this file, which git ignores (copy Local.xcconfig.example). Set it
+// there rather than in Xcode's Signing & Capabilities, which would write it
+// into the committed project file.
+//
+// project.yml keeps every signing setting out of the targets themselves, so
+// these (and Local.xcconfig's) are the ones that apply.
+
+CODE_SIGN_STYLE = Manual
+CODE_SIGN_IDENTITY = -
+DEVELOPMENT_TEAM =
+PRODUCT_BUNDLE_IDENTIFIER = com.zephleggett.dl-nzb
+
+// The Direct flavour's entitlements. An ad hoc signature has no Team ID, and
+// the hardened runtime's library validation then refuses Sparkle.framework,
+// so the ad hoc variant turns library validation off. A team build uses
+// dl-nzb-Direct.entitlements, which keeps it on.
+DLNZB_DIRECT_ENTITLEMENTS = Resources/dl-nzb-Direct-AdHoc.entitlements
+
+#include? "Local.xcconfig"
