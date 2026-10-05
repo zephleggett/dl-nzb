@@ -232,12 +232,13 @@ struct PresentationTests {
 
   // MARK: Files
 
-  @Test("NZBs are told by their extension and declared as XML")
+  /// Not whether the type conforms to XML: that comes from the apps'
+  /// Info.plist, so outside them it depends on what the Mac has installed.
+  @Test("NZBs are told by their extension and have the apps' type")
   func nzbType() {
     #expect(URL(filePath: "/tmp/Sintel.NZB").isNZB)
     #expect(!URL(filePath: "/tmp/Sintel.xml").isNZB)
     #expect(UTType.nzb.identifier == "com.zephleggett.dl-nzb.nzb")
-    #expect(UTType.nzb.conforms(to: .xml))
   }
 
   @Test("The main file is the largest one, when it holds enough of the download and is there")
