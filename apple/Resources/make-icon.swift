@@ -10,7 +10,7 @@
 //
 // The picture is a download arrow assembled from parts: three segment bars
 // for the shaft, then a solid head, the way an NZB's articles arrive one by one
-// and become a file. Orange, yellow and purple segments over a green head, on
+// and become a file. Orange, yellow and cyan segments over a green head, on
 // #2d2d2d: base16-eighties, the colours of the CLI and the site. Flat: no
 // glass, no shadow, no gradients. The system only rounds and rims the square.
 //
@@ -76,7 +76,7 @@ let ground = RGB(hex: 0x2D2D2D)      // base16-eighties base00
 let groundDark = RGB(hex: 0x1F1F1F)  // a step darker for the Dark appearance
 let orange = RGB(hex: 0xF99157)      // base16-eighties base09
 let yellow = RGB(hex: 0xFFCC66)      // base0A
-let purple = RGB(hex: 0xCC99CC)      // base0E
+let cyan = RGB(hex: 0x66CCCC)        // base0C
 let green = RGB(hex: 0x99CC99)       // base0B, the app's colour for done
 let white = RGB(hex: 0xFFFFFF)
 
@@ -96,9 +96,9 @@ let shoulderRadius: CGFloat = 22
 let tipRadius: CGFloat = 34
 let arrowTop: CGFloat = 189
 
-// Top to bottom. Purple sits opposite the green head on the colour wheel, so
-// the last segment stays apart from it, and no three run in hue order.
-let segmentColors = [orange, yellow, purple]
+// Top to bottom. The last segment is cyan, not green, so it stays a piece of
+// its own above the head.
+let segmentColors = [orange, yellow, cyan]
 
 let segments: [CGRect] = (0..<3).map { index in
   CGRect(x: centreX - shaftWidth / 2, y: arrowTop + CGFloat(index) * (segmentHeight + segmentGap),
