@@ -3,23 +3,23 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>dl-nzb: download from your Usenet server with an NZB</title>
-<meta name="description" content="dl-nzb downloads from your Usenet server with an NZB, then repairs and extracts. A native app for Mac, iPhone and iPad, and a command line tool." />
+<title>dl-nzb: download, repair and extract NZBs</title>
+<meta name="description" content="Download, repair and extract NZB files quickly. Native apps for Mac, iPhone and iPad and a command line tool, on one Rust core with our own optimized PAR2." />
 <link rel="canonical" href="https://dl-nzb.com/" />
 <meta name="color-scheme" content="dark" />
 <meta name="theme-color" content="#2d2d2d" />
 <meta property="og:type" content="website" />
 <meta property="og:site_name" content="dl-nzb" />
-<meta property="og:title" content="dl-nzb: download from your Usenet server with an NZB" />
-<meta property="og:description" content="A native app for Mac, iPhone and iPad, and a command line tool. It downloads, repairs and extracts." />
+<meta property="og:title" content="dl-nzb: download, repair and extract NZBs" />
+<meta property="og:description" content="Native apps for Mac, iPhone and iPad and a command line tool, on one Rust core with our own optimized PAR2." />
 <meta property="og:url" content="https://dl-nzb.com/" />
 <meta property="og:image" content="https://dl-nzb.com/media/og.png" />
 <meta property="og:image:width" content="1200" />
 <meta property="og:image:height" content="630" />
 <meta property="og:image:alt" content="The dl-nzb Mac app repairing a download." />
 <meta name="twitter:card" content="summary_large_image" />
-<meta name="twitter:title" content="dl-nzb: download from your Usenet server with an NZB" />
-<meta name="twitter:description" content="A native app for Mac, iPhone and iPad, and a command line tool. It downloads, repairs and extracts." />
+<meta name="twitter:title" content="dl-nzb: download, repair and extract NZBs" />
+<meta name="twitter:description" content="Native apps for Mac, iPhone and iPad and a command line tool, on one Rust core with our own optimized PAR2." />
 <meta name="twitter:image" content="https://dl-nzb.com/media/og.png" />
 <link rel="icon" type="image/png" href="favicon.png" />
 <link rel="stylesheet" href="css/styles.css" />
@@ -46,9 +46,9 @@
   <div class="hero">
     <div class="hero-copy">
       <h1 class="mark"><img src="media/icon.png" alt="" width="256" height="256" />dl-nzb</h1>
-      <p class="tagline">Download from your Usenet server with an NZB.</p>
-      <p class="lede">A native app for Mac, iPhone and iPad, and a command line tool.
-        No daemon, no web UI.</p>
+      <p class="tagline">Download, repair and extract NZB files, quickly.</p>
+      <p class="lede">Native apps for Mac, iPhone and iPad, and a command line tool.
+        One Rust core under all three, with our own optimized PAR2.</p>
       <div class="cta-row">
         <a class="btn btn--primary" href="https://github.com/zephleggett/dl-nzb/releases/latest">Download for Mac</a>
         <!-- TODO(owner): TestFlight code. Replace XXXXXXXX (twice on this page), as in the README. -->
@@ -63,7 +63,6 @@
         <a href="media/mac-demo.mp4">Download the Mac demo</a>.
       </video>
       <figcaption>
-        <span>The Mac app. Simulated demo, sped up.</span>
         <button type="button" class="ctrl" data-video="#heroVideo" hidden>play</button>
       </figcaption>
     </figure>
@@ -75,7 +74,7 @@
     <ul class="bullets">
       <li>A Usenet account: the server, username and password from your provider.</li>
       <li>An NZB file.</li>
-      <li>One of these:</li>
+      <li>A Mac, an iPhone or iPad, or any computer for the command line:</li>
     </ul>
     <dl class="ledger">
       <div>
@@ -98,16 +97,15 @@
     <h2 id="h-apps">get the app</h2>
 
     <h3>Mac</h3>
-    <p>Download the DMG, drag dl-nzb to Applications, and open it.
-      It offers each new version when one is out.</p>
+    <p>Download the DMG and drag dl-nzb to Applications. It keeps itself up to date.</p>
     <p class="links">
       <a href="https://github.com/zephleggett/dl-nzb/releases/latest">Download for Mac</a>
       <a href="https://github.com/zephleggett/dl-nzb/blob/main/docs/mac-app.md">Mac setup guide</a>
     </p>
 
     <h3>iPhone and iPad</h3>
-    <p>Install it from TestFlight. Downloads keep going in the background and land
-      in the Files app.</p>
+    <p>Get it on TestFlight. Downloads keep going in the background, and your files
+      show up in the Files app.</p>
     <p class="links">
       <a class="badge" href="https://testflight.apple.com/join/XXXXXXXX"><img src="media/testflight-badge.svg" alt="Available on TestFlight" width="135" height="40" /></a>
       <a href="https://github.com/zephleggett/dl-nzb/blob/main/docs/iphone-app.md">iPhone and iPad setup guide</a>
@@ -119,7 +117,6 @@
         <source src="media/iphone-demo.mp4" type="video/mp4" />
         <a href="media/iphone-demo.mp4">Download the iPhone demo</a>.
       </video>
-      <figcaption>The iPhone app. Simulated demo, sped up.</figcaption>
     </figure>
   </section>
 
@@ -128,30 +125,38 @@
     <h2 id="h-features">what it does</h2>
     <dl class="features">
       <div>
+        <dt>Fast</dt>
+        <dd>Many connections at once and SIMD decoding, with little memory.</dd>
+      </div>
+      <div>
         <dt>Repairs</dt>
-        <dd>Fixes damaged downloads with PAR2, using
-          <a href="https://github.com/zephleggett/par2-rs">par2-rs</a>, a pure-Rust PAR2 library.
-          Recovery data downloads only when it's needed.</dd>
+        <dd>Fixes damaged downloads with
+          <a href="https://github.com/zephleggett/par2-rs">par2-rs</a>, our own optimized PAR2 in Rust.
+          It only fetches recovery data when a download needs it.</dd>
       </div>
       <div>
         <dt>Extracts</dt>
-        <dd>Unpacks RAR archives, including password-protected ones.</dd>
+        <dd>Unpacks RAR archives, password-protected ones too.</dd>
       </div>
       <div>
         <dt>Checks first</dt>
-        <dd>Asks the server which articles it has, and warns before a download that can't be repaired.</dd>
+        <dd>Checks what the server has before downloading, and tells you when a release can't be repaired.</dd>
       </div>
       <div>
         <dt>Resumes</dt>
-        <dd>Quit mid-download. Next time it picks up where it stopped.</dd>
+        <dd>Quit any time. It picks up where it left off.</dd>
       </div>
       <div>
         <dt>Real file names</dt>
-        <dd>Gives scrambled file names their real names back, from the PAR2 data.</dd>
+        <dd>Puts back the real names when a release scrambles them.</dd>
       </div>
       <div>
         <dt>Speed limit</dt>
         <dd>Caps the download speed so the rest of your network stays usable.</dd>
+      </div>
+      <div>
+        <dt>One engine</dt>
+        <dd>The Mac and iPhone apps and the command line run the same Rust core.</dd>
       </div>
     </dl>
   </section>

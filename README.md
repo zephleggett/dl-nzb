@@ -2,7 +2,7 @@
 
 <h1 align="center">dl-nzb</h1>
 
-<p align="center">Download from your Usenet server with an NZB. No daemon, no web UI.</p>
+<p align="center">Download, repair and extract NZB files quickly: native apps for Mac, iPhone and iPad, and a command line tool, on one Rust core with our own optimized PAR2.</p>
 
 ## Quick start
 
