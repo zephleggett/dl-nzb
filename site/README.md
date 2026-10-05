@@ -27,6 +27,8 @@ npx wrangler dev                               # from the repo root; uses wrangl
 ## Deploy
 
 Cloudflare static assets, from the repo root: `npx wrangler deploy`.
+`wrangler.jsonc` attaches dl-nzb.com and www.dl-nzb.com as custom domains
+and keeps the workers.dev address on.
 
 ## Notes
 

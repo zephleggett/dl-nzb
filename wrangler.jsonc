@@ -1,7 +1,12 @@
 {
   "name": "dl-nzb",
   "compatibility_date": "2026-06-15",
+  "workers_dev": true,
   "assets": {
     "directory": "./site"
-  }
+  },
+  "routes": [
+    { "pattern": "dl-nzb.com", "custom_domain": true },
+    { "pattern": "www.dl-nzb.com", "custom_domain": true }
+  ]
 }
