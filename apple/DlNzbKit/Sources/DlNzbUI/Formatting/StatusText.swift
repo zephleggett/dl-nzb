@@ -182,7 +182,7 @@ public enum StatusText {
   }
 
   /// `queueSummary` for the queue as it stands, leaving out `excluded` (the
-  /// item the menu bar names above it).
+  /// item the menu bar names above it). The reader updates with the speed.
   @MainActor
   public static func queueSummary(
     for queue: DownloadQueue, excluding excluded: DownloadItem.ID? = nil, locale: Locale = .autoupdatingCurrent
@@ -192,11 +192,7 @@ public enum StatusText {
       downloading: items.count(where: \.usesNetwork),
       processing: items.compactMap { $0.phase.flatMap { $0.usesNetwork ? nil : $0 } },
       queued: items.count(where: \.isQueued), paused: items.count(where: \.isPaused), isPaused: queue.isPaused,
-      speed: items.reduce(0) { total, item in
-        guard item.phase?.isTransfer == true, let speed = item.progress?.speedBytesPerSecond, speed.isFinite else { return total }
-        return total + max(speed, 0)
-      },
-      locale: locale)
+      speed: queue.speed(excluding: excluded), locale: locale)
   }
 
   /// "1 extracting", "2 verifying", or "2 processing" when they differ.

@@ -12,7 +12,7 @@ struct InspectorPanel: View {
   var body: some View {
     let selected = app.items(app.selection)
     if selected.count == 1, let item = selected.first {
-      InspectorView(item: item)
+      LiveItem(item, in: queue) { InspectorView(item: $0) }
     } else {
       // Quiet, as Xcode's inspector is: a line of secondary text.
       Text(selected.isEmpty ? "No Selection" : "\(selected.count.formatted()) Downloads Selected")

@@ -6,12 +6,13 @@ import SwiftUI
 /// The one window: the list of downloads with a trailing inspector, the
 /// toolbar, the drop target, and every alert and sheet the queue asks for.
 ///
-/// Its body reads none of the items: progress changes them several times a
-/// second, which should re-render the list, the subtitle and the toolbar, not
-/// the whole window with its inspector, sheets and alerts.
+/// Its body reads none of the items, so a change in the list redraws the
+/// list, the subtitle and the toolbar, not the whole window with its
+/// inspector, sheets and alerts.
 struct MainWindow: View {
   @Environment(MacApp.self) private var app
   @Environment(\.openWindow) private var openWindow
+  @Environment(\.openSettings) private var openSettings
   @State private var isDropTargeted = false
 
   var body: some View {
@@ -43,7 +44,10 @@ struct MainWindow: View {
       .modifier(QueueAlerts())
       .sheet(isPresented: $app.isOnboarding) { OnboardingSheet() }
       .sheet(item: $app.passwordRequest) { PasswordSheet(request: $0) }
-      .onAppear { app.openWindowAction = openWindow }
+      .onAppear {
+        app.openWindowAction = openWindow
+        app.openSettingsAction = openSettings
+      }
   }
 }
 

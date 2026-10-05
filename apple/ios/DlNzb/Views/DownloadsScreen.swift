@@ -30,7 +30,7 @@ struct DownloadsScreen: View {
       }
       Section {
         ForEach(queue.items) { item in
-          DownloadListRow(item: item, prompts: $prompts)
+          LiveItem(item, in: queue) { DownloadListRow(item: $0, prompts: $prompts) }
         }
       }
       .listSectionSeparator(.hidden, edges: .top)
@@ -51,17 +51,8 @@ struct DownloadsScreen: View {
       }
     }
     .navigationTitle("Downloads")
-    .navigationSubtitle(subtitle)
+    .modifier(QueueSubtitle())
     .toolbar { toolbar }
-  }
-
-  /// "2 downloading · 84 MB/s", "Paused · 3 waiting", or nothing; and
-  /// while the cellular question holds the queue, why it is not moving.
-  private var subtitle: String {
-    if runtime.holds.isHolding(.cellular) {
-      return queue.queuedCount > 0 || queue.pausedCount > 0 ? "Waiting for Wi-Fi" : ""
-    }
-    return StatusText.queueSummary(for: queue)
   }
 
   @ToolbarContentBuilder private var toolbar: some ToolbarContent {
@@ -93,6 +84,26 @@ struct DownloadsScreen: View {
       }
       .buttonStyle(.glassProminent)
     }
+  }
+}
+
+/// "2 downloading · 84 MB/s", "Paused · 3 waiting", or nothing; and while
+/// the cellular question holds the queue, why it is not moving. Its own
+/// modifier: the speed changes twice a second, and only the subtitle should
+/// redraw with it.
+private struct QueueSubtitle: ViewModifier {
+  @Environment(AppRuntime.self) private var runtime
+
+  func body(content: Content) -> some View {
+    content.navigationSubtitle(subtitle)
+  }
+
+  private var subtitle: String {
+    let queue = runtime.queue
+    if runtime.holds.isHolding(.cellular) {
+      return queue.queuedCount > 0 || queue.pausedCount > 0 ? "Waiting for Wi-Fi" : ""
+    }
+    return StatusText.queueSummary(for: queue)
   }
 }
 

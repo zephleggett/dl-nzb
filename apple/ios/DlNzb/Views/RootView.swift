@@ -65,7 +65,7 @@ private struct DetailColumn: View {
 
   var body: some View {
     if let id = runtime.selection, let item = runtime.queue.item(id) {
-      DownloadDetailView(item: item)
+      LiveItem(item, in: runtime.queue) { DownloadDetailView(item: $0) }
     } else {
       ContentUnavailableView("Select a Download", systemImage: "arrow.down.circle", description: Text("Its progress, files and details appear here."))
     }

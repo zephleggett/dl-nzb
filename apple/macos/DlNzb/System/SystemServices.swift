@@ -11,6 +11,8 @@ final class SystemServices {
   let sleep = SleepGuard()
   let notifier = Notifier()
   private var watcher: Watcher?
+  private var statusMenu: StatusMenu?
+  private var statusWatcher: Watcher?
 
   func start(app: MacApp) {
     let queue = app.queue
@@ -32,6 +34,14 @@ final class SystemServices {
       self.finder.update(items: queue.items)
       self.sleep.update(active: queue.activeCount > 0, preventSleep: settings.preventSleep)
     }
+    // Apart from the watcher above, which runs with the download's numbers:
+    // the menu bar item changes only with the setting and the queue's state.
+    let statusMenu = StatusMenu(app: app)
+    self.statusMenu = statusMenu
+    statusWatcher = Watcher { [weak queue, weak settings] in
+      guard let queue, let settings else { return }
+      statusMenu.update(shown: settings.showInMenuBar, active: queue.activeCount > 0)
+    }
   }
 
   /// Quitting: the Dock tile back to the icon, Finder's bars gone, the
@@ -39,6 +49,9 @@ final class SystemServices {
   func stop() {
     watcher?.stop()
     watcher = nil
+    statusWatcher?.stop()
+    statusWatcher = nil
+    statusMenu?.update(shown: false, active: false)
     dockTile.reset()
     finder.unpublishAll()
     sleep.end()

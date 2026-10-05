@@ -52,6 +52,8 @@ final class MacApp: OpenTarget {
   var settingsPane: SettingsPane = .general
   /// The file Quick Look is showing.
   var previewURL: URL?
+  /// What the menu bar's commands show, replaced only when it changes.
+  private(set) var menuState = MenuState()
 
   /// Something modal is up in the main window, so the Downloads menu's
   /// commands (⌫, ⌘⌫ among them) leave the keyboard to it.
@@ -69,6 +71,10 @@ final class MacApp: OpenTarget {
   /// The main window's openWindow, kept so Finder opens, the Dock and the
   /// menu bar item can bring the window back after it was closed.
   @ObservationIgnored var openWindowAction: OpenWindowAction?
+  /// The main window's openSettings, for the menu bar item's Settings…:
+  /// AppKit's own way no longer opens a SwiftUI Settings scene.
+  @ObservationIgnored var openSettingsAction: OpenSettingsAction?
+  @ObservationIgnored private var menuStateWatcher: Watcher?
   @ObservationIgnored private var isLaunched = false
 
   private static let showsInspectorKey = "showsInspector"
@@ -92,6 +98,12 @@ final class MacApp: OpenTarget {
     #if DIRECT
       updates = UpdateController(enabled: !testing)
     #endif
+    menuStateWatcher = Watcher { [weak self] in self?.updateMenuState() }
+  }
+
+  private func updateMenuState() {
+    let state = MenuState(app: self)
+    if state != menuState { menuState = state }
   }
 
   /// Builds the model with the engine for this launch.
@@ -448,6 +460,12 @@ final class MacApp: OpenTarget {
   /// Try Again after a server problem.
   func retryServer() {
     queue.retryServer()
+  }
+
+  /// Settings… in the menu bar item's menu.
+  func showSettings() {
+    NSApp.activate()
+    openSettingsAction?()
   }
 
   func openAcknowledgements() {

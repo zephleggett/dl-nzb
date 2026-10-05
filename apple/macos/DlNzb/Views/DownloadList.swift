@@ -16,7 +16,7 @@ struct DownloadList: View {
     @Bindable var app = app
     List(selection: $app.selection) {
       ForEach(queue.items) { item in
-        DownloadRow(item: item)
+        LiveItem(item, in: queue) { DownloadRow(item: $0) }
           .moveDisabled(!item.isQueued)
       }
       .onMove { queue.move(fromOffsets: $0, toOffset: $1) }
@@ -28,7 +28,7 @@ struct DownloadList: View {
     .onAppear { isFocused = true }
     .contextMenu(forSelectionType: DownloadItem.ID.self) { ids in
       if !ids.isEmpty {
-        DownloadItemMenu(app: app, ids: ids)
+        DownloadItemMenu(app: app, commands: ItemCommands(app: app, ids: ids))
       }
     } primaryAction: { ids in
       app.primaryAction(ids)
@@ -53,49 +53,51 @@ struct DownloadList: View {
 /// Downloads menu (which keeps every item, disabled, and adds the shortcuts).
 struct DownloadItemMenu: View {
   let app: MacApp
-  let ids: Set<DownloadItem.ID>
+  let commands: ItemCommands
   /// The Downloads menu: shortcuts, one name for Copy Name, and Quick Look
   /// that closes again as ⌘Y does.
   var inMenuBar = false
 
+  private var ids: Set<DownloadItem.ID> { commands.ids }
+
   var body: some View {
     Button("Show in Finder") { app.reveal(ids) }
       .keyboardShortcut(shortcut("r", [.command, .shift]))
-      .disabled(!app.canReveal(ids))
+      .disabled(!commands.canReveal)
     Button("Open") { app.openFiles(ids) }
       .keyboardShortcut(shortcut(.downArrow))
-      .disabled(!app.canOpenFiles(ids))
+      .disabled(!commands.canOpen)
     Button("Quick Look") {
       if inMenuBar { app.toggleQuickLook(ids) } else { app.showQuickLook(ids) }
     }
     .keyboardShortcut(shortcut("y"))
-    .disabled(app.quickLookURL(for: ids) == nil)
+    .disabled(!commands.canQuickLook)
     Button(inMenuBar || ids.count == 1 ? "Copy Name" : "Copy Names") { app.copyNames(ids) }
       .disabled(ids.isEmpty)
 
     Divider()
 
-    if app.canResume(ids) && !app.canPause(ids) {
+    if commands.canResume && !commands.canPause {
       Button("Resume") { app.resume(ids) }
     } else {
       Button("Pause") { app.pause(ids) }
-        .disabled(!app.canPause(ids))
+        .disabled(!commands.canPause)
     }
     Button("Stop") { app.requestStop(ids) }
       .keyboardShortcut(shortcut("."))
-      .disabled(!app.canStop(ids))
-    Button(app.retryTitle(ids)) { app.retry(ids) }
+      .disabled(!commands.canStop)
+    Button(commands.retryTitle) { app.retry(ids) }
       .keyboardShortcut(shortcut("r"))
-      .disabled(!app.canRetry(ids))
-    if inMenuBar || app.canEnterPassword(ids) {
+      .disabled(!commands.canRetry)
+    if inMenuBar || commands.canEnterPassword {
       Button("Enter Password…") {
         if let id = ids.first { app.requestPassword(id) }
       }
-      .disabled(!app.canEnterPassword(ids))
+      .disabled(!commands.canEnterPassword)
     }
-    if inMenuBar || app.canDownloadAnyway(ids) {
+    if inMenuBar || commands.canDownloadAnyway {
       Button("Download Anyway") { app.downloadAnyway(ids) }
-        .disabled(!app.canDownloadAnyway(ids))
+        .disabled(!commands.canDownloadAnyway)
     }
 
     Divider()

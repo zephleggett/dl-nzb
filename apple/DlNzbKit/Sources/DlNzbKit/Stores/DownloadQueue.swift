@@ -52,7 +52,21 @@ public struct DuplicateNZB: Sendable, Equatable, Identifiable {
 @MainActor
 @Observable
 public final class DownloadQueue {
-  public private(set) var items: [DownloadItem] = []
+  /// Every download, in the order they take turns. Reading it subscribes to
+  /// the list and to each item's state, not to its progress: a progress
+  /// event (four a second while a job runs) updates the item here without
+  /// telling anyone but its signal (`live(_:)`). So the list, the menus and
+  /// the toolbar redraw when an item changes state, and only what shows the
+  /// numbers redraws with them. The values read here are always current.
+  public private(set) var items: [DownloadItem] {
+    get {
+      access(keyPath: \.items)
+      return storedItems
+    }
+    set {
+      withMutation(keyPath: \.items) { storedItems = newValue }
+    }
+  }
   /// Pause All is on, or a server problem paused everything. Nothing starts
   /// by itself; an item the user resumes still runs.
   public private(set) var isPaused = false
@@ -77,7 +91,15 @@ public final class DownloadQueue {
   @ObservationIgnored public var onItemFinished: (@MainActor (DownloadItem) -> Void)?
   /// The clock for finish dates and retention; tests move it.
   @ObservationIgnored public var now: () -> Date = { Date() }
+  /// How often an item's new numbers are announced (`live(_:)`). The engine
+  /// reports four times a second, faster than anyone reads them, and each
+  /// announcement redraws a row, the subtitle, the Dock tile and Finder's
+  /// bar. Tests set zero.
+  @ObservationIgnored public var progressInterval: Duration = .milliseconds(500)
 
+  @ObservationIgnored private var storedItems: [DownloadItem] = []
+  /// Each item's progress signal, made when something first reads it.
+  @ObservationIgnored private var signals: [UUID: ProgressSignal] = [:]
   @ObservationIgnored private let isLive: Bool
   /// Restored and allowed to start jobs (after the engine has its settings).
   @ObservationIgnored private var isActive = false
@@ -139,6 +161,33 @@ public final class DownloadQueue {
     items.firstIndex { $0.id == id }
   }
 
+  // MARK: Progress
+
+  /// The item as it is now, with its latest progress, for a view that shows
+  /// the numbers: the reader updates with them (every `progressInterval`
+  /// while the item runs), as well as with the list. The item itself when
+  /// it has left the list.
+  public func live(_ item: DownloadItem) -> DownloadItem {
+    guard let current = items.first(where: { $0.id == item.id }) else { return item }
+    signal(for: item.id).observe()
+    return current
+  }
+
+  /// Subscribes the reader to the progress of every running item, for the
+  /// aggregates that add it up.
+  private func observeRunningProgress() {
+    for item in items where item.isRunning {
+      signal(for: item.id).observe()
+    }
+  }
+
+  private func signal(for id: UUID) -> ProgressSignal {
+    if let signal = signals[id] { return signal }
+    let signal = ProgressSignal()
+    signals[id] = signal
+    return signal
+  }
+
   // MARK: Aggregates for the Dock, the menu bar and the window subtitle
 
   /// Items running in any phase.
@@ -155,9 +204,14 @@ public final class DownloadQueue {
   public var unfinishedCount: Int { items.count(where: \.isUnfinished) }
 
   /// Bytes a second across every transfer.
-  public var aggregateSpeed: Double {
-    items.reduce(0) { total, item in
-      guard item.phase?.isTransfer == true, let speed = item.progress?.speedBytesPerSecond, speed.isFinite else { return total }
+  public var aggregateSpeed: Double { speed() }
+
+  /// Bytes a second across every transfer but `excluded`'s. The reader
+  /// updates with the running items' progress.
+  public func speed(excluding excluded: DownloadItem.ID? = nil) -> Double {
+    observeRunningProgress()
+    return items.reduce(0) { total, item in
+      guard item.id != excluded, item.phase?.isTransfer == true, let speed = item.progress?.speedBytesPerSecond, speed.isFinite else { return total }
       return total + max(speed, 0)
     }
   }
@@ -166,6 +220,7 @@ public final class DownloadQueue {
   /// weighted by size) that has downloaded. Nil when nothing is running, which
   /// is when the Dock tile and Finder progress go away.
   public var overallFraction: Double? {
+    observeRunningProgress()
     let batch = items.filter { $0.isRunning || $0.isQueued || $0.isPaused }
     guard batch.contains(where: \.isRunning) else { return nil }
     let weights = batch.map { Double(max($0.totalBytes, 1)) }
@@ -576,6 +631,7 @@ public final class DownloadQueue {
   private func detach(_ id: UUID, folder fate: FolderFate) {
     guard isLive, let index = index(of: id) else { return }
     let item = items.remove(at: index)
+    signals[id] = nil
     if !interrupt(id, holdingSlot: item.usesNetwork, for: .remove(fate, folder: item.outputDirectory)) {
       dispose(item.outputDirectory, fate)
     }
@@ -689,7 +745,10 @@ public final class DownloadQueue {
     guard !leaving.isEmpty else { return }
     let ids = Set(leaving.map(\.id))
     items.removeAll { ids.contains($0.id) }
-    for id in ids { storage.removeNZB(for: id) }
+    for id in ids {
+      storage.removeNZB(for: id)
+      signals[id] = nil
+    }
     scheduleSave()
   }
 
@@ -840,11 +899,19 @@ public final class DownloadQueue {
       scheduleSave()
       schedule()
     case .progress(let progress):
-      items[index].progress = progress
-      note(progress.phase, at: index)
-      if case .running(let current) = items[index].state, current != progress.phase {
-        items[index].state = .running(progress.phase)
+      let item = storedItems[index]
+      if item.visitedPhases.contains(progress.phase) && (item.phase ?? progress.phase) == progress.phase {
+        // Only the numbers changed: they go to the list unannounced, and to
+        // whoever shows them through the item's signal.
+        storedItems[index].progress = progress
+      } else {
+        items[index].progress = progress
+        note(progress.phase, at: index)
+        if case .running(let current) = items[index].state, current != progress.phase {
+          items[index].state = .running(progress.phase)
+        }
       }
+      signal(for: id).tick(every: progressInterval)
       saveIfDue()
     case .availability(let availability):
       items[index].availability = availability
@@ -1113,6 +1180,41 @@ public final class DownloadQueue {
     queue.serverProblem = serverProblem
     queue.unresolvedServerProblem = serverProblem
     return queue
+  }
+}
+
+/// Ticks when one item has new numbers, at most once per interval. Reading
+/// it is how a view subscribes to them (`DownloadQueue.live`).
+@MainActor
+@Observable
+final class ProgressSignal {
+  private var ticks = 0
+  @ObservationIgnored private var lastTick: ContinuousClock.Instant?
+  @ObservationIgnored private var trailingTick: Task<Void, Never>?
+
+  func observe() {
+    _ = ticks
+  }
+
+  /// New numbers: announced now, or, within `interval` of the last
+  /// announcement, when it runs out, so the latest numbers always show.
+  func tick(every interval: Duration) {
+    guard trailingTick == nil else { return }
+    let now = ContinuousClock.now
+    guard let lastTick, now - lastTick < interval else {
+      announce()
+      return
+    }
+    trailingTick = Task { [weak self] in
+      try? await Task.sleep(for: interval - (now - lastTick))
+      self?.trailingTick = nil
+      self?.announce()
+    }
+  }
+
+  private func announce() {
+    lastTick = .now
+    ticks &+= 1
   }
 }
 

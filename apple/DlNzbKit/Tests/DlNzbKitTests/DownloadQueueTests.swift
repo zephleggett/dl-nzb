@@ -1,4 +1,6 @@
 import Foundation
+import Observation
+import Synchronization
 import Testing
 
 @testable import DlNzbKit
@@ -681,6 +683,79 @@ struct DownloadQueueTests {
     #expect(DownloadQueue.preview(items: [PreviewData.finished, PreviewData.queued]).overallFraction == nil)
   }
 
+  // MARK: Progress and redrawing
+
+  @Test("Progress reaches the item without redrawing what reads the list; a new phase does")
+  func progressLeavesTheListAlone() throws {
+    let queue = DownloadQueue.preview(items: [PreviewData.downloading, PreviewData.queued])
+    let id = PreviewData.downloading.id
+    var progress = try #require(PreviewData.downloading.progress)
+    let listChanges = ChangeCount()
+    withObservationTracking {
+      _ = queue.items
+    } onChange: {
+      listChanges.increment()
+    }
+
+    progress.bytesDone += 1_000_000
+    queue.apply(.progress(progress), to: id)
+    #expect(listChanges.value == 0)
+    #expect(queue.item(id)?.progress == progress)
+
+    progress.phase = .verifying
+    queue.apply(.progress(progress), to: id)
+    #expect(listChanges.value == 1)
+    #expect(queue.item(id)?.state == .running(.verifying))
+  }
+
+  @Test("What shows an item hears its numbers at most once an interval, and the latest last")
+  func liveItemHearsProgress() async throws {
+    let queue = DownloadQueue.preview(items: [PreviewData.downloading])
+    queue.progressInterval = .milliseconds(200)
+    let item = PreviewData.downloading
+    var progress = try #require(item.progress)
+    let heard = ChangeCount()
+    func watch() {
+      withObservationTracking {
+        _ = queue.live(item)
+      } onChange: {
+        heard.increment()
+      }
+    }
+
+    watch()
+    progress.bytesDone += 1
+    queue.apply(.progress(progress), to: item.id)
+    #expect(heard.value == 1)
+
+    watch()
+    progress.bytesDone += 1
+    queue.apply(.progress(progress), to: item.id)
+    progress.bytesDone += 1
+    queue.apply(.progress(progress), to: item.id)
+    #expect(heard.value == 1)
+    #expect(await eventually { heard.value == 2 })
+    #expect(queue.live(item).progress == progress)
+  }
+
+  @Test("The speed and the overall fraction follow every running item's numbers")
+  func aggregatesHearProgress() throws {
+    let queue = DownloadQueue.preview(items: [PreviewData.downloading, PreviewData.extracting])
+    queue.progressInterval = .zero
+    var progress = try #require(PreviewData.extracting.progress)
+    let heard = ChangeCount()
+    withObservationTracking {
+      _ = queue.aggregateSpeed
+      _ = queue.overallFraction
+    } onChange: {
+      heard.increment()
+    }
+
+    progress.fraction += 0.1
+    queue.apply(.progress(progress), to: PreviewData.extracting.id)
+    #expect(heard.value == 1)
+  }
+
   @Test("Pause All is offered only while something can pause, Resume All only while something is held")
   func pauseAndResumeAllAvailability() {
     let running = DownloadQueue.preview(items: [PreviewData.downloading, PreviewData.finished])
@@ -831,5 +906,16 @@ struct AppModelTests {
     model.launch()
     #expect(!model.isLaunched)
     #expect(model.queue.items == PreviewData.items)
+  }
+}
+
+/// Counts observation callbacks, which come on whatever thread made the change.
+final class ChangeCount: Sendable {
+  private let count = Mutex(0)
+
+  var value: Int { count.withLock { $0 } }
+
+  func increment() {
+    count.withLock { $0 += 1 }
   }
 }
