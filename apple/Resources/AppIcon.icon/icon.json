@@ -29,7 +29,7 @@
               }
             }
           ],
-          "glass" : true,
+          "glass" : false,
           "image-name" : "head.svg",
           "name" : "head",
           "position" : {
@@ -54,7 +54,7 @@
               }
             }
           ],
-          "glass" : true,
+          "glass" : false,
           "image-name" : "segment-1.svg",
           "name" : "segment-1",
           "position" : {
@@ -79,7 +79,7 @@
               }
             }
           ],
-          "glass" : true,
+          "glass" : false,
           "image-name" : "segment-2.svg",
           "name" : "segment-2",
           "position" : {
@@ -104,7 +104,7 @@
               }
             }
           ],
-          "glass" : true,
+          "glass" : false,
           "image-name" : "segment-3.svg",
           "name" : "segment-3",
           "position" : {
@@ -116,16 +116,10 @@
           }
         }
       ],
-      "lighting" : "individual",
       "name" : "Arrow",
       "shadow" : {
-        "kind" : "neutral",
-        "opacity" : 0.5
-      },
-      "specular" : false,
-      "translucency" : {
-        "enabled" : true,
-        "value" : 0.2
+        "kind" : "none",
+        "opacity" : 0
       }
     }
   ],

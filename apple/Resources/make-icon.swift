@@ -11,8 +11,8 @@
 // The picture is a download arrow assembled from parts: three segment bars
 // for the shaft, then a solid head, the way an NZB's articles arrive one by one
 // and become a file. The segments run yellow, green and cyan into a cyan head,
-// on #2d2d2d: base16-eighties, the colours of the CLI and the site. Flat, no
-// gradients; the system supplies the glass.
+// on #2d2d2d: base16-eighties, the colours of the CLI and the site. Flat: no
+// glass, no shadow, no gradients. The system only rounds and rims the square.
 //
 // The icon is an Icon Composer document (AppIcon.icon): icon.json plus one
 // SVG per layer on Apple's 1024 pt canvas, where the rounded square fills the
@@ -148,25 +148,23 @@ func svgDocument(_ body: String) -> String {
 
 // MARK: - AppIcon.icon
 
-// One layer per piece in one group, so each catches the glass light on its own
-// edges: the segments read as separate pieces even when the system draws the
-// icon as clear or tinted glass. Each segment needs its own layer for its own
-// colour too, because a layer's fill replaces the colours in its SVG.
+// One layer per piece: a layer's fill replaces the colours in its SVG, so each
+// segment needs its own layer to keep its own colour.
 let segmentSVGs = zip(segments, segmentColors).map { rect, color in
   svgDocument("  <rect x=\"\(number(rect.minX))\" y=\"\(number(rect.minY))\" width=\"\(number(rect.width))\" " +
     "height=\"\(number(rect.height))\" rx=\"\(number(segmentRadius))\" fill=\"\(color.svg)\"/>")
 }
 let headSVG = svgDocument("  <path d=\"\(roundedPolygonPathData(head, radii: headRadii))\" fill=\"\(cyan.svg)\"/>")
 
+// Glass is off on every layer, which also leaves the group's lighting,
+// specular and translucency with nothing to do: each piece is one flat colour.
 // The mark is white in the tinted appearance so the system's tint lands at
 // full strength; in clear and tinted the system also replaces the ground.
-// Specular highlights are off: the glass keeps its soft edge and depth without
-// the bright rim, which on a flat mark reads as plastic.
 func layer(_ name: String, _ color: RGB) -> [String: Any] {
   [
     "name": name,
     "image-name": "\(name).svg",
-    "glass": true,
+    "glass": false,
     "fill-specializations": [
       ["value": ["solid": color.iconComposer]],
       ["appearance": "tinted", "value": ["solid": white.iconComposer]],
@@ -174,9 +172,6 @@ func layer(_ name: String, _ color: RGB) -> [String: Any] {
     "position": ["scale": 1, "translation-in-points": [0, 0]],
   ]
 }
-
-// NSDecimalNumber keeps fractions like 0.5 short in the JSON.
-func decimal(_ text: String) -> NSDecimalNumber { NSDecimalNumber(string: text) }
 
 let iconJSON: [String: Any] = [
   "fill-specializations": [
@@ -187,10 +182,8 @@ let iconJSON: [String: Any] = [
     [
       "name": "Arrow",
       "layers": [layer("head", cyan)] + segmentColors.indices.map { layer("segment-\($0 + 1)", segmentColors[$0]) },
-      "lighting": "individual",
-      "specular": false,
-      "shadow": ["kind": "neutral", "opacity": decimal("0.5")] as [String: Any],
-      "translucency": ["enabled": true, "value": decimal("0.2")] as [String: Any],
+      // Icon Composer wants an opacity even when there is no shadow.
+      "shadow": ["kind": "none", "opacity": 0] as [String: Any],
     ] as [String: Any],
   ],
   "supported-platforms": ["squares": "shared"],
