@@ -11,7 +11,7 @@ site/
                     iPhone and iPad; command line
   privacy.html      privacy policy (linked from the App Store listings)
   favicon.png       64px, from docs/images/icon.png
-  css/styles.css    base16-eighties; the accent is base0C cyan
+  css/styles.css    base16-eighties; the accent is base09 orange
   js/app.js         the demos' play/pause, and the copy button
   media/            icon, demo videos, TestFlight badge, og.png; see media/README.md
   .assetsignore     keeps the READMEs off the deployed site
@@ -30,8 +30,9 @@ Cloudflare static assets, from the repo root: `npx wrangler deploy`.
 
 ## Notes
 
-- Colours: base16-eighties, no orange. base03 is for lines only; secondary
-  text uses base04 (5.2:1 on the ground).
+- Colours: base16-eighties, with orange as the accent, as in the app icon.
+  base03 is for lines only; secondary text uses base04 (5.2:1 on the
+  ground).
 - The Mac demo plays muted on a loop, except with reduced motion, where it
   waits for **play**. The iPhone demo always waits for **play**. Without JS
   both keep their native controls.

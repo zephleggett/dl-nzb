@@ -1,11 +1,11 @@
 /* dl-nzb.com: one stylesheet for index.html and privacy.html.
-   base16-eighties. No base09/base0F (orange): the accent is base0C cyan.
+   base16-eighties. The accent is base09 orange, as in the app icon.
    Contrast on --bg #2d2d2d: base07 12:1, base05 8.9:1, base04 5.2:1,
-   base0C 7.3:1. base03 (2.9:1) is for lines and decoration only. */
+   base09 5.9:1. base03 (2.9:1) is for lines and decoration only. */
 :root {
   --base00: #2d2d2d; --base01: #393939; --base02: #515151; --base03: #747369;
   --base04: #a09f93; --base05: #d3d0c8; --base06: #e8e6df; --base07: #f2f0ec;
-  --base08: #f2777a; --base0A: #ffcc66; --base0B: #99cc99;
+  --base08: #f2777a; --base09: #f99157; --base0A: #ffcc66; --base0B: #99cc99;
   --base0C: #66cccc; --base0D: #6699cc; --base0E: #cc99cc;
 
   --bg: var(--base00);
@@ -15,7 +15,7 @@
   --text: var(--base05);      /* running text */
   --dim: var(--base04);       /* captions, dates, notes */
   --deco: var(--base03);      /* decoration only */
-  --accent: var(--base0C);
+  --accent: var(--base09);
   --done: var(--base0B);      /* the app's green "done" dot */
 
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -103,7 +103,7 @@ p, li { text-wrap: pretty; }
 .btn:hover { color: var(--head); border-color: var(--accent); }
 .btn--primary { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 700; }
 .btn--primary::before, .btn--primary::after { color: rgba(45, 45, 45, 0.55); }
-.btn--primary:hover { background: var(--base0D); border-color: var(--base0D); color: var(--bg); }
+.btn--primary:hover { background: var(--base0A); border-color: var(--base0A); color: var(--bg); }
 
 /* small print under buttons: requirements and a couple of links */
 .fine {
@@ -186,8 +186,8 @@ p, li { text-wrap: pretty; }
 .bands {
   margin-top: 6rem; height: 3px;
   background: linear-gradient(90deg,
-    var(--base08) 0 16.66%, var(--base0A) 0 33.33%, var(--base0B) 0 50%,
-    var(--base0C) 0 66.66%, var(--base0D) 0 83.33%, var(--base0E) 0 100%);
+    var(--base08) 0 14.28%, var(--base09) 0 28.57%, var(--base0A) 0 42.85%, var(--base0B) 0 57.14%,
+    var(--base0C) 0 71.42%, var(--base0D) 0 85.71%, var(--base0E) 0 100%);
 }
 .foot { padding: 2.2rem var(--edge) 3rem; font-size: var(--fs-small); color: var(--dim); }
 .foot p { max-width: 44em; }

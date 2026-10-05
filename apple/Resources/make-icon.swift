@@ -10,8 +10,8 @@
 //
 // The picture is a download arrow assembled from parts: three segment bars
 // for the shaft, then a solid head, the way an NZB's articles arrive one by one
-// and become a file. The segments run yellow, green and cyan into a cyan head,
-// on #2d2d2d: base16-eighties, the colours of the CLI and the site. Flat: no
+// and become a file. Orange, yellow and purple segments over a green head, on
+// #2d2d2d: base16-eighties, the colours of the CLI and the site. Flat: no
 // glass, no shadow, no gradients. The system only rounds and rims the square.
 //
 // The icon is an Icon Composer document (AppIcon.icon): icon.json plus one
@@ -74,9 +74,10 @@ struct RGB {
 
 let ground = RGB(hex: 0x2D2D2D)      // base16-eighties base00
 let groundDark = RGB(hex: 0x1F1F1F)  // a step darker for the Dark appearance
-let yellow = RGB(hex: 0xFFCC66)      // base16-eighties base0A
-let green = RGB(hex: 0x99CC99)       // base0B
-let cyan = RGB(hex: 0x66CCCC)        // base0C
+let orange = RGB(hex: 0xF99157)      // base16-eighties base09
+let yellow = RGB(hex: 0xFFCC66)      // base0A
+let purple = RGB(hex: 0xCC99CC)      // base0E
+let green = RGB(hex: 0x99CC99)       // base0B, the app's colour for done
 let white = RGB(hex: 0xFFFFFF)
 
 // MARK: - Geometry (1024 pt canvas, y down)
@@ -95,8 +96,9 @@ let shoulderRadius: CGFloat = 22
 let tipRadius: CGFloat = 34
 let arrowTop: CGFloat = 189
 
-// Top to bottom, so the last segment matches the head.
-let segmentColors = [yellow, green, cyan]
+// Top to bottom. Purple sits opposite the green head on the colour wheel, so
+// the last segment stays apart from it, and no three run in hue order.
+let segmentColors = [orange, yellow, purple]
 
 let segments: [CGRect] = (0..<3).map { index in
   CGRect(x: centreX - shaftWidth / 2, y: arrowTop + CGFloat(index) * (segmentHeight + segmentGap),
@@ -154,7 +156,7 @@ let segmentSVGs = zip(segments, segmentColors).map { rect, color in
   svgDocument("  <rect x=\"\(number(rect.minX))\" y=\"\(number(rect.minY))\" width=\"\(number(rect.width))\" " +
     "height=\"\(number(rect.height))\" rx=\"\(number(segmentRadius))\" fill=\"\(color.svg)\"/>")
 }
-let headSVG = svgDocument("  <path d=\"\(roundedPolygonPathData(head, radii: headRadii))\" fill=\"\(cyan.svg)\"/>")
+let headSVG = svgDocument("  <path d=\"\(roundedPolygonPathData(head, radii: headRadii))\" fill=\"\(green.svg)\"/>")
 
 // Glass is off on every layer, which also leaves the group's lighting,
 // specular and translucency with nothing to do: each piece is one flat colour.
@@ -181,7 +183,7 @@ let iconJSON: [String: Any] = [
   "groups": [
     [
       "name": "Arrow",
-      "layers": [layer("head", cyan)] + segmentColors.indices.map { layer("segment-\($0 + 1)", segmentColors[$0]) },
+      "layers": [layer("head", green)] + segmentColors.indices.map { layer("segment-\($0 + 1)", segmentColors[$0]) },
       // Icon Composer wants an opacity even when there is no shadow.
       "shadow": ["kind": "none", "opacity": 0] as [String: Any],
     ] as [String: Any],
