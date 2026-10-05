@@ -1,71 +1,46 @@
-/* app.js: nav highlight, copy buttons, replay controls, and demo media that
-   falls back to a flat placeholder until the files exist. */
+/* app.js: the hero video's play/pause, and the copy button.
+   Without JS the page still works: the hero video keeps its native controls
+   and the copy button stays hidden. */
 (function () {
   "use strict";
   const $ = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
 
-  /* highlight the nav link for the section in view */
-  const navLinks = new Map($$(".topbar__nav a").map((a) => [a.dataset.nav, a]));
-  if (navLinks.size && "IntersectionObserver" in window) {
-    const spy = new IntersectionObserver((entries) => {
-      entries.forEach((e) => {
-        if (!e.isIntersecting) return;
-        const id = e.target.dataset.section;
-        navLinks.forEach((a, k) => {
-          a.classList.toggle("is-active", k === id);
-          if (k === id) a.setAttribute("aria-current", "true"); else a.removeAttribute("aria-current");
-        });
-      });
-    }, { rootMargin: "-45% 0px -50% 0px" });
-    $$("[data-section]").forEach((s) => spy.observe(s));
-  }
+  /* hero video: plays muted on a loop, unless the visitor prefers reduced
+     motion. Our own play/pause button replaces the native controls. */
+  $$(".ctrl[data-video]").forEach((btn) => {
+    const video = $(btn.dataset.video);
+    if (!video) return;
+    const still = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const label = () => {
+      const playing = !video.paused;
+      btn.textContent = playing ? "pause" : "play";
+      btn.setAttribute("aria-label", playing ? "Pause the Mac demo" : "Play the Mac demo");
+    };
+    video.removeAttribute("controls");
+    btn.hidden = false;
+    video.addEventListener("play", label);
+    video.addEventListener("pause", label);
+    btn.addEventListener("click", () => (video.paused ? video.play().catch(() => {}) : video.pause()));
+    still.addEventListener?.("change", () => { if (still.matches) video.pause(); });
+    if (!still.matches) {
+      video.preload = "auto";
+      video.play().catch(() => {});
+    }
+    label();
+  });
 
-  /* copy buttons */
+  /* copy button */
   $$(".copy[data-copy]").forEach((btn) => {
+    if (!navigator.clipboard) return;
+    btn.hidden = false;
     btn.addEventListener("click", () => {
       const el = $(btn.dataset.copy);
-      if (!el || !navigator.clipboard) return;
+      if (!el) return;
       navigator.clipboard.writeText(el.textContent.trim()).then(() => {
         btn.classList.add("is-done");
         setTimeout(() => btn.classList.remove("is-done"), 1300);
       }).catch(() => {});
     });
-  });
-
-  /* replay controls */
-  const toggle = $('[data-act="toggle"]');
-  if (window.Replay) {
-    if (toggle) {
-      window.Replay.onChange((running) => {
-        toggle.textContent = running ? "pause" : "play";
-        toggle.setAttribute("aria-label", running ? "Pause replay" : "Play replay");
-      });
-      toggle.addEventListener("click", () => window.Replay.toggle());
-    }
-    const restart = $('[data-act="restart"]');
-    if (restart) restart.addEventListener("click", () => window.Replay.restart());
-  }
-
-  /* demo media. No poster yet: hide the empty player and show the flat placeholder.
-     No mp4 playback: swap in the animated webp (fetched only then). */
-  $$(".demo video").forEach((video) => {
-    const fig = video.closest(".demo");
-    const missing = () => fig.classList.add("is-missing");
-    const toImage = () => {
-      const src = video.dataset.fallback;
-      if (!src || !video.isConnected) return;
-      const img = new Image();
-      img.className = "demo__img";
-      img.alt = video.getAttribute("aria-label") || "";
-      img.onerror = missing;
-      img.src = src;
-      video.replaceWith(img);
-    };
-    const poster = video.getAttribute("poster");
-    if (poster) { const probe = new Image(); probe.onerror = missing; probe.src = poster; }
-    if (!video.canPlayType || video.canPlayType("video/mp4") === "") toImage();
-    const source = video.querySelector("source");
-    if (source) source.addEventListener("error", toImage);
   });
 })();

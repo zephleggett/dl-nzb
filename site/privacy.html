@@ -2,9 +2,10 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Privacy · dl-nzb</title>
 <meta name="description" content="dl-nzb collects no data. No analytics, no tracking, no accounts." />
+<link rel="canonical" href="https://dl-nzb.com/privacy.html" />
 <meta name="color-scheme" content="dark" />
 <meta name="theme-color" content="#2d2d2d" />
 <link rel="icon" type="image/png" href="favicon.png" />
@@ -15,19 +16,19 @@
 <a class="skip" href="#main">Skip to content</a>
 
 <header class="topbar">
-  <a class="topbar__brand" href="./" aria-label="dl-nzb home">
-    <img class="topbar__icon" src="favicon.png" alt="" width="20" height="20" />
-    <span class="topbar__name">dl-nzb</span>
-  </a>
-  <a class="ghbtn" href="https://github.com/zephleggett/dl-nzb">github ↗</a>
+  <a class="id" href="./"><img src="favicon.png" alt="" width="22" height="22" />dl-nzb</a>
+  <nav aria-label="Site">
+    <a href="./">home</a>
+    <a class="ext" href="https://github.com/zephleggett/dl-nzb">github</a>
+  </nav>
 </header>
 
 <main id="main" class="doc">
-  <h1>Privacy</h1>
-  <p class="doc__meta">Effective <time datetime="2026-10-05">2026-10-05</time>. Covers the dl-nzb apps
+  <h1>privacy</h1>
+  <p class="meta">Effective <time datetime="2026-10-05">2026-10-05</time>. Covers the dl-nzb apps
     for Mac, iPhone and iPad, and the command line tool.</p>
 
-  <ul>
+  <ul class="bullets">
     <li>dl-nzb collects no data. It has no analytics, no tracking and no accounts.</li>
     <li>The apps keep your Usenet server password in the Keychain on your device.
       The command line tool reads it from its config file.</li>
@@ -44,19 +45,15 @@
   <p>Open an issue on <a href="https://github.com/zephleggett/dl-nzb/issues">GitHub</a>.</p>
 </main>
 
-<footer class="footer">
-  <div class="footer__brand">❯ dl-nzb<br /><span>usenet, decoded.</span></div>
-  <nav aria-label="Site">
-    <h2>site</h2>
+<div class="bands" aria-hidden="true"></div>
+<footer class="foot">
+  <p>Made by Zeph. Open source under GPL-2.0.</p>
+  <nav class="foot-links" aria-label="Project links">
     <a href="./">home</a>
+    <a href="https://github.com/zephleggett/dl-nzb">github</a>
+    <a href="https://github.com/zephleggett/dl-nzb/issues">issues</a>
     <a href="privacy.html" aria-current="page">privacy</a>
   </nav>
-  <nav aria-label="Project">
-    <h2>project</h2>
-    <a href="https://github.com/zephleggett/dl-nzb">github ↗</a>
-    <a href="https://github.com/zephleggett/dl-nzb/issues">issues ↗</a>
-  </nav>
-  <p class="footer__meta">GPL-2.0<br />made by Zeph</p>
 </footer>
 </body>
 </html>
