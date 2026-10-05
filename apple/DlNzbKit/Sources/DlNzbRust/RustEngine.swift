@@ -63,12 +63,12 @@ public final class RustEngine: DownloadEngine {
     }
   }
 
-  public func inspect(_ nzb: URL) async throws -> DlNzbKit.NzbInfo {
+  public func inspect(_ nzb: URL, fileName: String?) async throws -> DlNzbKit.NzbInfo {
     let engine = try engine()
     return try await Self.detached {
-      let accessing = nzb.startAccessingSecurityScopedResource()
-      defer { if accessing { nzb.stopAccessingSecurityScopedResource() } }
-      return DlNzbKit.NzbInfo(try engine.inspect(nzbPath: nzb.path(percentEncoded: false)))
+      try nzb.withSecurityScopedAccess {
+        DlNzbKit.NzbInfo(try engine.inspect(nzbPath: nzb.path(percentEncoded: false), fileName: fileName))
+      }
     }
   }
 
@@ -84,32 +84,16 @@ public final class RustEngine: DownloadEngine {
     return Self.session { listener in engine.reprocess(outputDir: path, passwords: passwords, listener: listener) }
   }
 
-  /// The CLI's settings from its usual place, read by the engine itself. Nil
-  /// when there are none or they cannot be read, which in the sandboxed Mac
-  /// app is always: it has to ask for the file (`importCLIConfig(from:)`).
-  public func importCLIConfig() async -> ImportedSettings? {
-    guard let path = DlNzbFFI.cliConfigPath() else { return nil }
-    do {
-      return try await importCLIConfig(from: URL(filePath: path))
-    } catch {
-      Log.engine.info("no CLI settings to import: \(DlNzbKit.EngineError(error).message, privacy: .public)")
-      return nil
-    }
-  }
-
   /// Reads a CLI `config.toml` the user picked (an open panel's
   /// security-scoped URL is fine) with the CLI's own parser, so the app and
   /// the CLI never disagree about what the file says.
   public func importCLIConfig(from url: URL) async throws -> ImportedSettings {
     try await Self.detached {
-      let accessing = url.startAccessingSecurityScopedResource()
-      defer { if accessing { url.stopAccessingSecurityScopedResource() } }
-      guard let imported = try DlNzbFFI.cliConfigImport(path: url.path(percentEncoded: false)) else {
+      let imported = try url.withSecurityScopedAccess { try DlNzbFFI.cliConfigImport(path: url.path(percentEncoded: false)) }
+      guard let imported else {
         throw DlNzbKit.EngineError(.io, "There is no \(url.lastPathComponent) at \(url.deletingLastPathComponent().path(percentEncoded: false)).")
       }
-      var settings = ImportedSettings(imported)
-      settings.source = url
-      return settings
+      return ImportedSettings(imported)
     }
   }
 

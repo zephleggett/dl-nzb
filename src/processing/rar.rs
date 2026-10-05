@@ -174,7 +174,7 @@ pub struct RarExtractor {
     record: Option<Arc<JobRecord>>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct RarExtractionReport {
     pub archives_extracted: usize,
     pub archives_failed: usize,
@@ -393,11 +393,17 @@ impl RarExtractor {
                 tracing::debug!("could not save resume data: {e}");
             }
         }
-        for volume in volumes {
-            if let Err(e) = std::fs::remove_file(&volume) {
-                tracing::warn!("Failed to delete {}: {}", volume.display(), e);
-            }
+        if volumes.is_empty() {
+            return;
         }
+        crate::util::blocking(move || {
+            for volume in volumes {
+                if let Err(e) = std::fs::remove_file(&volume) {
+                    tracing::warn!("Failed to delete {}: {}", volume.display(), e);
+                }
+            }
+        })
+        .await;
     }
 }
 

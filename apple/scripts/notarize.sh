@@ -10,6 +10,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=common.sh
+source "$SCRIPT_DIR/common.sh"
 APPLE_DIR="$(dirname "$SCRIPT_DIR")"
 
 APP="${1:-$APPLE_DIR/build/direct/dl-nzb.app}"
@@ -30,26 +32,10 @@ rm -f "$ZIP"
 ditto -c -k --keepParent "$APP" "$ZIP"
 
 echo "==> submitting"
-SUBMIT_OUTPUT="$(xcrun notarytool submit "$ZIP" \
-  --key "$NOTARY_KEY_PATH" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" \
-  --wait --timeout 30m --output-format json)"
-echo "$SUBMIT_OUTPUT"
-
-STATUS="$(printf '%s' "$SUBMIT_OUTPUT" | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin).get("status",""))')"
-SUBMISSION_ID="$(printf '%s' "$SUBMIT_OUTPUT" | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))')"
-rm -f "$ZIP"
-
-if [ "$STATUS" != "Accepted" ]; then
-  echo "error: notarization returned $STATUS" >&2
-  if [ -n "$SUBMISSION_ID" ]; then
-    xcrun notarytool log "$SUBMISSION_ID" \
-      --key "$NOTARY_KEY_PATH" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" >&2 || true
-  fi
-  exit 1
-fi
-
-echo "==> stapling"
-xcrun stapler staple "$APP"
+# The zip only carries the app to the notary and goes once it is done, pass
+# or fail. The ticket is stapled to the app itself.
+trap 'rm -f "$ZIP"' EXIT
+notarize_and_staple "$ZIP" "$APP"
 
 echo "==> assessing"
 spctl --assess --type execute --verbose "$APP"

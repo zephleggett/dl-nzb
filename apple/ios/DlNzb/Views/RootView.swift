@@ -53,7 +53,7 @@ struct RootView: View {
 
   /// NZBs, and XML in case another app claims the .nzb extension with a type
   /// of its own (the queue turns away anything that is not an NZB).
-  static let importableTypes: [UTType] = [UTType(importedAs: "com.zephleggett.dl-nzb.nzb", conformingTo: .xml), .xml]
+  static let importableTypes: [UTType] = [.nzb, .xml]
 }
 
 // The two views below read the list, which changes with every progress
@@ -107,7 +107,7 @@ private struct AppAlerts: ViewModifier {
         Text(queue.serverProblem.map(AlertText.serverProblemMessage) ?? "")
       }
       .alert(
-        router.failureTitle, isPresented: Binding(get: { !router.failures.isEmpty }, set: { if !$0 { router.failures = [] } })
+        AlertText.openFailureTitle(router.failures), isPresented: Binding(get: { !router.failures.isEmpty }, set: { if !$0 { router.failures = [] } })
       ) {
         Button("OK", role: .cancel) { router.failures = [] }
       } message: {

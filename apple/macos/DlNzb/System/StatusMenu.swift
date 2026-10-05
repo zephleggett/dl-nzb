@@ -8,9 +8,9 @@ import DlNzbUI
 ///
 /// AppKit, as the Dock menu is. SwiftUI rebuilds the whole main menu when a
 /// scene's content changes, so a `MenuBarExtra` showing the speed made an
-/// open Edit menu flicker with every progress event. This menu is filled as
-/// it opens and its lines change in place while it is open; closed, it
-/// does nothing.
+/// open Edit menu flicker with every progress event. The commands are made
+/// once; the lines and Pause All are brought up to date as the menu opens
+/// and change in place while it is open. Closed, it does nothing.
 @MainActor
 final class StatusMenu: NSObject, NSMenuDelegate {
   private let app: MacApp
@@ -30,6 +30,14 @@ final class StatusMenu: NSObject, NSMenuDelegate {
     // The lines stay disabled; the commands are enabled by hand.
     menu.autoenablesItems = false
     toggleItem.target = self
+    // The lines go above these as the menu opens.
+    menu.addItem(.separator())
+    menu.addItem(toggleItem)
+    menu.addItem(.separator())
+    menu.addItem(commandItem("Open dl-nzb", #selector(openWindow(_:))))
+    menu.addItem(commandItem("Settings…", #selector(openSettings(_:)), key: ","))
+    menu.addItem(.separator())
+    menu.addItem(commandItem("Quit dl-nzb", #selector(quit(_:)), key: "q"))
   }
 
   /// Puts the item in the menu bar or takes it out, with the icon for
@@ -63,17 +71,7 @@ final class StatusMenu: NSObject, NSMenuDelegate {
   // MARK: The menu
 
   func menuNeedsUpdate(_ menu: NSMenu) {
-    menu.removeAllItems()
-    lineItems = MenuBarText.lines(for: app.queue).map(Self.lineItem)
-    for item in lineItems { menu.addItem(item) }
-    menu.addItem(.separator())
-    updateToggle()
-    menu.addItem(toggleItem)
-    menu.addItem(.separator())
-    menu.addItem(commandItem("Open dl-nzb", #selector(openWindow(_:))))
-    menu.addItem(commandItem("Settings…", #selector(openSettings(_:)), key: ","))
-    menu.addItem(.separator())
-    menu.addItem(commandItem("Quit dl-nzb", #selector(quit(_:)), key: "q"))
+    refresh()
   }
 
   func menuWillOpen(_ menu: NSMenu) {
@@ -85,7 +83,8 @@ final class StatusMenu: NSObject, NSMenuDelegate {
     watcher = nil
   }
 
-  /// The lines and Pause All, as the queue moves on under the open menu.
+  /// The lines and Pause All as the queue stands: as the menu opens, and
+  /// as the queue moves on under the open menu.
   private func refresh() {
     let lines = MenuBarText.lines(for: app.queue)
     if lines.count == lineItems.count {
@@ -98,10 +97,6 @@ final class StatusMenu: NSObject, NSMenuDelegate {
       lineItems = lines.map(Self.lineItem)
       for (index, item) in lineItems.enumerated() { menu.insertItem(item, at: index) }
     }
-    updateToggle()
-  }
-
-  private func updateToggle() {
     toggleItem.title = app.toggleAllTitle
     toggleItem.isEnabled = app.canToggleAll
   }

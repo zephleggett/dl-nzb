@@ -44,7 +44,7 @@ public struct ProgressRing: View {
   ///   - isPaused: draws the arc in a secondary tint.
   ///   - diameter: the size at the default text size; it scales with Dynamic Type.
   public init(fraction: Double?, glyph: Glyph, isPaused: Bool = false, lineWidth: CGFloat = 2.5, diameter: CGFloat = 28) {
-    self.fraction = fraction.map { $0.isFinite ? min(max($0, 0), 1) : 0 }
+    self.fraction = fraction.map(\.clampedFraction)
     self.glyph = glyph
     self.isPaused = isPaused
     self.lineWidth = lineWidth

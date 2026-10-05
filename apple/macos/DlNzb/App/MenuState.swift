@@ -1,4 +1,5 @@
 import DlNzbKit
+import DlNzbUI
 import Foundation
 
 /// What the menu bar's commands show and enable.
@@ -54,15 +55,22 @@ struct ItemCommands: Equatable {
   @MainActor
   init(app: MacApp, ids: Set<DownloadItem.ID>) {
     self.ids = ids
-    canReveal = app.canReveal(ids)
-    canOpen = app.canOpenFiles(ids)
-    canQuickLook = app.quickLookURL(for: ids) != nil
-    canPause = app.canPause(ids)
-    canResume = app.canResume(ids)
-    canStop = app.canStop(ids)
-    canRetry = app.canRetry(ids)
-    retryTitle = app.retryTitle(ids)
-    canEnterPassword = app.canEnterPassword(ids)
-    canDownloadAnyway = app.canDownloadAnyway(ids)
+    let chosen = app.items(ids)
+    canReveal = !chosen.isEmpty
+    // Open and Quick Look take the finished ones.
+    canOpen = chosen.contains(where: \.isFinished)
+    canQuickLook = canOpen
+    canPause = chosen.contains(where: \.canPause)
+    // Resume for paused items, Start for ones waiting on it.
+    canResume = chosen.contains { $0.canResume || app.queue.awaitsStart($0) }
+    canStop = chosen.contains(where: \.canStop)
+    let retrying = chosen.filter(\.canRetry)
+    canRetry = !retrying.isEmpty
+    // "Download Again" when the one item would start over (`StatusText.retryTitle`).
+    retryTitle = retrying.count == 1 ? StatusText.retryTitle(for: retrying[0]) : "Retry"
+    // Enter Password… and Download Anyway are for one item that asks.
+    let single = chosen.count == 1 ? chosen[0].state : nil
+    canEnterPassword = single == .needsAttention(.password)
+    if case .needsAttention(.unrepairable) = single { canDownloadAnyway = true }
   }
 }

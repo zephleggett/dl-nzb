@@ -12,7 +12,6 @@ SHELL := /usr/bin/env bash
 .SHELLFLAGS := -euo pipefail -c
 
 APPLE_DIR := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
-REPO_ROOT := $(patsubst %/,%,$(dir $(APPLE_DIR)))
 KIT := $(APPLE_DIR)/DlNzbKit
 # xcodebuild's products for the kit stay inside the package's ignored .build.
 KIT_DERIVED := $(KIT)/.build/xcode

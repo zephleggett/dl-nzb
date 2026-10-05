@@ -2,7 +2,7 @@
 
 use once_cell::sync::Lazy;
 use regex::Regex;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// RAR archive patterns
 pub mod rar {
@@ -109,7 +109,17 @@ pub fn is_auxiliary_name(name: &str) -> bool {
         || n.ends_with(".nfo")
         || n.ends_with(".sfv")
         || n.ends_with(".srr")
-        || n.ends_with(".partial")
+        || n.ends_with(PARTIAL_EXT)
+}
+
+/// What a file's name ends with while it downloads (`<name>.partial`).
+pub const PARTIAL_EXT: &str = ".partial";
+
+/// Where the file at `path` is written while it downloads: `<path>.partial`.
+pub fn partial_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(PARTIAL_EXT);
+    PathBuf::from(name)
 }
 
 #[cfg(test)]
@@ -182,5 +192,13 @@ mod tests {
         assert!(rar::is_same_archive("archive", "archive.r00"));
         assert!(rar::is_same_archive("archive", "archive.r15"));
         assert!(!rar::is_same_archive("archive", "other.rar"));
+    }
+
+    #[test]
+    fn partial_path_appends_the_suffix() {
+        assert_eq!(
+            partial_path(Path::new("/tmp/a.mkv")),
+            PathBuf::from("/tmp/a.mkv.partial")
+        );
     }
 }

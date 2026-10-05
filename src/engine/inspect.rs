@@ -11,9 +11,22 @@ use crate::download::{split_password, Nzb};
 use crate::error::Result;
 use crate::processing::deobfuscate::name_from_title;
 
-pub(crate) fn inspect(nzb_path: &Path) -> Result<NzbInfo> {
+/// `file_name` is the name the NZB was opened as when `nzb_path` is a copy
+/// kept under another (an app's queue): the title falls back to it, and a
+/// `{{password}}` in it joins the passwords, as for the file itself.
+pub(crate) fn inspect(nzb_path: &Path, file_name: Option<&str>) -> Result<NzbInfo> {
     let nzb = Nzb::from_file(nzb_path)?;
-    let title = nzb_title(&nzb, nzb_path);
+    let named = file_name.map_or(nzb_path, Path::new);
+    let title = nzb_title(&nzb, named);
+    let mut passwords = nzb.meta().passwords.clone();
+    if file_name.is_some() {
+        let stem = named.file_stem().map(|s| s.to_string_lossy());
+        if let Some(password) = stem.and_then(|s| split_password(&s).1) {
+            if !passwords.contains(&password) {
+                passwords.push(password);
+            }
+        }
+    }
 
     let files: Vec<NzbFile> = nzb
         .files()
@@ -21,7 +34,7 @@ pub(crate) fn inspect(nzb_path: &Path) -> Result<NzbInfo> {
         .map(|f| NzbFile {
             name: f.filename.clone(),
             bytes: f.bytes(),
-            segments: f.segments.segment.len() as u32,
+            segments: f.segments.len() as u32,
             kind: file_kind(&f.filename),
         })
         .collect();
@@ -35,7 +48,7 @@ pub(crate) fn inspect(nzb_path: &Path) -> Result<NzbInfo> {
 
     Ok(NzbInfo {
         title,
-        passwords: nzb.meta().passwords.clone(),
+        passwords,
         category: nzb.meta().category.clone(),
         total_bytes,
         data_bytes: total_bytes - par2_bytes,
@@ -183,11 +196,12 @@ fn content_kind(files: &[NzbFile], title: &str) -> ContentKind {
 }
 
 /// An NZB's title ([`NzbInfo::title`]): its `<meta type="title">`, or the
-/// NZB's file name without its extension when that title is missing or looks
-/// obfuscated (one seen in the wild: `4172R01e3H14n37E65f01G58y82y7191.mkv`).
-/// Passwords in the title or the file name (`Name{{password}}.nzb`) are split
-/// off while parsing and land in `meta().passwords`; the title never carries
-/// one, since the app names the job folder after it.
+/// NZB's file name without its extension when that title is missing, looks
+/// obfuscated (one seen in the wild: `4172R01e3H14n37E65f01G58y82y7191.mkv`)
+/// or is generic (`download`). Passwords in the title or the file name
+/// (`Name{{password}}.nzb`) are split off while parsing and land in
+/// `meta().passwords`; the title never carries one, since the app names the
+/// job folder after it.
 pub(crate) fn nzb_title(nzb: &Nzb, nzb_path: &Path) -> String {
     // A title that makes no name at all ("..", only invisible characters)
     // counts as missing too.
@@ -195,7 +209,7 @@ pub(crate) fn nzb_title(nzb: &Nzb, nzb_path: &Path) -> String {
     nzb.meta()
         .title
         .clone()
-        .filter(|t| !title_looks_obfuscated(t) && usable(t))
+        .filter(|t| !title_looks_obfuscated(t) && !title_is_generic(t) && usable(t))
         .or_else(|| {
             nzb_path
                 .file_stem()
@@ -203,6 +217,17 @@ pub(crate) fn nzb_title(nzb: &Nzb, nzb_path: &Path) -> String {
                 .filter(usable)
         })
         .unwrap_or_else(|| "Download".to_string())
+}
+
+/// Whether a `<meta type="title">` is what a browser or an indexer calls a
+/// file it has no better name for (`download`, `api`, `12345`) rather than a
+/// release name.
+fn title_is_generic(title: &str) -> bool {
+    const GENERIC: &[&str] = &[
+        "download", "nzb", "file", "getnzb", "get", "api", "index", "untitled",
+    ];
+    let lower = title.trim().to_lowercase();
+    GENERIC.contains(&lower.as_str()) || lower.chars().all(char::is_numeric)
 }
 
 /// Whether a `<meta type="title">` is a scrambled token rather than a name:
@@ -336,5 +361,38 @@ mod tests {
             ContentKind::Video
         );
         assert_eq!(content_kind(&files, "abc"), ContentKind::Other);
+    }
+
+    fn nzb_xml(title: Option<&str>) -> String {
+        let head = title
+            .map(|t| format!(r#"<head><meta type="title">{t}</meta></head>"#))
+            .unwrap_or_default();
+        format!(
+            r#"<?xml version="1.0"?><nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">{head}<file poster="p" date="1" subject="&quot;a.mkv&quot; yEnc (1/1)"><groups><group>alt.binaries.test</group></groups><segments><segment bytes="100" number="1">a@test</segment></segments></file></nzb>"#
+        )
+    }
+
+    /// An app keeps its own copy of the NZB (`<id>.nzb`): described by the
+    /// name it was opened as, it gets that name's title and password.
+    #[test]
+    fn a_copy_is_described_by_the_name_it_was_opened_as() {
+        let dir = tempfile::tempdir().unwrap();
+        let copy = dir.path().join("C0FFEE.nzb");
+        std::fs::write(&copy, nzb_xml(None)).unwrap();
+
+        let info = inspect(&copy, Some("Some Release{{s3cret}}.nzb")).unwrap();
+        assert_eq!(info.title, "Some Release");
+        assert_eq!(info.passwords, vec!["s3cret".to_string()]);
+        assert_eq!(inspect(&copy, None).unwrap().title, "C0FFEE");
+
+        // A generic title gives way to the file's name.
+        for generic in ["download", "API", "12345"] {
+            std::fs::write(&copy, nzb_xml(Some(generic))).unwrap();
+            let info = inspect(&copy, Some("Real.Name.nzb")).unwrap();
+            assert_eq!(info.title, "Real.Name", "{generic}");
+        }
+        std::fs::write(&copy, nzb_xml(Some("Download Festival 2019"))).unwrap();
+        let info = inspect(&copy, Some("Real.Name.nzb")).unwrap();
+        assert_eq!(info.title, "Download Festival 2019");
     }
 }

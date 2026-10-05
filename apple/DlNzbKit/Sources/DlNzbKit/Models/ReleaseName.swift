@@ -5,7 +5,9 @@ import Foundation
 /// An NZB's `<meta type="title">` is sometimes the release name and sometimes
 /// an obfuscated file name ("4172R01e3H14n37E65f01G58y82y7191.mkv"), and the
 /// file the user opened is sometimes the release name and sometimes "download".
-/// The best candidate is the first that is neither.
+/// The best candidate is the first that is neither. The real engine picks a
+/// download's title itself (`NzbInfo.title`); `best` is the simulated
+/// engine's stand-in, and `folderName` names every job's folder.
 public enum ReleaseName {
   /// The first candidate that reads like a name, or the last resort.
   public static func best(_ candidates: [String?], fallback: String) -> String {

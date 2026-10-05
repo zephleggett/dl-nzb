@@ -20,7 +20,7 @@ struct QueueAlerts: ViewModifier {
       } message: { duplicate in
         Text(AlertText.duplicateMessage(duplicate, in: queue))
       }
-      .alert(problemTitle, isPresented: presence(!app.addProblems.isEmpty)) {
+      .alert(AlertText.openFailureTitle(app.addProblems), isPresented: presence(!app.addProblems.isEmpty)) {
         Button("OK") { app.addProblems.removeAll() }
       } message: {
         Text(app.addProblems.map(\.message).joined(separator: "\n"))
@@ -32,7 +32,7 @@ struct QueueAlerts: ViewModifier {
           app.prepareServerSettings()
           openSettings()
         }
-        Button("Try Again") { app.retryServer() }
+        Button("Try Again") { queue.retryServer() }
         Button("Not Now", role: .cancel) { queue.dismissServerProblem() }
       } message: { problem in
         Text(AlertText.serverProblemMessage(problem))
@@ -79,11 +79,6 @@ struct QueueAlerts: ViewModifier {
 
   private var duplicateTitle: String {
     app.duplicates.first.map { AlertText.duplicateTitle($0, in: queue) } ?? ""
-  }
-
-  private var problemTitle: String {
-    let problems = app.addProblems
-    return problems.count == 1 ? "Couldn’t Open “\(problems[0].fileName)”" : "Couldn’t Open \(problems.count.formatted()) Files"
   }
 
   private var stopTitle: String {

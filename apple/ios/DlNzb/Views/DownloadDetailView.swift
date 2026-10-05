@@ -4,63 +4,29 @@ import SwiftUI
 
 /// Everything about one download, in the Mac inspector's sections: what it
 /// is and what it is doing, where its files are, the phase checklist, the
-/// files, and the details.
+/// files, and the details. It redraws with the progress; the sections that
+/// show none of it are views of their own that compare the item without it
+/// (`equalsIgnoringProgress`), so they are not drawn again with each update.
 struct DownloadDetailView: View {
   let item: DownloadItem
 
   @State private var prompts = ItemPromptState()
 
-  /// Enough files to see what the download is; the rest are one tap away.
-  private let shownFiles = 6
-
   var body: some View {
-    // Sorted once per update: a release can list a hundred files, and the
-    // item changes several times a second while it downloads.
-    let files = item.listedFiles
     List {
       Section {
         DetailHeader(item: item, prompts: $prompts)
       }
 
-      Section("Location") {
-        LabeledContent {
-          EmptyView()
-        } label: {
-          Text(ReleaseText.breakable(FilesLocation.displayPath(of: item.outputDirectory)))
-            .font(.subheadline)
-            .foregroundStyle(.secondary)
-            .accessibilityLabel(FilesLocation.displayPath(of: item.outputDirectory))
-        }
-        FileActionButtons(item: item)
-      }
+      LocationSection(item: item)
 
       Section("Progress") {
         PhaseChecklist(item)
           .padding(.vertical, 4)
       }
 
-      if !files.isEmpty {
-        Section("Files") {
-          ForEach(files.prefix(shownFiles), id: \.self) { file in
-            FileRow(file: file)
-          }
-          if files.count > shownFiles {
-            NavigationLink("All \(Format.count(files.count)) Files") {
-              FileList(files: files)
-            }
-          }
-        }
-      }
-
-      Section("Details") {
-        ForEach(DetailRow.rows(for: item)) { row in
-          LabeledContent(row.label) {
-            Text(row.value)
-              .monospacedDigit()
-              .multilineTextAlignment(.trailing)
-          }
-        }
-      }
+      FilesSection(item: item)
+      DetailsSection(item: item)
 
       if !item.warnings.isEmpty {
         Section("Warnings") {
@@ -127,12 +93,8 @@ private struct DetailHeader: View {
         .accessibilityLabel(ReleaseText.spoken(item.displayTitle))
         .accessibilityAddTraits(.isHeader)
       DownloadProgressBar(item)
-      // Updated several times a second: no animated transition, which would
-      // keep its digits blurred.
-      Text(StatusText.line(for: item, in: runtime.queue))
-        .font(.subheadline)
-        .foregroundStyle(StatusText.tone(for: item).textStyle)
-        .monospacedDigit()
+      // The whole line, which a row cuts short.
+      DownloadStatusLine(item, held: runtime.queue.isHeld(item), lineLimit: .max)
         .fixedSize(horizontal: false, vertical: true)
       if hasActions {
         let layout = isLarge ? AnyLayout(VStackLayout(alignment: .leading, spacing: 10)) : AnyLayout(HStackLayout(spacing: 10))
@@ -162,29 +124,21 @@ private struct DetailHeader: View {
     return true
   }
 
+  /// What moves it on (a held download reads "Paused", so it offers
+  /// Resume), then Stop while it can stop, or the question's answers.
   @ViewBuilder private var actions: some View {
-    switch item.state {
-    case .queued where runtime.queue.isHeld(item):
-      // Reads "Paused", so it offers what a paused download does.
-      Button("Resume", systemImage: "play.fill") { runtime.resumeHeld(item.id) }
-        .buttonStyle(.borderedProminent)
-      stopButton
-    case .queued where runtime.queue.awaitsStart(item):
-      Button("Start", systemImage: "arrow.down") { runtime.start(item.id) }
-        .buttonStyle(.borderedProminent)
-      stopButton
-    case .queued, .running, .paused:
-      if item.canResume {
-        Button("Resume", systemImage: "play.fill") { runtime.resume(item.id) }
-          .buttonStyle(.borderedProminent)
-      } else if item.canPause {
-        Button("Pause", systemImage: "pause.fill") { runtime.pause(item.id) }
-          .buttonStyle(.bordered)
+    if let action = runtime.primaryAction(for: item) {
+      let button = Button(action.title, systemImage: action.systemImage) { runtime.perform(action, on: item.id) }
+      if action == .pause {
+        button.buttonStyle(.bordered)
+      } else {
+        button.buttonStyle(.borderedProminent)
       }
+    }
+    if item.canStop {
       stopButton
-    case .failed, .stopped, .needsAttention(.diskFull):
-      Button(StatusText.retryTitle(for: item), systemImage: "arrow.clockwise") { runtime.retry(item.id) }
-        .buttonStyle(.borderedProminent)
+    }
+    switch item.state {
     case .needsAttention(.unrepairable):
       Button("Download Anyway") { runtime.downloadAnyway(item.id) }
         .buttonStyle(.borderedProminent)
@@ -193,7 +147,7 @@ private struct DetailHeader: View {
     case .needsAttention(.password):
       Button("Enter Password…") { prompts.ask(.password, about: item.id) }
         .buttonStyle(.borderedProminent)
-    case .finished:
+    default:
       EmptyView()
     }
   }
@@ -208,6 +162,81 @@ private struct DetailHeader: View {
     }
     .buttonStyle(.bordered)
     .tint(.red)
+  }
+}
+
+/// Where its files are in the Files app, with Show in Files and Share.
+private struct LocationSection: View, Equatable {
+  let item: DownloadItem
+
+  nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+    lhs.item.equalsIgnoringProgress(rhs.item)
+  }
+
+  var body: some View {
+    let path = FilesLocation.displayPath(of: item.outputDirectory)
+    Section("Location") {
+      LabeledContent {
+        EmptyView()
+      } label: {
+        Text(ReleaseText.breakable(path))
+          .font(.subheadline)
+          .foregroundStyle(.secondary)
+          .accessibilityLabel(path)
+      }
+      FileActionButtons(item: item)
+    }
+  }
+}
+
+/// The first few files, biggest first, and the rest a tap away. Sorting a
+/// hundred archive volumes is worth doing once, not with every progress
+/// update.
+private struct FilesSection: View, Equatable {
+  let item: DownloadItem
+
+  /// Enough files to see what the download is; the rest are one tap away.
+  private let shownFiles = 6
+
+  nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+    lhs.item.equalsIgnoringProgress(rhs.item)
+  }
+
+  var body: some View {
+    let files = item.listedFiles
+    if !files.isEmpty {
+      Section("Files") {
+        ForEach(files.prefix(shownFiles), id: \.self) { file in
+          FileRow(file: file)
+        }
+        if files.count > shownFiles {
+          NavigationLink("All \(Format.count(files.count)) Files") {
+            FileList(files: files)
+          }
+        }
+      }
+    }
+  }
+}
+
+/// The facts worth knowing (`DetailRow`), none of them progress.
+private struct DetailsSection: View, Equatable {
+  let item: DownloadItem
+
+  nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+    lhs.item.equalsIgnoringProgress(rhs.item)
+  }
+
+  var body: some View {
+    Section("Details") {
+      ForEach(DetailRow.rows(for: item)) { row in
+        LabeledContent(row.label) {
+          Text(row.value)
+            .monospacedDigit()
+            .multilineTextAlignment(.trailing)
+        }
+      }
+    }
   }
 }
 

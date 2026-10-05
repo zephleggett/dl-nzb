@@ -6,7 +6,10 @@
 #   scripts/build-mac.sh direct              Release, Direct flavour (Sparkle)
 #   CONFIG=debug OUT=apple/build scripts/build-mac.sh appstore
 #
-# OUT is the folder the app is copied into (apple/build/<flavour> by default).
+# OUT is the folder the app is copied into (apple/build/<flavour> by default);
+# DERIVED is Xcode's build folder (apple/build/DerivedData by default). A
+# throwaway build can take its own DERIVED, so it never replaces the app
+# Finder opens NZBs with.
 #
 # The build is ad hoc, unless macos/Config/Local.xcconfig (git-ignored) names
 # a team: then it is signed with that team's Apple Development certificate.

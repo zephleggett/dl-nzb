@@ -437,6 +437,7 @@ dependencies = [
  "human_bytes",
  "indicatif",
  "libc",
+ "memchr",
  "native-tls",
  "nzb-rs",
  "once_cell",

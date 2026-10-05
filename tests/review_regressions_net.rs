@@ -12,7 +12,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::*;
-use dl_nzb::config::UsenetConfig;
 use dl_nzb::engine::{Engine, JobRequest, Outcome, Preflight};
 use dl_nzb::nntp::{ArticleOutcome, AsyncNntpConnection};
 use dl_nzb::Nzb;
@@ -144,17 +143,6 @@ impl Server {
     }
 }
 
-fn config(port: u16, dir: &Path, connections: u16) -> dl_nzb::Config {
-    let mut config = make_config("127.0.0.1", port, dir.into());
-    config.usenet.connections = connections;
-    config.tuning.max_concurrent_connections = connections as usize;
-    config
-}
-
-fn usenet(port: u16) -> UsenetConfig {
-    config(port, Path::new("."), 1).usenet
-}
-
 fn request(nzb: &Path, out: &Path, preflight: Preflight) -> JobRequest {
     JobRequest {
         preflight,
@@ -184,15 +172,6 @@ where
         script(rd, wr).await;
     });
     port
-}
-
-/// Wait (up to 20 s) until `done`.
-async fn until(what: &str, done: impl Fn() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while !done() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
 }
 
 // --- NNTP command injection ---------------------------------------------------
@@ -225,7 +204,7 @@ async fn a_message_id_with_line_breaks_is_never_sent() {
         r#"<?xml version="1.0"?><nzb xmlns="http://www.newzbin.com/DTD/2003/nzb"><file poster="p" date="1700000000" subject="&quot;a.bin&quot;"><groups><group>alt.binaries.test</group></groups><segments><segment bytes="10" number="1">{SMUGGLING_ID}</segment><segment bytes="10" number="2">ok@y</segment></segments></file></nzb>"#
     );
     let nzb: Nzb = xml.parse().unwrap();
-    let evil = nzb.files()[0].segments.segment[0].message_id.clone();
+    let evil = nzb.files()[0].segments[0].message_id.clone();
     assert!(evil.contains("\r\nPOST\r\n"), "{evil:?}");
 
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -429,10 +408,7 @@ async fn an_endless_body_line_is_cut_off() {
     let outcome = tokio::time::timeout(Duration::from_secs(10), conn.read_body_outcome("long@t"))
         .await
         .expect("still reading the endless line");
-    assert!(
-        matches!(outcome, ArticleOutcome::Transient { .. }),
-        "{outcome:?}"
-    );
+    assert!(matches!(outcome, ArticleOutcome::Transient), "{outcome:?}");
     assert!(conn.is_poisoned());
 }
 

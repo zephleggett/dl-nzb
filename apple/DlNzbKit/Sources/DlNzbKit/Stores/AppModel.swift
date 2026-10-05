@@ -123,15 +123,9 @@ public final class AppModel {
     }
   }
 
-  /// The CLI's settings where the engine can read them (outside the sandbox).
-  /// In the sandboxed Mac app, ask with an open panel at `CLIConfig.defaultURL`
-  /// and use `importCLIConfig(from:)` instead.
-  public func importCLIConfig() async -> ImportedSettings? {
-    await engine.importCLIConfig()
-  }
-
-  /// Reads a CLI config file the user picked, with the engine's reader (the
-  /// CLI's own parser under `RustEngine`), and takes on its settings.
+  /// Reads a CLI config file the user picked (the Mac's open panel starts at
+  /// `CLIConfig.defaultURL`), with the engine's reader (the CLI's own parser
+  /// under `RustEngine`), and takes on its settings.
   @discardableResult
   public func importCLIConfig(from url: URL) async throws -> ImportedSettings {
     let imported = try await engine.importCLIConfig(from: url)

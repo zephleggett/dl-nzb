@@ -25,9 +25,10 @@ struct InspectorPanel: View {
 
 /// Name, size and state, with the row's question when it asks one; where it
 /// goes, with Show in Finder; the phase checklist; the files; and the facts
-/// worth knowing.
+/// worth knowing. It redraws with the progress; the sections that show none
+/// of it are views of their own that compare the item without it
+/// (`equalsIgnoringProgress`), so they are not drawn again with each update.
 struct InspectorView: View {
-  @Environment(MacApp.self) private var app
   @Environment(DownloadQueue.self) private var queue
   let item: DownloadItem
 
@@ -63,56 +64,96 @@ struct InspectorView: View {
         .padding(.vertical, 2)
       }
 
-      Section("Destination") {
-        HStack(spacing: 8) {
-          FolderLabel(url: item.outputDirectory, namesParent: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
-          RowButton("Show in Finder", systemImage: "magnifyingglass.circle.fill") { app.reveal([item.id]) }
-        }
-      }
+      DestinationSection(item: item)
 
       Section("Progress") {
         PhaseChecklist(item)
           .padding(.vertical, 2)
       }
 
-      let files = InspectorFiles(item)
-      if !files.rows.isEmpty {
-        Section("Files") {
-          ForEach(files.rows) { file in
-            LabeledContent {
-              Text(Format.bytes(file.bytes))
-                .monospacedDigit()
-            } label: {
-              Label {
-                Text(file.name)
-                  .lineLimit(1)
-                  .truncationMode(.middle)
-                  .help(file.name)
-              } icon: {
-                Image(systemName: file.symbol)
-                  .foregroundStyle(.secondary)
-              }
+      FilesSection(item: item)
+      DetailsSection(item: item)
+    }
+    .formStyle(.grouped)
+  }
+}
+
+/// Where the download goes, with Show in Finder.
+private struct DestinationSection: View, Equatable {
+  @Environment(MacApp.self) private var app
+  let item: DownloadItem
+
+  nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+    lhs.item.equalsIgnoringProgress(rhs.item)
+  }
+
+  var body: some View {
+    Section("Destination") {
+      HStack(spacing: 8) {
+        FolderLabel(url: item.outputDirectory, namesParent: true)
+          .frame(maxWidth: .infinity, alignment: .leading)
+        RowButton("Show in Finder", systemImage: "magnifyingglass.circle.fill") { app.reveal([item.id]) }
+      }
+    }
+  }
+}
+
+/// The files, sorted by size: a hundred archive volumes are worth sorting
+/// once, not with every progress update.
+private struct FilesSection: View, Equatable {
+  let item: DownloadItem
+
+  nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+    lhs.item.equalsIgnoringProgress(rhs.item)
+  }
+
+  var body: some View {
+    let files = InspectorFiles(item)
+    if !files.rows.isEmpty {
+      Section("Files") {
+        ForEach(files.rows) { file in
+          LabeledContent {
+            Text(Format.bytes(file.bytes))
+              .monospacedDigit()
+          } label: {
+            Label {
+              Text(file.name)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .help(file.name)
+            } icon: {
+              Image(systemName: file.symbol)
+                .foregroundStyle(.secondary)
             }
           }
-          if let more = files.more {
-            Text(more)
-              .foregroundStyle(.secondary)
-          }
         }
-      }
-
-      Section("Details") {
-        ForEach(DetailRow.rows(for: item)) { row in
-          LabeledContent(row.label) {
-            Text(row.value)
-              .monospacedDigit()
-              .multilineTextAlignment(.trailing)
-          }
+        if let more = files.more {
+          Text(more)
+            .foregroundStyle(.secondary)
         }
       }
     }
-    .formStyle(.grouped)
+  }
+}
+
+/// The facts worth knowing (`DetailRow`), none of them progress.
+private struct DetailsSection: View, Equatable {
+  let item: DownloadItem
+
+  nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+    lhs.item.equalsIgnoringProgress(rhs.item)
+  }
+
+  var body: some View {
+    Section("Details") {
+      ForEach(DetailRow.rows(for: item)) { row in
+        LabeledContent(row.label) {
+          Text(row.value)
+            .monospacedDigit()
+            .multilineTextAlignment(.trailing)
+        }
+      }
+    }
   }
 }
 
@@ -195,10 +236,8 @@ extension URL {
   /// The path with the home folder as ~. The user's real home, not the
   /// sandbox container NSString's own abbreviation would use.
   var abbreviatedPath: String {
-    var path = standardizedFileURL.path(percentEncoded: false)
-    while path.count > 1 && path.hasSuffix("/") { path.removeLast() }
-    var home = CLIConfig.realHomeDirectory.path(percentEncoded: false)
-    while home.count > 1 && home.hasSuffix("/") { home.removeLast() }
+    let path = normalisedPath
+    let home = CLIConfig.realHomeDirectory.normalisedPath
     if path == home { return "~" }
     if path.hasPrefix(home + "/") { return "~" + path.dropFirst(home.count) }
     return path

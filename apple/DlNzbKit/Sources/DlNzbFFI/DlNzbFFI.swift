@@ -633,8 +633,11 @@ public protocol EngineProtocol: AnyObject, Sendable {
     
     /**
      * Parse an NZB and describe it. No network; blocking file I/O.
+     * `file_name` is the name it was opened as when `nzb_path` is a copy
+     * kept under another (the queue's `<id>.nzb`): the title falls back to
+     * it, and a `{{password}}` in it joins the passwords.
      */
-    func inspect(nzbPath: String) throws  -> NzbInfo
+    func inspect(nzbPath: String, fileName: String?) throws  -> NzbInfo
     
     /**
      * Post-processing only (PAR2, extraction, renaming) on a job folder,
@@ -746,13 +749,17 @@ public convenience init(config: EngineConfig)throws  {
     
     /**
      * Parse an NZB and describe it. No network; blocking file I/O.
+     * `file_name` is the name it was opened as when `nzb_path` is a copy
+     * kept under another (the queue's `<id>.nzb`): the title falls back to
+     * it, and a `{{password}}` in it joins the passwords.
      */
-open func inspect(nzbPath: String)throws  -> NzbInfo  {
+open func inspect(nzbPath: String, fileName: String?)throws  -> NzbInfo  {
     return try  FfiConverterTypeNzbInfo_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
         uniffiCallStatus in
     uniffi_dl_nzb_ffi_fn_method_engine_inspect(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(nzbPath),uniffiCallStatus
+        FfiConverterString.lower(nzbPath),
+        FfiConverterOptionString.lower(fileName),uniffiCallStatus
     )
 })
 }
@@ -1558,83 +1565,6 @@ public func FfiConverterTypeFileReport_lift(_ buf: RustBuffer) throws -> FileRep
 #endif
 public func FfiConverterTypeFileReport_lower(_ value: FileReport) -> RustBuffer {
     return FfiConverterTypeFileReport.lower(value)
-}
-
-
-/**
- * The dl-nzb CLI's settings, read from its `config.toml`, password included.
- */
-public struct ImportedConfig: Equatable, Hashable {
-    public var config: EngineConfig
-    /**
-     * The CLI's `download.dir` when it is absolute (a leading `~` is
-     * expanded with the process's home directory, which in a sandbox is the
-     * container). Only a suggestion: the app may not write there.
-     */
-    public var downloadDir: String?
-    /**
-     * The file it came from.
-     */
-    public var source: String
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(config: EngineConfig, 
-        /**
-         * The CLI's `download.dir` when it is absolute (a leading `~` is
-         * expanded with the process's home directory, which in a sandbox is the
-         * container). Only a suggestion: the app may not write there.
-         */downloadDir: String?, 
-        /**
-         * The file it came from.
-         */source: String) {
-        self.config = config
-        self.downloadDir = downloadDir
-        self.source = source
-    }
-
-    
-
-    
-}
-
-#if compiler(>=6)
-extension ImportedConfig: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeImportedConfig: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ImportedConfig {
-        return
-            try ImportedConfig(
-                config: FfiConverterTypeEngineConfig.read(from: &buf), 
-                downloadDir: FfiConverterOptionString.read(from: &buf), 
-                source: FfiConverterString.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: ImportedConfig, into buf: inout [UInt8]) {
-        FfiConverterTypeEngineConfig.write(value.config, into: &buf)
-        FfiConverterOptionString.write(value.downloadDir, into: &buf)
-        FfiConverterString.write(value.source, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeImportedConfig_lift(_ buf: RustBuffer) throws -> ImportedConfig {
-    return try FfiConverterTypeImportedConfig.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeImportedConfig_lower(_ value: ImportedConfig) -> RustBuffer {
-    return FfiConverterTypeImportedConfig.lower(value)
 }
 
 
@@ -3473,8 +3403,8 @@ fileprivate struct FfiConverterOptionTypeAvailabilityInfo: FfiConverterRustBuffe
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-fileprivate struct FfiConverterOptionTypeImportedConfig: FfiConverterRustBuffer {
-    typealias SwiftType = ImportedConfig?
+fileprivate struct FfiConverterOptionTypeEngineConfig: FfiConverterRustBuffer {
+    typealias SwiftType = EngineConfig?
 
     public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
         guard let value = value else {
@@ -3482,13 +3412,13 @@ fileprivate struct FfiConverterOptionTypeImportedConfig: FfiConverterRustBuffer 
             return
         }
         writeInt(&buf, Int8(1))
-        FfiConverterTypeImportedConfig.write(value, into: &buf)
+        FfiConverterTypeEngineConfig.write(value, into: &buf)
     }
 
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
-        case 1: return try FfiConverterTypeImportedConfig.read(from: &buf)
+        case 1: return try FfiConverterTypeEngineConfig.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -3706,26 +3636,15 @@ fileprivate func uniffiFutureContinuationCallback(handle: UInt64, pollResult: In
     }
 }
 /**
- * Read the CLI's settings from `path` (the default location, or a file the
- * user picked). `None` when there is no file there; an error when it cannot
- * be read or parsed, or names no server (nothing worth importing).
+ * Read the dl-nzb CLI's settings from `path`, a file the user picked.
+ * `None` when there is no file there; an error when it cannot be read or
+ * parsed, or names no server (nothing worth importing).
  */
-public func cliConfigImport(path: String)throws  -> ImportedConfig?  {
-    return try  FfiConverterOptionTypeImportedConfig.lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+public func cliConfigImport(path: String)throws  -> EngineConfig?  {
+    return try  FfiConverterOptionTypeEngineConfig.lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
         uniffiCallStatus in
     uniffi_dl_nzb_ffi_fn_func_cli_config_import(
         FfiConverterString.lower(path),uniffiCallStatus
-    )
-})
-}
-/**
- * Where the CLI keeps its `config.toml`, in the user's real home (a
- * sandboxed app's `HOME` is its container): where an open panel should start.
- */
-public func cliConfigPath() -> String?  {
-    return try!  FfiConverterOptionString.lift(try! rustCall() {
-        uniffiCallStatus in
-    uniffi_dl_nzb_ffi_fn_func_cli_config_path(uniffiCallStatus
     )
 })
 }
@@ -3745,13 +3664,10 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
-    if (uniffi_dl_nzb_ffi_checksum_func_cli_config_import() != 32934) {
+    if (uniffi_dl_nzb_ffi_checksum_func_cli_config_import() != 20936) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_dl_nzb_ffi_checksum_func_cli_config_path() != 41689) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_dl_nzb_ffi_checksum_method_engine_inspect() != 25799) {
+    if (uniffi_dl_nzb_ffi_checksum_method_engine_inspect() != 43965) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dl_nzb_ffi_checksum_method_engine_reprocess() != 23398) {

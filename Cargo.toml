@@ -94,6 +94,8 @@ flume = "0.11"
 # SIMD CRC32 (IEEE/zlib polynomial) for yEnc per-article verification — an order
 # of magnitude faster than the scalar table CRC on PCLMULQDQ-capable CPUs.
 crc32fast = "1.4"
+# SIMD byte search: yEnc escapes and the line ends of article bodies.
+memchr = "2.7"
 # Low-level socket tuning (SO_RCVBUF, TCP keepalive) on the NNTP connections.
 socket2 = { version = "0.5", features = ["all"] }
 

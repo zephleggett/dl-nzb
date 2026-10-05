@@ -8,23 +8,14 @@
 # not match fails in a second instead of after a notarization. The version is
 # the root Cargo.toml's [package] version: the CLI, the Mac app and the iPhone
 # app all ship under it, and ffi/Cargo.toml has to agree. It is read as
-# written, prerelease and all, unlike common.sh's dlnzb_version, which turns a
-# version an app cannot carry into 0.0.0.
+# written (common.sh's crate_version), prerelease and all, unlike common.sh's
+# dlnzb_version, which turns a version an app cannot carry into 0.0.0.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=common.sh
+source "$SCRIPT_DIR/common.sh"
 REPO_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
-
-# `version = "..."` inside [package], and nowhere else (a dependency table
-# has versions too). Plain awk so this runs with nothing installed.
-crate_version() {
-  awk '
-    /^\[/ { in_package = ($0 == "[package]") }
-    in_package && /^version[[:space:]]*=/ {
-      sub(/^version[[:space:]]*=[[:space:]]*"/, ""); sub(/".*/, ""); print; exit
-    }
-  ' "$1"
-}
 
 TAG="${1:-}"
 [ -n "$TAG" ] || { echo "usage: check-version.sh vX.Y.Z" >&2; exit 1; }

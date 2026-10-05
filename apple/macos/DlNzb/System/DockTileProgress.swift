@@ -2,13 +2,13 @@ import AppKit
 import DlNzbKit
 
 /// What the Dock tile should be doing, as a small state machine the tests
-/// can drive with their own clock.
+/// can drive.
 ///
 /// The custom tile exists only while something downloads; the rest of the
 /// time the Dock draws the icon itself, crisp at every size (the owner chose
-/// this trade-off over a tile that is always custom). Redraws are throttled
-/// to about twice a second: the engine reports four times a second per job,
-/// and every `display()` re-renders the whole tile.
+/// this trade-off over a tile that is always custom). Every `display()`
+/// re-renders the whole tile, so it redraws only when the bar would look
+/// different; the queue already announces progress at most twice a second.
 struct DockTileMachine: Equatable {
   enum Effect: Equatable {
     /// Put the custom view in the tile.
@@ -18,31 +18,22 @@ struct DockTileMachine: Equatable {
     /// Hand the tile back to the Dock.
     case restore
     case badge(String?)
-    /// Call `redrawDue(now:)` after this long.
-    case scheduleRedraw(Duration)
   }
 
-  var minimumInterval: Duration = .milliseconds(500)
   private(set) var isShowing = false
   private(set) var drawnFraction: Double?
-  private(set) var latestFraction: Double?
   private(set) var badge: String?
-  private(set) var isRedrawScheduled = false
-  private var lastDraw: ContinuousClock.Instant?
 
   /// - Parameters:
   ///   - fraction: The queue's overall fraction, or nil when nothing runs.
   ///   - badgeCount: Unfinished downloads, shown while the tile is custom.
-  mutating func update(fraction: Double?, badgeCount: Int, now: ContinuousClock.Instant) -> [Effect] {
+  mutating func update(fraction: Double?, badgeCount: Int) -> [Effect] {
     var effects: [Effect] = []
     guard let fraction else {
       if isShowing {
         effects.append(.restore)
         isShowing = false
         drawnFraction = nil
-        latestFraction = nil
-        lastDraw = nil
-        isRedrawScheduled = false
       }
       if badge != nil {
         badge = nil
@@ -51,21 +42,13 @@ struct DockTileMachine: Equatable {
       return effects
     }
     let value = Self.quantised(fraction)
-    latestFraction = value
     if !isShowing {
       isShowing = true
       effects += [.install, .redraw(value)]
       drawnFraction = value
-      lastDraw = now
-    } else if value != drawnFraction, !isRedrawScheduled {
-      if let lastDraw, now - lastDraw < minimumInterval {
-        isRedrawScheduled = true
-        effects.append(.scheduleRedraw(minimumInterval - (now - lastDraw)))
-      } else {
-        effects.append(.redraw(value))
-        drawnFraction = value
-        lastDraw = now
-      }
+    } else if value != drawnFraction {
+      effects.append(.redraw(value))
+      drawnFraction = value
     }
     let label = badgeCount > 0 ? badgeCount.formatted() : nil
     if label != badge {
@@ -75,21 +58,10 @@ struct DockTileMachine: Equatable {
     return effects
   }
 
-  /// A scheduled redraw has come due: draw the latest fraction if it moved.
-  mutating func redrawDue(now: ContinuousClock.Instant) -> [Effect] {
-    guard isRedrawScheduled else { return [] }
-    isRedrawScheduled = false
-    guard isShowing, let latestFraction, latestFraction != drawnFraction else { return [] }
-    drawnFraction = latestFraction
-    lastDraw = now
-    return [.redraw(latestFraction)]
-  }
-
   /// To a two-hundredth: finer than the bar has pixels, so a change that
   /// would not show does not cost a redraw.
   static func quantised(_ fraction: Double) -> Double {
-    let clamped = fraction.isFinite ? min(max(fraction, 0), 1) : 0
-    return (clamped * 200).rounded() / 200
+    (fraction.clampedFraction * 200).rounded() / 200
   }
 }
 
@@ -101,15 +73,14 @@ final class DockTileProgress {
   /// Looked up when needed: the services exist before NSApplication does.
   private var tile: NSDockTile { NSApp.dockTile }
   private lazy var view = DockProgressView(frame: NSRect(origin: .zero, size: tile.size))
-  private var redrawTask: Task<Void, Never>?
 
   func update(fraction: Double?, unfinished: Int) {
-    apply(machine.update(fraction: fraction, badgeCount: unfinished, now: .now))
+    apply(machine.update(fraction: fraction, badgeCount: unfinished))
   }
 
   /// Back to the plain icon, for quitting.
   func reset() {
-    apply(machine.update(fraction: nil, badgeCount: 0, now: .now))
+    apply(machine.update(fraction: nil, badgeCount: 0))
   }
 
   private func apply(_ effects: [DockTileMachine.Effect]) {
@@ -122,18 +93,10 @@ final class DockTileProgress {
         view.fraction = fraction
         tile.display()
       case .restore:
-        redrawTask?.cancel()
         tile.contentView = nil
         tile.display()
       case .badge(let label):
         tile.badgeLabel = label
-      case .scheduleRedraw(let delay):
-        redrawTask?.cancel()
-        redrawTask = Task { [weak self] in
-          try? await Task.sleep(for: delay)
-          guard !Task.isCancelled, let self else { return }
-          self.apply(self.machine.redrawDue(now: .now))
-        }
       }
     }
   }
@@ -165,7 +128,7 @@ final class DockProgressView: NSView {
     NSGraphicsContext.restoreGraphicsState()
 
     let inner = track.insetBy(dx: 1.5, dy: 1.5)
-    let width = max(inner.height, inner.width * min(max(fraction, 0), 1))
+    let width = max(inner.height, inner.width * fraction.clampedFraction)
     let fill = NSRect(x: inner.minX, y: inner.minY, width: width, height: inner.height)
     NSColor.controlAccentColor.setFill()
     NSBezierPath(roundedRect: fill, xRadius: inner.height / 2, yRadius: inner.height / 2).fill()

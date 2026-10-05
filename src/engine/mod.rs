@@ -178,7 +178,16 @@ impl Engine {
 
     /// Parse an NZB and describe it. No network.
     pub fn inspect(nzb_path: &Path) -> Result<NzbInfo> {
-        inspect::inspect(nzb_path)
+        inspect::inspect(nzb_path, None)
+    }
+
+    /// [`inspect`](Self::inspect) a copy of an NZB kept under another name
+    /// (the apps keep `<id>.nzb`) as the file `file_name` it was opened as:
+    /// the title falls back to that name and a `{{password}}` in it joins the
+    /// passwords, as when the CLI reads the original. Jobs started on the
+    /// copy see neither, so the caller passes both on in the request.
+    pub fn inspect_named(nzb_path: &Path, file_name: &str) -> Result<NzbInfo> {
+        inspect::inspect(nzb_path, Some(file_name))
     }
 
     /// Start a job on the current Tokio runtime. Its events go to `observer`;
@@ -212,6 +221,15 @@ impl Engine {
 
     /// Stop every job (resumably), wait for them to finish, and close the pool.
     pub async fn shutdown(&self) {
+        for job in &self.stop_all() {
+            job.wait().await;
+        }
+        self.inner.close_pool();
+    }
+
+    /// Stop every job (resumably) without waiting: the jobs that were running,
+    /// to wait for. They leave the engine, so a later call has none.
+    pub fn stop_all(&self) -> Vec<JobHandle> {
         let jobs: Vec<JobHandle> = self
             .inner
             .jobs
@@ -221,10 +239,7 @@ impl Engine {
         for job in &jobs {
             job.stop();
         }
-        for job in &jobs {
-            job.wait().await;
-        }
-        self.inner.close_pool();
+        jobs
     }
 
     fn spawn_job<F, Fut>(
@@ -399,7 +414,7 @@ impl JobHandle {
     /// The job has finished: true from the moment its observer receives
     /// `Finished` (inside that call too).
     pub fn is_finished(&self) -> bool {
-        self.ctx.is_finished() || self.done.borrow().is_some()
+        self.ctx.is_finished()
     }
 
     /// Wait for the job to finish. Returns after the observer received
@@ -452,69 +467,13 @@ fn raise_fd_limit() {
     });
 }
 
-/// Read the dl-nzb CLI's configuration file, if there is one, for a
-/// first-launch import. Includes the password. Never creates the file and
+/// Parse the dl-nzb CLI's configuration file at `path`, password included,
+/// for the apps' import (a sandboxed app can read a file the user picked in
+/// an open panel, but not find it by itself). Never creates the file and
 /// ignores `DL_NZB_*` environment overrides (those belong to CLI runs).
-pub fn cli_config_import() -> Option<(Config, PathBuf)> {
-    let path = cli_config_path()?;
-    if !path.is_file() {
-        return None;
-    }
-    let config = cli_config_import_from(&path).ok()?;
-    Some((config, path))
-}
-
-/// Where the CLI keeps its configuration. On macOS this is resolved from the
-/// user's real home directory, so a sandboxed app (whose `HOME` points into
-/// its container) can point an open panel at it.
-pub fn cli_config_path() -> Option<PathBuf> {
-    #[cfg(target_os = "macos")]
-    if let Some(home) = real_home_dir() {
-        return Some(
-            home.join("Library")
-                .join("Application Support")
-                .join("dl-nzb")
-                .join("config.toml"),
-        );
-    }
-    Config::config_path().ok()
-}
-
-/// Parse a CLI configuration file at `path` (e.g. one the user picked in an
-/// open panel, which a sandboxed app can read but not find by itself).
 pub fn cli_config_import_from(path: &Path) -> Result<Config> {
     let text = std::fs::read_to_string(path)?;
     Config::from_toml_str(&text)
-}
-
-/// The login user's home directory from the password database, unaffected by
-/// a sandbox's `HOME`.
-#[cfg(target_os = "macos")]
-fn real_home_dir() -> Option<PathBuf> {
-    use std::ffi::CStr;
-    use std::os::unix::ffi::OsStrExt;
-
-    let mut buf = vec![0u8; 4096];
-    // SAFETY: `passwd` is plain old data, so all-zero is a valid value.
-    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
-    let mut result: *mut libc::passwd = std::ptr::null_mut();
-    // SAFETY: every pointer is valid for the call and `buf` outlives the use
-    // of the strings `getpwuid_r` stores into it.
-    let rc = unsafe {
-        libc::getpwuid_r(
-            libc::getuid(),
-            &mut pwd,
-            buf.as_mut_ptr().cast(),
-            buf.len(),
-            &mut result,
-        )
-    };
-    if rc != 0 || result.is_null() || pwd.pw_dir.is_null() {
-        return None;
-    }
-    // SAFETY: on success `pw_dir` points to a NUL-terminated string in `buf`.
-    let dir = unsafe { CStr::from_ptr(pwd.pw_dir) };
-    Some(PathBuf::from(std::ffi::OsStr::from_bytes(dir.to_bytes())))
 }
 
 #[cfg(test)]

@@ -5,17 +5,22 @@ import Foundation
 /// engine parses NZBs itself; this serves the simulated engine, so it can
 /// inspect the real files in ~/Downloads, and tests.
 public enum NzbParser {
-  /// Synchronous file and XML work: call it off the main actor.
-  public static func parse(contentsOf url: URL) throws -> NzbInfo {
+  /// Synchronous file and XML work: call it off the main actor. `fileName`
+  /// is the name the NZB was opened as when `url` is a copy kept under
+  /// another (the queue's `<id>.nzb`).
+  public static func parse(contentsOf url: URL, fileName: String? = nil) throws -> NzbInfo {
+    let name = fileName ?? url.lastPathComponent
     let data: Data
     do {
       data = try Data(contentsOf: url)
     } catch {
-      throw EngineError(.io, "dl-nzb could not read \(url.lastPathComponent).")
+      throw EngineError(.io, "dl-nzb could not read \(name).")
     }
-    return try parse(data: data, fileName: url.lastPathComponent)
+    return try parse(data: data, fileName: name)
   }
 
+  /// A `{{password}}` in `fileName` (`Name{{password}}.nzb`) is split off and
+  /// joins the passwords, as the engine does.
   public static func parse(data: Data, fileName: String) throws -> NzbInfo {
     let reader = Reader()
     let parser = XMLParser(data: data)
@@ -30,18 +35,35 @@ public enum NzbParser {
     }
     let par2Bytes = files.filter { $0.kind == .par2 }.reduce(Int64(0)) { $0 + $1.bytes }
     let totalBytes = files.reduce(Int64(0)) { $0 + $1.bytes }
-    let stem = (fileName as NSString).deletingPathExtension
+    let (stem, fileNamePassword) = splitPassword((fileName as NSString).deletingPathExtension)
     let title = ReleaseName.best([reader.meta["title"]?.first, metaName(reader.meta["name"]?.first), stem], fallback: stem)
     let kind = ContentKind.dominant(in: files).refined(byReleaseName: title)
+    var passwords = reader.meta["password"] ?? []
+    if let fileNamePassword, !passwords.contains(fileNamePassword) { passwords.append(fileNamePassword) }
     return NzbInfo(
       title: title,
-      passwords: reader.meta["password"] ?? [],
+      passwords: passwords,
       category: reader.meta["category"]?.first,
       totalBytes: totalBytes,
       dataBytes: totalBytes - par2Bytes,
       par2Bytes: par2Bytes,
       files: files,
       contentKind: kind)
+  }
+
+  /// `"Show.S01E01{{s3cret}}"` as `("Show.S01E01", "s3cret")`, the engine's
+  /// `split_password`: the password runs from the first `{{` (not at the very
+  /// start) to the last `}}`; a name without one comes back unchanged.
+  static func splitPassword(_ name: String) -> (name: String, password: String?) {
+    guard !name.isEmpty,
+      let open = name[name.index(after: name.startIndex)...].range(of: "{{"),
+      let close = name.range(of: "}}", options: .backwards), close.lowerBound >= open.upperBound
+    else { return (name, nil) }
+    let password = name[open.upperBound..<close.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !password.isEmpty else { return (name, nil) }
+    let before = name[..<open.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
+    let after = name[close.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+    return (before + after, password)
   }
 
   /// A `<meta type="name">` that is a posting subject rather than a name.

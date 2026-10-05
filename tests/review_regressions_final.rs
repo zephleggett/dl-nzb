@@ -13,37 +13,12 @@ use std::time::{Duration, Instant};
 
 use common::*;
 use dl_nzb::engine::{
-    Engine, ErrorKind, JobEvent, JobHandle, JobObserver, JobPhase, JobRequest, Outcome, Preflight,
+    Engine, ErrorKind, JobEvent, JobHandle, JobObserver, JobPhase, JobRequest, Outcome,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
 const SIDECAR: &str = ".dl-nzb-job.json";
-
-fn config(port: u16, dir: &Path, connections: u16) -> dl_nzb::Config {
-    let mut config = make_config("127.0.0.1", port, dir.into());
-    config.usenet.connections = connections;
-    config.tuning.max_concurrent_connections = connections as usize;
-    config
-}
-
-fn request(nzb: &Path, out: &Path) -> JobRequest {
-    JobRequest {
-        preflight: Preflight::Never,
-        ..JobRequest::new(nzb, out)
-    }
-}
-
-fn names_in(dir: &Path) -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(dir)
-        .map(|r| {
-            r.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-                .collect()
-        })
-        .unwrap_or_default();
-    names.sort();
-    names
-}
 
 /// One or more plain sentences: no library wording in parentheses.
 fn plain(message: &str) -> bool {
@@ -70,38 +45,6 @@ where
 
 // --- Article placement ------------------------------------------------------------
 
-/// A one-part body: `=ybegin` (no `size=`), `=ypart`, `pcrc32`.
-fn part_body(begin: u64, end: u64, plain: &[u8]) -> Vec<u8> {
-    let mut body = Vec::new();
-    body.extend_from_slice(b"=ybegin part=1 total=1 line=128 name=f.bin\r\n");
-    body.extend_from_slice(format!("=ypart begin={begin} end={end}\r\n").as_bytes());
-    body.extend_from_slice(&yenc_encode(plain));
-    body.extend_from_slice(b"\r\n");
-    let crc = crc32fast::hash(plain);
-    body.extend_from_slice(
-        format!("=yend size={} part=1 pcrc32={crc:08x}\r\n", plain.len()).as_bytes(),
-    );
-    body
-}
-
-/// An NZB `<file>` whose segments carry the given numbers and sizes.
-fn numbered_nzb(dir: &Path, filename: &str, segments: &[(u32, u64, String)]) -> PathBuf {
-    let mut xml = String::from(r#"<?xml version="1.0" encoding="UTF-8"?>"#);
-    xml.push_str(r#"<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">"#);
-    xml.push_str(&format!(
-        r#"<file poster="t@e.x" date="1700000000" subject="&quot;{filename}&quot; yEnc"><groups><group>alt.binaries.test</group></groups><segments>"#
-    ));
-    for (number, bytes, id) in segments {
-        xml.push_str(&format!(
-            r#"<segment bytes="{bytes}" number="{number}">{id}</segment>"#
-        ));
-    }
-    xml.push_str("</segments></file></nzb>");
-    let path = dir.join("job.nzb");
-    std::fs::write(&path, xml).unwrap();
-    path
-}
-
 /// The article being judged used to count toward its own limit: one part of
 /// 4 MiB numbered into a ~200 KB NZB was allowed to end at 400 x 4 MiB, and
 /// the file grew (sparsely) to 1.6 GB, reported Completed. The limit now
@@ -119,9 +62,11 @@ async fn a_crafted_part_cannot_raise_its_own_placement_limit() {
         let id = format!("s{k}@t");
         articles.push(MockArticle {
             message_id: id.clone(),
-            body: part_body(
+            body: one_part(
+                "f.bin",
                 (k * seg + 1) as u64,
                 ((k + 1) * seg) as u64,
+                None,
                 &full[k * seg..(k + 1) * seg],
             ),
         });
@@ -131,9 +76,11 @@ async fn a_crafted_part_cannot_raise_its_own_placement_limit() {
     let parts = 400u64;
     articles.push(MockArticle {
         message_id: "evil@t".into(),
-        body: part_body(
+        body: one_part(
+            "f.bin",
             parts * len + 1,
             parts * len + len,
+            None,
             &vec![0x41; len as usize],
         ),
     });
@@ -238,13 +185,6 @@ async fn bidi_controls_never_reach_a_file_name() {
 }
 
 // --- A server that resets every body -----------------------------------------------
-
-fn reset(sock: TcpStream) {
-    socket2::SockRef::from(&sock)
-        .set_linger(Some(Duration::ZERO))
-        .unwrap();
-    drop(sock);
-}
 
 /// Logs in, then resets the connection in the middle of every body.
 async fn resetting_session(sock: TcpStream, _: usize) {

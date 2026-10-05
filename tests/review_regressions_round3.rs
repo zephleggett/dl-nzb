@@ -7,52 +7,20 @@
 mod common;
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use common::*;
 use dl_nzb::engine::{
-    Engine, ErrorKind, JobEvent, JobHandle, JobObserver, JobPhase, JobRequest, Outcome, Preflight,
+    Engine, ErrorKind, JobEvent, JobHandle, JobObserver, JobPhase, JobRequest, Outcome,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
 const SIDECAR: &str = ".dl-nzb-job.json";
 const MIB: u64 = 1 << 20;
-
-fn config(port: u16, dir: &Path, connections: u16) -> dl_nzb::Config {
-    let mut config = make_config("127.0.0.1", port, dir.into());
-    config.usenet.connections = connections;
-    config.tuning.max_concurrent_connections = connections as usize;
-    config
-}
-
-fn request(nzb: &Path, out: &Path) -> JobRequest {
-    JobRequest {
-        preflight: Preflight::Never,
-        ..JobRequest::new(nzb, out)
-    }
-}
-
-fn names_in(dir: &Path) -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(dir)
-        .map(|r| {
-            r.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-                .collect()
-        })
-        .unwrap_or_default();
-    names.sort();
-    names
-}
-
-fn brief(s: &dl_nzb::JobSummary) -> String {
-    format!(
-        "{:?} kind={:?} resumable={} failed={}/{} {:?}",
-        s.outcome, s.error_kind, s.resumable, s.articles_failed, s.articles_total, s.message
-    )
-}
 
 // --- A scriptable server -------------------------------------------------------------
 
@@ -82,14 +50,6 @@ impl Srv {
     fn bodies_for(&self, id: &str) -> usize {
         self.bodies.lock().unwrap().get(id).copied().unwrap_or(0)
     }
-}
-
-/// Close `sock` with a reset (RST) rather than an orderly FIN.
-fn reset(sock: TcpStream) {
-    socket2::SockRef::from(&sock)
-        .set_linger(Some(Duration::ZERO))
-        .unwrap();
-    drop(sock);
 }
 
 async fn session(sock: TcpStream, srv: Arc<Srv>) {
@@ -169,55 +129,6 @@ async fn serve(srv: Arc<Srv>) -> u16 {
 
 // --- yEnc and NZB builders -----------------------------------------------------------
 
-/// A one-part body placed at `begin..=end`, claiming the file is `size`
-/// bytes when given.
-fn part(begin: u64, end: u64, size: Option<u64>, plain: &[u8]) -> Vec<u8> {
-    let mut body = Vec::new();
-    let size = size.map(|s| format!(" size={s}")).unwrap_or_default();
-    body.extend_from_slice(
-        format!("=ybegin part=1 total=1 line=128{size} name=f.bin\r\n").as_bytes(),
-    );
-    body.extend_from_slice(format!("=ypart begin={begin} end={end}\r\n").as_bytes());
-    body.extend_from_slice(&yenc_encode(plain));
-    body.extend_from_slice(b"\r\n");
-    let crc = crc32fast::hash(plain);
-    body.extend_from_slice(
-        format!("=yend size={} part=1 pcrc32={crc:08x}\r\n", plain.len()).as_bytes(),
-    );
-    body
-}
-
-/// A single-part body: the whole file `name`.
-fn single(plain: &[u8], name: &str) -> Vec<u8> {
-    let mut body = Vec::new();
-    body.extend_from_slice(
-        format!("=ybegin line=128 size={} name={name}\r\n", plain.len()).as_bytes(),
-    );
-    body.extend_from_slice(&yenc_encode(plain));
-    body.extend_from_slice(b"\r\n");
-    let crc = crc32fast::hash(plain);
-    body.extend_from_slice(format!("=yend size={} crc32={crc:08x}\r\n", plain.len()).as_bytes());
-    body
-}
-
-/// An NZB with one `<file>` whose segments carry the given numbers and sizes.
-fn numbered_nzb(dir: &Path, filename: &str, segments: &[(u32, u64, String)]) -> PathBuf {
-    let mut xml = String::from(r#"<?xml version="1.0" encoding="UTF-8"?>"#);
-    xml.push_str(r#"<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">"#);
-    xml.push_str(&format!(
-        r#"<file poster="t@e.x" date="1700000000" subject="&quot;{filename}&quot; yEnc"><groups><group>alt.binaries.test</group></groups><segments>"#
-    ));
-    for (number, bytes, id) in segments {
-        xml.push_str(&format!(
-            r#"<segment bytes="{bytes}" number="{number}">{id}</segment>"#
-        ));
-    }
-    xml.push_str("</segments></file></nzb>");
-    let path = dir.join("job.nzb");
-    std::fs::write(&path, xml).unwrap();
-    path
-}
-
 /// Download `f.bin` as listed by `segments`: the summary, and the file as it
 /// ended up (`f.bin`, else `f.bin.partial`; empty when neither exists).
 async fn download_f_bin(
@@ -296,7 +207,8 @@ async fn honest_parts_land_whatever_sizes_the_nzb_gives() {
             let id = format!("p{k}@t");
             srv.set(
                 &id,
-                Act::Serve(part(
+                Act::Serve(one_part(
+                    "f.bin",
                     (k * seg + 1) as u64,
                     ((k + 1) * seg) as u64,
                     claim.then_some(total),
@@ -339,8 +251,11 @@ async fn a_part_may_reach_the_limit_the_nzb_sets_and_no_further() {
     let tail: Vec<u8> = (0..1000).map(|i| (i % 241) as u8).collect();
     let layout = |end: u64, claim: Option<u64>| {
         let srv = Arc::new(Srv::default());
-        srv.set("h@t", Act::Serve(part(1, 1000, None, &honest)));
-        srv.set("c@t", Act::Serve(part(end - 999, end, claim, &tail)));
+        srv.set("h@t", Act::Serve(one_part("f.bin", 1, 1000, None, &honest)));
+        srv.set(
+            "c@t",
+            Act::Serve(one_part("f.bin", end - 999, end, claim, &tail)),
+        );
         let segments = vec![(1, 0, "h@t".to_string()), (2, 0, "c@t".to_string())];
         (srv, segments)
     };
@@ -545,7 +460,8 @@ async fn one_article_that_always_resets_is_left_to_par2() {
         let id = format!("b{k}@t");
         srv.set(
             &id,
-            Act::Serve(part(
+            Act::Serve(one_part(
+                "f.bin",
                 (k * 2000 + 1) as u64,
                 ((k + 1) * 2000) as u64,
                 Some(60_000),

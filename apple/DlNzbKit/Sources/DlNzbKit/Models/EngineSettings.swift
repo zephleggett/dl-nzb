@@ -145,44 +145,37 @@ extension EngineSettings: CustomStringConvertible, CustomDebugStringConvertible,
   }
 }
 
-/// Settings read from the dl-nzb CLI's `config.toml`, for the first-launch import.
+/// Settings read from the dl-nzb CLI's `config.toml`, for the import. The
+/// CLI's download folder is not among them: the sandbox needs the user to
+/// choose a folder before the app may write there.
 public struct ImportedSettings: Sendable, Equatable {
   public var server: ServerSettings
   public var password: String
   public var processing: ProcessingSettings
   public var advanced: AdvancedSettings
-  /// The CLI's `download.dir`, when it is an absolute path. The app cannot write
-  /// there without the user choosing it (sandbox), so it is only a suggestion.
-  public var downloadDirectory: URL?
-  /// Where the settings came from.
-  public var source: URL?
 
   public init(
     server: ServerSettings,
     password: String,
     processing: ProcessingSettings = ProcessingSettings(),
-    advanced: AdvancedSettings = AdvancedSettings(),
-    downloadDirectory: URL? = nil,
-    source: URL? = nil
+    advanced: AdvancedSettings = AdvancedSettings()
   ) {
     self.server = server
     self.password = password
     self.processing = processing
     self.advanced = advanced
-    self.downloadDirectory = downloadDirectory
-    self.source = source
   }
 }
 
 extension ImportedSettings: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
   public var description: String {
-    "ImportedSettings(server: \(server), password: <redacted>, source: \(source?.path(percentEncoded: false) ?? "none"))"
+    "ImportedSettings(server: \(server), password: <redacted>)"
   }
 
   public var debugDescription: String { description }
 
   public var customMirror: Mirror {
-    Mirror(self, children: ["server": server, "password": "<redacted>", "processing": processing, "advanced": advanced, "source": source as Any])
+    Mirror(self, children: ["server": server, "password": "<redacted>", "processing": processing, "advanced": advanced])
   }
 }
 

@@ -38,6 +38,7 @@ API = 'https://api.appstoreconnect.apple.com'
 BUNDLE_ID = os.environ.get('DLNZB_BUNDLE_ID', 'com.zephleggett.dl-nzb')
 PLATFORM = 'IOS'
 POLL = 30
+WAIT = 3600  # seconds `wait` gives Apple's processing
 
 
 class ApiError(Exception):
@@ -135,7 +136,7 @@ def cmd_uploaded(args) -> int:
 
 def cmd_wait(args) -> int:
   app = app_id()
-  deadline = time.monotonic() + args.timeout
+  deadline = time.monotonic() + WAIT
   last = None
   while True:
     try:
@@ -166,7 +167,7 @@ def cmd_wait(args) -> int:
       print(f'error: App Store Connect marked the build {state}', file=sys.stderr)
       return 1
     if time.monotonic() > deadline:
-      print(f'error: still {state} after {args.timeout} s', file=sys.stderr)
+      print(f'error: still {state} after {WAIT} s', file=sys.stderr)
       return 1
     time.sleep(POLL)
 
@@ -268,8 +269,6 @@ def main() -> int:
     p.add_argument('version')
     p.add_argument('build')
     p.set_defaults(func=func)
-    if name == 'wait':
-      p.add_argument('--timeout', type=int, default=3600, help='seconds (default 3600)')
     if name == 'publish':
       p.add_argument('--notes', help='What to Test, for every tester')
       p.add_argument('--group', help='an external group to add the build to and submit for review')

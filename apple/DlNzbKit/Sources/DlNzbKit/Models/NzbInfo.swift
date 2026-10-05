@@ -120,23 +120,24 @@ public enum ContentKind: String, Sendable, Codable, Equatable, CaseIterable {
 
   /// Most releases are RAR sets, which say nothing about what is inside, but
   /// their names do: "1080p", "x265" and "S02E04" are video, "FLAC" is audio,
-  /// "EPUB" is a book. Leaves any other kind alone.
+  /// "EPUB" is a book. Leaves any other kind alone. Rows ask for it every
+  /// time they draw, so the vocabulary below is built once.
   public func refined(byReleaseName name: String) -> ContentKind {
     guard self == .archive || self == .other else { return self }
-    let tokens = Set(
-      name.lowercased()
-        .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
-        .map(String.init))
-    let video: Set<String> = [
-      "1080p", "2160p", "720p", "480p", "576p", "4k", "uhd", "x264", "x265", "h264", "h265", "hevc", "avc", "bluray", "bdrip",
-      "brrip", "webrip", "hdtv", "dvdrip", "remux", "hdr", "hdr10", "dv", "xvid", "divx", "web",
-    ]
-    if !tokens.isDisjoint(with: video) { return .video }
-    if name.range(of: #"(?i)\bS\d{1,2}E\d{1,3}\b"#, options: .regularExpression) != nil { return .video }
-    let audio: Set<String> = ["flac", "mp3", "aac", "320kbps", "v0", "24bit", "16bit", "discography", "album"]
-    if !tokens.isDisjoint(with: audio) { return .audio }
-    let document: Set<String> = ["epub", "pdf", "mobi", "ebook", "magazine", "comic", "cbr", "cbz"]
-    if !tokens.isDisjoint(with: document) { return .document }
+    let tokens = name.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+    if tokens.contains(where: Self.videoTokens.contains) { return .video }
+    if Self.episode.firstMatch(in: name, range: NSRange(name.startIndex..., in: name)) != nil { return .video }
+    if tokens.contains(where: Self.audioTokens.contains) { return .audio }
+    if tokens.contains(where: Self.documentTokens.contains) { return .document }
     return self
   }
+
+  private static let videoTokens: Set<Substring> = [
+    "1080p", "2160p", "720p", "480p", "576p", "4k", "uhd", "x264", "x265", "h264", "h265", "hevc", "avc", "bluray", "bdrip",
+    "brrip", "webrip", "hdtv", "dvdrip", "remux", "hdr", "hdr10", "dv", "xvid", "divx", "web",
+  ]
+  private static let audioTokens: Set<Substring> = ["flac", "mp3", "aac", "320kbps", "v0", "24bit", "16bit", "discography", "album"]
+  private static let documentTokens: Set<Substring> = ["epub", "pdf", "mobi", "ebook", "magazine", "comic", "cbr", "cbz"]
+  /// An episode number, "S02E04". A fixed pattern, so it always compiles.
+  private static let episode = try! NSRegularExpression(pattern: #"\bS\d{1,2}E\d{1,3}\b"#, options: [.caseInsensitive])
 }

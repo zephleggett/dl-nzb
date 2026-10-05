@@ -40,17 +40,28 @@ public final class SettingsStore {
     public static let verifyCertificate = "verifyCertificate"
     public static let retryAttempts = "retryAttempts"
     public static let flushFilesWhenFinished = "flushFilesWhenFinished"
-    public static let hasOfferedCLIImport = "hasOfferedCLIImport"
 
     static let all = [
       downloadFolderBookmark, startAutomatically, retention, notifyWhenFinished, preventSleep, showInMenuBar, host, port, portEdited, useSSL,
       username, connections, passwordAccount, repairWithPar2, extractArchives, deleteArchivesAfterExtracting, deletePar2AfterRepairing,
       renameObfuscatedFiles, preflight, downloadAllRecoveryUpFront, limitsSpeed, speedLimitMegabytesPerSecond, verifyCertificate,
-      retryAttempts, flushFilesWhenFinished, hasOfferedCLIImport,
+      retryAttempts, flushFilesWhenFinished,
     ]
   }
 
   public static let defaultSpeedLimitMegabytesPerSecond: Double = 20
+
+  /// The shipped values of the settings no settings value
+  /// (`ServerSettings`, `ProcessingSettings`, `AdvancedSettings`) has a
+  /// default for: what a fresh install reads and Reset puts back.
+  private enum Defaults {
+    static let startAutomatically = true
+    static let retention = RetentionPolicy.manually
+    static let notifyWhenFinished = true
+    static let preventSleep = true
+    static let showInMenuBar = false
+    static let limitsSpeed = false
+  }
 
   @ObservationIgnored private let defaults: UserDefaults
   @ObservationIgnored private let passwords: any PasswordStore
@@ -215,13 +226,6 @@ public final class SettingsStore {
     didSet { defaults.set(flushFilesWhenFinished, forKey: Key.flushFilesWhenFinished) }
   }
 
-  // MARK: Onboarding
-
-  /// Whether first launch has offered the CLI import already.
-  public var hasOfferedCLIImport: Bool {
-    didSet { defaults.set(hasOfferedCLIImport, forKey: Key.hasOfferedCLIImport) }
-  }
-
   // MARK: Life
 
   public init(defaults: UserDefaults = .standard, passwords: any PasswordStore = Keychain()) {
@@ -241,11 +245,11 @@ public final class SettingsStore {
     let processing = ProcessingSettings()
     let advanced = AdvancedSettings()
 
-    startAutomatically = bool(Key.startAutomatically, true)
-    retention = RetentionPolicy(rawValue: defaults.string(forKey: Key.retention) ?? "") ?? .manually
-    notifyWhenFinished = bool(Key.notifyWhenFinished, true)
-    preventSleep = bool(Key.preventSleep, true)
-    showInMenuBar = bool(Key.showInMenuBar, false)
+    startAutomatically = bool(Key.startAutomatically, Defaults.startAutomatically)
+    retention = RetentionPolicy(rawValue: defaults.string(forKey: Key.retention) ?? "") ?? Defaults.retention
+    notifyWhenFinished = bool(Key.notifyWhenFinished, Defaults.notifyWhenFinished)
+    preventSleep = bool(Key.preventSleep, Defaults.preventSleep)
+    showInMenuBar = bool(Key.showInMenuBar, Defaults.showInMenuBar)
 
     let useSSL = bool(Key.useSSL, server.useSSL)
     let host = defaults.string(forKey: Key.host) ?? ""
@@ -268,13 +272,12 @@ public final class SettingsStore {
 
     preflight = Preflight(rawValue: defaults.string(forKey: Key.preflight) ?? "") ?? advanced.preflight
     downloadAllRecoveryUpFront = bool(Key.downloadAllRecoveryUpFront, advanced.downloadAllRecoveryUpFront)
-    limitsSpeed = bool(Key.limitsSpeed, false)
+    limitsSpeed = bool(Key.limitsSpeed, Defaults.limitsSpeed)
     let storedLimit = defaults.double(forKey: Key.speedLimitMegabytesPerSecond)
     speedLimitMegabytesPerSecond = storedLimit > 0 ? storedLimit : Self.defaultSpeedLimitMegabytesPerSecond
     verifyCertificate = bool(Key.verifyCertificate, server.verifyCertificate)
     retryAttempts = int(Key.retryAttempts, server.retryAttempts, in: ServerSettings.retryRange)
     flushFilesWhenFinished = bool(Key.flushFilesWhenFinished, advanced.flushFilesWhenFinished)
-    hasOfferedCLIImport = bool(Key.hasOfferedCLIImport, false)
 
     let folder = Self.resolveDownloadFolder(defaults: defaults)
     downloadFolder = folder.url
@@ -354,7 +357,6 @@ public final class SettingsStore {
     renameObfuscatedFiles = imported.processing.renameObfuscatedFiles
     downloadAllRecoveryUpFront = imported.advanced.downloadAllRecoveryUpFront
     flushFilesWhenFinished = imported.advanced.flushFilesWhenFinished
-    hasOfferedCLIImport = true
     savePasswordNow()
     Log.settings.info("imported the dl-nzb CLI settings for \(server.host, privacy: .public)")
   }
@@ -375,11 +377,11 @@ public final class SettingsStore {
     let server = ServerSettings()
     let processing = ProcessingSettings()
     let advanced = AdvancedSettings()
-    startAutomatically = true
-    retention = .manually
-    notifyWhenFinished = true
-    preventSleep = true
-    showInMenuBar = false
+    startAutomatically = Defaults.startAutomatically
+    retention = Defaults.retention
+    notifyWhenFinished = Defaults.notifyWhenFinished
+    preventSleep = Defaults.preventSleep
+    showInMenuBar = Defaults.showInMenuBar
     useSSL = server.useSSL
     host = ""
     port = server.port
@@ -393,12 +395,12 @@ public final class SettingsStore {
     renameObfuscatedFiles = processing.renameObfuscatedFiles
     preflight = advanced.preflight
     downloadAllRecoveryUpFront = advanced.downloadAllRecoveryUpFront
-    limitsSpeed = false
+    limitsSpeed = Defaults.limitsSpeed
     speedLimitMegabytesPerSecond = Self.defaultSpeedLimitMegabytesPerSecond
     verifyCertificate = server.verifyCertificate
     retryAttempts = server.retryAttempts
     flushFilesWhenFinished = advanced.flushFilesWhenFinished
-    for key in Key.all where key != Key.hasOfferedCLIImport {
+    for key in Key.all {
       defaults.removeObject(forKey: key)
     }
     portEdited = false
@@ -574,11 +576,9 @@ public final class SettingsStore {
       if stale {
         // A moved or renamed folder resolves with a stale bookmark; a fresh
         // one needs access, which a security-scoped resolve grants.
-        let accessing = url.startAccessingSecurityScopedResource()
-        if let fresh = try? bookmark(for: url) {
+        if let fresh = url.withSecurityScopedAccess({ try? bookmark(for: url) }) {
           defaults.set(fresh, forKey: Key.downloadFolderBookmark)
         }
-        if accessing { url.stopAccessingSecurityScopedResource() }
       }
       return (url, true)
     #else

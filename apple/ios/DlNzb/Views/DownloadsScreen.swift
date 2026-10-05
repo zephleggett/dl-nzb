@@ -155,21 +155,9 @@ private struct DownloadListRow: View {
     }
     .navigationLinkIndicatorVisibility(.hidden)
     .swipeActions(edge: .leading, allowsFullSwipe: true) {
-      if runtime.queue.isHeld(item) {
-        Button("Resume", systemImage: "play.fill") { runtime.resumeHeld(item.id) }
-          .tint(.accentColor)
-      } else if runtime.queue.awaitsStart(item) {
-        Button("Start", systemImage: "arrow.down") { runtime.start(item.id) }
-          .tint(.accentColor)
-      } else if item.canResume {
-        Button("Resume", systemImage: "play.fill") { runtime.resume(item.id) }
-          .tint(.accentColor)
-      } else if item.canPause {
-        Button("Pause", systemImage: "pause.fill") { runtime.pause(item.id) }
-          .tint(.indigo)
-      } else if item.canRetry {
-        Button(StatusText.retryTitle(for: item), systemImage: "arrow.clockwise") { runtime.retry(item.id) }
-          .tint(.accentColor)
+      if let action = runtime.primaryAction(for: item) {
+        Button(action.title, systemImage: action.systemImage) { runtime.perform(action, on: item.id) }
+          .tint(action == .pause ? .indigo : .accentColor)
       }
     }
     .swipeActions(edge: .trailing, allowsFullSwipe: !item.canStop) {

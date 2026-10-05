@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::par2::{self, Par2Result, Par2Status};
-use super::rar::RarExtractor;
+use super::rar::{RarExtractionReport, RarExtractor};
 use crate::config::PostProcessingConfig;
 use crate::download::DownloadResult;
 use crate::engine::context::JobCtx;
@@ -27,6 +27,7 @@ use crate::engine::JobPhase;
 use crate::error::DlNzbError;
 use crate::patterns::par2 as par2_patterns;
 use crate::patterns::rar as rar_patterns;
+use crate::util::blocking;
 
 type Result<T> = std::result::Result<T, DlNzbError>;
 
@@ -47,23 +48,15 @@ pub struct PostProcessor {
     name: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PostProcessingOutcome {
     pub par2_status: Par2Status,
     /// PAR2 verification actually ran (false when skipped).
     pub par2_ran: bool,
     pub par2_damaged_blocks: u64,
     pub par2_repaired_blocks: u64,
-    pub rar_archives_extracted: usize,
-    pub rar_archives_failed: usize,
-    /// Archives left unextracted because they are encrypted and no password
-    /// worked.
-    pub rar_archives_encrypted: usize,
-    /// One of those archives refused passwords the user supplied (as opposed
-    /// to having none, or only the NZB's, to try).
-    pub rar_user_passwords_failed: bool,
-    /// First volumes of the archives that extracted.
-    pub extracted_archives: Vec<PathBuf>,
+    /// What extraction did (nothing when it didn't run).
+    pub rar: RarExtractionReport,
     pub files_renamed: usize,
 }
 
@@ -111,7 +104,7 @@ impl PostProcessor {
 
     /// The user's passwords for encrypted archives, tried first and in order
     /// (newest first). When they all fail the outcome says so
-    /// ([`PostProcessingOutcome::rar_user_passwords_failed`]).
+    /// ([`RarExtractionReport::user_passwords_failed`]).
     pub fn with_passwords(mut self, passwords: Vec<String>) -> Self {
         self.passwords = passwords;
         self
@@ -132,18 +125,7 @@ impl PostProcessor {
         results: &[DownloadResult],
     ) -> Result<PostProcessingOutcome> {
         let job = &self.job;
-        let mut outcome = PostProcessingOutcome {
-            par2_status: Par2Status::NoPar2Files,
-            par2_ran: false,
-            par2_damaged_blocks: 0,
-            par2_repaired_blocks: 0,
-            rar_archives_extracted: 0,
-            rar_archives_failed: 0,
-            rar_archives_encrypted: 0,
-            rar_user_passwords_failed: false,
-            extracted_archives: Vec::new(),
-            files_renamed: 0,
-        };
+        let mut outcome = PostProcessingOutcome::default();
         if results.is_empty() {
             return Ok(outcome);
         }
@@ -160,11 +142,12 @@ impl PostProcessor {
             .map(|r| r.path.clone())
             .collect();
 
-        let useful_name = self.name.as_deref().unwrap_or_else(|| {
+        let useful_name = self.name.clone().unwrap_or_else(|| {
             download_dir
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("download")
+                .to_string()
         });
 
         // Authoritative PAR2-driven name recovery BEFORE repair: identifies each
@@ -178,14 +161,12 @@ impl PostProcessor {
             && !downloaded_par2_files.is_empty()
             && !job.is_cancelled()
         {
-            match super::deobfuscate::recover_par2_names(
-                download_dir,
-                &downloaded_par2_files,
-                &mut |from, to| self.renamed(download_dir, from, to),
-            ) {
-                Ok(rec) => par2_renamed = rec.files_renamed,
-                Err(e) => tracing::debug!("PAR2 name recovery failed: {}", e),
-            }
+            let par2_files = downloaded_par2_files.clone();
+            par2_renamed = self
+                .renaming(download_dir, move |dir, on_rename| {
+                    super::deobfuscate::recover_par2_names(dir, &par2_files, on_rename)
+                })
+                .await;
         }
 
         // The download is fully integrity-verified on the wire when every segment
@@ -206,15 +187,11 @@ impl PostProcessor {
                     status,
                     damaged_blocks,
                     repaired_blocks,
-                    error,
                 } = par2::repair_with_par2(&self.config, &downloaded_par2_files, job).await?;
                 outcome.par2_status = status;
                 outcome.par2_ran = true;
                 outcome.par2_damaged_blocks = damaged_blocks;
                 outcome.par2_repaired_blocks = repaired_blocks;
-                if let Some(error) = error {
-                    tracing::debug!("PAR2: {}", error);
-                }
             }
             if !self.par2_verified_earlier {
                 self.save_par2_verdict(download_dir, outcome.par2_status)
@@ -236,21 +213,24 @@ impl PostProcessor {
             let extractor = RarExtractor::new(self.config.clone())
                 .with_passwords(&self.passwords, &self.nzb_passwords)
                 .with_record(self.record.clone());
-            let report = extractor.extract_archives(download_dir, job).await?;
-            outcome.rar_archives_extracted = report.archives_extracted;
-            outcome.rar_archives_failed = report.archives_failed;
-            outcome.rar_archives_encrypted = report.archives_encrypted;
-            outcome.rar_user_passwords_failed = report.user_passwords_failed;
-            outcome.extracted_archives = report.extracted;
+            outcome.rar = extractor.extract_archives(download_dir, job).await?;
         }
 
         // An archive still waiting for its password stays exactly as
         // downloaded: renaming one volume (deobfuscation renames the biggest
         // file) would break the set for `reprocess`, which renames afterwards.
-        let awaiting_password = outcome.rar_archives_encrypted > 0;
+        let awaiting_password = outcome.rar.archives_encrypted > 0;
         if self.config.deobfuscate_file_names && !job.is_cancelled() && !awaiting_password {
             job.set_phase(JobPhase::Renaming);
-            outcome.files_renamed = self.run_deobfuscation(download_dir, useful_name);
+            outcome.files_renamed = self
+                .renaming(download_dir, move |dir, on_rename| {
+                    super::deobfuscate::deobfuscate_files(dir, &useful_name, on_rename)
+                        .unwrap_or_else(|e| {
+                            tracing::debug!("Deobfuscation failed: {}", e);
+                            0
+                        })
+                })
+                .await;
             job.set_fraction(1.0);
         }
         outcome.files_renamed += par2_renamed;
@@ -282,36 +262,41 @@ impl PostProcessor {
         }
     }
 
-    /// A file of the job folder was renamed: PAR2's verdict in the job's
-    /// record follows it to its new name, and is saved right away (the app
-    /// may be suspended or quit at any moment). Otherwise a resumed job
-    /// would find the verified file gone, and with the PAR2 files deleted
-    /// after the repair it could never verify it again.
-    fn renamed(&self, dir: &Path, from: &Path, to: &Path) {
-        let Some(record) = &self.record else {
-            return;
-        };
-        let name = |p: &Path| p.file_name().and_then(|n| n.to_str()).map(str::to_owned);
-        let (Some(from), Some(to)) = (name(from), name(to)) else {
-            return;
-        };
-        if record.renamed(dir, &from, &to) {
-            if let Err(e) = record.save_blocking() {
-                tracing::debug!("could not save resume data: {e}");
-            }
-        }
+    /// Run a renaming pass over the job folder off the async threads:
+    /// `work(dir, on_rename)` returns how many files it renamed and calls
+    /// `on_rename(from, to)` after each, which keeps the job's record up to
+    /// date ([`renamed`]).
+    async fn renaming<F>(&self, dir: &Path, work: F) -> usize
+    where
+        F: FnOnce(&Path, &mut dyn FnMut(&Path, &Path)) -> usize + Send + 'static,
+    {
+        let record = self.record.clone();
+        let dir = dir.to_path_buf();
+        blocking(move || {
+            work(&dir, &mut |from, to| {
+                renamed(record.as_deref(), &dir, from, to)
+            })
+        })
+        .await
     }
+}
 
-    /// Files renamed by the heuristic deobfuscation pass.
-    fn run_deobfuscation(&self, download_dir: &Path, useful_name: &str) -> usize {
-        match super::deobfuscate::deobfuscate_files(download_dir, useful_name, &mut |from, to| {
-            self.renamed(download_dir, from, to)
-        }) {
-            Ok(renamed) => renamed,
-            Err(e) => {
-                tracing::debug!("Deobfuscation failed: {}", e);
-                0
-            }
+/// A file of the job folder was renamed: PAR2's verdict in the job's record
+/// follows it to its new name, and is saved right away (the app may be
+/// suspended or quit at any moment). Otherwise a resumed job would find the
+/// verified file gone, and with the PAR2 files deleted after the repair it
+/// could never verify it again.
+fn renamed(record: Option<&JobRecord>, dir: &Path, from: &Path, to: &Path) {
+    let Some(record) = record else {
+        return;
+    };
+    let name = |p: &Path| p.file_name().and_then(|n| n.to_str()).map(str::to_owned);
+    let (Some(from), Some(to)) = (name(from), name(to)) else {
+        return;
+    };
+    if record.renamed(dir, &from, &to) {
+        if let Err(e) = record.save_blocking() {
+            tracing::debug!("could not save resume data: {e}");
         }
     }
 }

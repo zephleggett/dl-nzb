@@ -1,4 +1,5 @@
 import DlNzbKit
+import DlNzbUI
 import Foundation
 import SwiftUI
 import UIKit
@@ -49,16 +50,9 @@ enum FilesLocation {
   /// archive), or the folder when there are several of a size or none listed.
   static func shareItem(for item: DownloadItem) -> URL? {
     guard item.isFinished else { return nil }
+    // One file holds most of it: that file is the download.
+    if let file = item.mainFile(whenShare: { $0 > 0.8 }) { return file }
     let folder = item.summary?.outputDirectory ?? item.outputDirectory
-    let files = item.summary?.files ?? []
-    if let largest = files.max(by: { $0.bytes < $1.bytes }) {
-      let total = files.reduce(Int64(0)) { $0 + $1.bytes }
-      // One file holds most of it: that file is the download.
-      if total > 0, Double(largest.bytes) / Double(total) > 0.8 {
-        let url = folder.appending(path: largest.name)
-        if FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) { return url }
-      }
-    }
     return FileManager.default.fileExists(atPath: folder.path(percentEncoded: false)) ? folder : nil
   }
 }

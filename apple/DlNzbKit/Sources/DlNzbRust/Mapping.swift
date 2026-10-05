@@ -56,8 +56,7 @@ extension UInt64 {
 extension DlNzbKit.ImportedSettings {
   /// The CLI's settings as the engine read them. The CLI's own preflight rule
   /// is the app's Automatic.
-  init(_ imported: DlNzbFFI.ImportedConfig) {
-    let config = imported.config
+  init(_ config: DlNzbFFI.EngineConfig) {
     let server = config.server
     self.init(
       server: ServerSettings(
@@ -78,22 +77,7 @@ extension DlNzbKit.ImportedSettings {
       advanced: AdvancedSettings(
         preflight: .automatic,
         downloadAllRecoveryUpFront: config.downloadAllPar2,
-        flushFilesWhenFinished: config.fsyncOnFinalize),
-      downloadDirectory: imported.downloadDir.map { URL(filePath: Self.outsideContainer($0), directoryHint: .isDirectory) },
-      source: URL(filePath: imported.source))
-  }
-
-  /// The engine expands `~` with `HOME`, which in the sandboxed Mac app is its
-  /// container; the CLI meant the user's real home.
-  static func outsideContainer(_ path: String, home: String = NSHomeDirectory()) -> String {
-    #if os(macOS)
-      var realHome = CLIConfig.realHomeDirectory.path(percentEncoded: false)
-      while realHome.count > 1 && realHome.hasSuffix("/") { realHome.removeLast() }
-      guard home != realHome, path == home || path.hasPrefix(home + "/") else { return path }
-      return realHome + path.dropFirst(home.count)
-    #else
-      return path
-    #endif
+        flushFilesWhenFinished: config.fsyncOnFinalize))
   }
 }
 
@@ -347,11 +331,5 @@ extension DlNzbKit.ContentKind {
 extension DlNzbKit.ServerCheck {
   init(_ check: DlNzbFFI.ServerCheck) {
     self.init(greeting: check.greeting, tls: check.tls, latencyMilliseconds: Int(check.latencyMs))
-  }
-}
-
-extension Comparable {
-  fileprivate func clamped(to range: ClosedRange<Self>) -> Self {
-    min(max(self, range.lowerBound), range.upperBound)
   }
 }

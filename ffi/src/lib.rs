@@ -16,9 +16,8 @@ uniffi::setup_scaffolding!();
 mod error;
 mod types;
 
-use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::Arc;
 use std::time::Duration;
 
 use dl_nzb::engine as core;
@@ -37,78 +36,12 @@ pub trait JobListener: Send + Sync {
     fn on_event(&self, event: JobEvent);
 }
 
-/// Adapts a Swift listener to the engine's observer, and takes the job off
-/// its engine's [`LiveJobs`] once it has finished.
-struct Forward {
-    listener: Arc<dyn JobListener>,
-    live: Weak<LiveJobs>,
-    id: u64,
-}
+/// Adapts a Swift listener to the engine's observer.
+struct Forward(Arc<dyn JobListener>);
 
 impl core::JobObserver for Forward {
     fn on_event(&self, event: core::JobEvent) {
-        let finished = matches!(event, core::JobEvent::Finished(_));
-        self.listener.on_event(event.into());
-        if finished {
-            if let Some(live) = self.live.upgrade() {
-                live.finished(self.id);
-            }
-        }
-    }
-}
-
-/// The jobs an engine started that have not finished, so dropping the
-/// engine can stop them. A job leaves as soon as its `Finished` is delivered.
-#[derive(Default)]
-struct LiveJobs {
-    state: Mutex<LiveState>,
-}
-
-#[derive(Default)]
-struct LiveState {
-    next_id: u64,
-    running: HashMap<u64, core::JobHandle>,
-    /// Jobs that finished before `add` could list them.
-    finished_early: HashSet<u64>,
-}
-
-impl LiveJobs {
-    fn lock(&self) -> std::sync::MutexGuard<'_, LiveState> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// A listener for a job about to start: `listener`, plus the id `add`
-    /// then lists the job under.
-    fn forward(self: &Arc<Self>, listener: Arc<dyn JobListener>) -> (Arc<Forward>, u64) {
-        let id = {
-            let mut state = self.lock();
-            state.next_id += 1;
-            state.next_id
-        };
-        let forward = Forward {
-            listener,
-            live: Arc::downgrade(self),
-            id,
-        };
-        (Arc::new(forward), id)
-    }
-
-    fn add(&self, id: u64, job: core::JobHandle) {
-        let mut state = self.lock();
-        if !state.finished_early.remove(&id) {
-            state.running.insert(id, job);
-        }
-    }
-
-    fn finished(&self, id: u64) {
-        let mut state = self.lock();
-        if state.running.remove(&id).is_none() {
-            state.finished_early.insert(id);
-        }
-    }
-
-    fn take_all(&self) -> Vec<core::JobHandle> {
-        self.lock().running.drain().map(|(_, job)| job).collect()
+        self.0.on_event(event.into());
     }
 }
 
@@ -124,7 +57,6 @@ pub struct Engine {
     /// Kept to be shut down without blocking on drop (dropping a `Runtime`
     /// blocks, and panics on one of its own threads).
     runtime: Option<Runtime>,
-    live: Arc<LiveJobs>,
 }
 
 impl Drop for Engine {
@@ -133,10 +65,7 @@ impl Drop for Engine {
         // tasks: PAR2 and extraction running on blocking threads would carry
         // on, and listeners would never hear `Finished`. A stop reaches those
         // threads through the job's cancel flag.
-        let jobs = self.live.take_all();
-        for job in &jobs {
-            job.stop();
-        }
+        let jobs = self.core.stop_all();
         let Some(runtime) = self.runtime.take() else {
             return;
         };
@@ -169,7 +98,6 @@ impl Engine {
             core,
             handle: runtime.handle().clone(),
             runtime: Some(runtime),
-            live: Arc::default(),
         }))
     }
 
@@ -203,16 +131,25 @@ impl Engine {
     }
 
     /// Parse an NZB and describe it. No network; blocking file I/O.
-    pub fn inspect(&self, nzb_path: String) -> Result<NzbInfo, EngineError> {
-        Ok(core::Engine::inspect(Path::new(&nzb_path))?)
+    /// `file_name` is the name it was opened as when `nzb_path` is a copy
+    /// kept under another (the queue's `<id>.nzb`): the title falls back to
+    /// it, and a `{{password}}` in it joins the passwords.
+    pub fn inspect(
+        &self,
+        nzb_path: String,
+        file_name: Option<String>,
+    ) -> Result<NzbInfo, EngineError> {
+        let path = Path::new(&nzb_path);
+        Ok(match file_name {
+            Some(name) => core::Engine::inspect_named(path, &name)?,
+            None => core::Engine::inspect(path)?,
+        })
     }
 
     /// Start a job. `listener` gets every event; `Finished` exactly once, last.
     pub fn start(&self, request: JobRequest, listener: Arc<dyn JobListener>) -> Arc<JobHandle> {
         let _entered = self.handle.enter();
-        let (forward, id) = self.live.forward(listener);
-        let job = self.core.start(request, forward);
-        self.live.add(id, job.clone());
+        let job = self.core.start(request, Arc::new(Forward(listener)));
         Arc::new(JobHandle { core: job })
     }
 
@@ -225,9 +162,9 @@ impl Engine {
         listener: Arc<dyn JobListener>,
     ) -> Arc<JobHandle> {
         let _entered = self.handle.enter();
-        let (forward, id) = self.live.forward(listener);
-        let job = self.core.reprocess(output_dir.into(), passwords, forward);
-        self.live.add(id, job.clone());
+        let job = self
+            .core
+            .reprocess(output_dir.into(), passwords, Arc::new(Forward(listener)));
         Arc::new(JobHandle { core: job })
     }
 
@@ -279,18 +216,11 @@ impl JobHandle {
     }
 }
 
-/// Where the CLI keeps its `config.toml`, in the user's real home (a
-/// sandboxed app's `HOME` is its container): where an open panel should start.
+/// Read the dl-nzb CLI's settings from `path`, a file the user picked.
+/// `None` when there is no file there; an error when it cannot be read or
+/// parsed, or names no server (nothing worth importing).
 #[uniffi::export]
-pub fn cli_config_path() -> Option<String> {
-    core::cli_config_path().map(|p| p.to_string_lossy().into_owned())
-}
-
-/// Read the CLI's settings from `path` (the default location, or a file the
-/// user picked). `None` when there is no file there; an error when it cannot
-/// be read or parsed, or names no server (nothing worth importing).
-#[uniffi::export]
-pub fn cli_config_import(path: String) -> Result<Option<ImportedConfig>, EngineError> {
+pub fn cli_config_import(path: String) -> Result<Option<EngineConfig>, EngineError> {
     let file = Path::new(&path);
     if !file.exists() {
         return Ok(None);
@@ -301,14 +231,7 @@ pub fn cli_config_import(path: String) -> Result<Option<ImportedConfig>, EngineE
             "The dl-nzb settings file does not name a server.".to_string(),
         ));
     }
-    let download_dir = Some(&config.download.dir)
-        .filter(|d| d.is_absolute())
-        .map(|d| d.to_string_lossy().into_owned());
-    Ok(Some(ImportedConfig {
-        config: EngineConfig::from_core(&config),
-        download_dir,
-        source: path,
-    }))
+    Ok(Some(EngineConfig::from_core(&config)))
 }
 
 #[cfg(test)]

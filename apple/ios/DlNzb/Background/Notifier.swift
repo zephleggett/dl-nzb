@@ -12,8 +12,6 @@ import Foundation
 /// reason is plain, not at launch.
 @MainActor
 final class Notifier: NSObject {
-  nonisolated static let itemKey = "itemID"
-
   private let center: UNUserNotificationCenter
   /// A tap on a notification: the app selects that download.
   var onOpenItem: (@MainActor (DownloadItem.ID) -> Void)?
@@ -36,8 +34,10 @@ final class Notifier: NSObject {
     }
   }
 
+  /// The Kit's words for the item ("Download Finished", "Sintel · 7.6 GB"),
+  /// tagged with the item for a tap.
   func post(for item: DownloadItem) {
-    guard let content = Self.content(for: item) else { return }
+    guard let content = NotificationText.content(for: item) else { return }
     let request = UNNotificationRequest(identifier: item.id.uuidString, content: content, trigger: nil)
     center.add(request) { error in
       if let error {
@@ -73,18 +73,6 @@ final class Notifier: NSObject {
     content.threadIdentifier = "downloads"
     return content
   }
-
-  /// The Kit's words for the item ("Download Finished", "Sintel · 7.6 GB"),
-  /// threaded together and tagged with the item for a tap.
-  static func content(for item: DownloadItem) -> UNMutableNotificationContent? {
-    guard let text = NotificationText(item) else { return nil }
-    let content = UNMutableNotificationContent()
-    content.title = text.title
-    content.body = text.body
-    content.threadIdentifier = "downloads"
-    content.userInfo = [itemKey: item.id.uuidString]
-    return content
-  }
 }
 
 extension Notifier: UNUserNotificationCenterDelegate {
@@ -96,7 +84,7 @@ extension Notifier: UNUserNotificationCenterDelegate {
   }
 
   nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
-    guard let raw = response.notification.request.content.userInfo[Self.itemKey] as? String, let id = UUID(uuidString: raw) else { return }
+    guard let id = NotificationText.itemID(from: response.notification.request.content.userInfo) else { return }
     await MainActor.run {
       onOpenItem?(id)
     }

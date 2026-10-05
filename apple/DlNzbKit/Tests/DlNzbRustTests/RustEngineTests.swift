@@ -22,7 +22,7 @@ struct RustEngineTests {
 
   @Test("inspect reads an NZB without the network")
   func inspect() async throws {
-    let info = try await RustEngine().inspect(Fixture.syntheticNZB)
+    let info = try await RustEngine().inspect(Fixture.syntheticNZB, fileName: nil)
     #expect(info.title == "Example.Show.S01E02.1080p.WEB.x265-TEST")
     #expect(info.passwords == ["hunter2"])
     #expect(info.category == "TV")
@@ -41,8 +41,20 @@ struct RustEngineTests {
     let junk = scratch.url.appending(path: "junk.nzb")
     try Data("not xml at all".utf8).write(to: junk)
     let engine = RustEngine()
-    await #expect { try await engine.inspect(junk) } throws: { ($0 as? EngineError)?.kind == .nzb }
-    await #expect { try await engine.inspect(scratch.url.appending(path: "missing.nzb")) } throws: { ($0 as? EngineError)?.kind == .io }
+    await #expect { try await engine.inspect(junk, fileName: nil) } throws: { ($0 as? EngineError)?.kind == .nzb }
+    await #expect { try await engine.inspect(scratch.url.appending(path: "missing.nzb"), fileName: nil) } throws: { ($0 as? EngineError)?.kind == .io }
+  }
+
+  @Test("inspect reads the queue's copy as the file the user opened: its title and password")
+  func inspectAsOpened() async throws {
+    let scratch = try ScratchFolder()
+    let copy = scratch.url.appending(path: "\(UUID().uuidString).nzb")
+    let text = try String(contentsOf: Fixture.syntheticNZB, encoding: .utf8)
+      .replacingOccurrences(of: #"<meta type="title">Example.Show.S01E02.1080p.WEB.x265-TEST</meta>"#, with: "")
+    try Data(text.utf8).write(to: copy)
+    let info = try await RustEngine().inspect(copy, fileName: "Example Show{{s3cret}}.nzb")
+    #expect(info.title == "Example Show")
+    #expect(info.passwords == ["hunter2", "s3cret"])
   }
 
   @Test("Test Connection to a port nobody listens on is a connection error")
@@ -179,8 +191,6 @@ struct RustEngineTests {
     #expect(!imported.processing.extractArchives)
     #expect(imported.processing.deleteArchivesAfterExtracting)
     #expect(imported.advanced.downloadAllRecoveryUpFront)
-    #expect(imported.downloadDirectory?.path(percentEncoded: false).hasPrefix("/Volumes/Media/Usenet") == true)
-    #expect(imported.source == file)
 
     // Through the protocol too, and with TOML only the real parser knows (a
     // \u escape), so the app's import is the CLI's reading of the file.

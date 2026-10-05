@@ -227,7 +227,7 @@ fn inspect_describes_an_nzb() {
     let dir = tempfile::tempdir().unwrap();
     let engine = Engine::new(config("", 563)).unwrap();
     let nzb = write_nzb(dir.path()).to_string_lossy().into_owned();
-    let info = engine.inspect(nzb).unwrap();
+    let info = engine.inspect(nzb, None).unwrap();
     assert_eq!(info.title, "Some.Show.S01E01.1080p.WEB");
     assert_eq!(info.passwords, vec!["pw".to_string()]);
     assert_eq!(info.total_bytes, 1700);
@@ -237,14 +237,34 @@ fn inspect_describes_an_nzb() {
     assert_eq!(info.files[1].kind, FileKind::Par2);
     assert_eq!(info.content_kind, ContentKind::Video);
 
-    let missing = engine.inspect("/nonexistent/x.nzb".into()).unwrap_err();
+    let missing = engine
+        .inspect("/nonexistent/x.nzb".into(), None)
+        .unwrap_err();
     assert_eq!(missing.kind(), ErrorKind::Io);
     let junk = dir.path().join("junk.nzb");
     std::fs::write(&junk, "this is not xml").unwrap();
     let junk = engine
-        .inspect(junk.to_string_lossy().into_owned())
+        .inspect(junk.to_string_lossy().into_owned(), None)
         .unwrap_err();
     assert_eq!(junk.kind(), ErrorKind::Nzb);
+}
+
+/// The queue's copy (`<id>.nzb`) inspected as the file the user opened: the
+/// title falls back to that name and its `{{password}}` joins the NZB's.
+#[test]
+fn inspect_reads_the_name_the_nzb_was_opened_as() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = Engine::new(config("", 563)).unwrap();
+    let copy = dir.path().join("1D4C6F0E.nzb");
+    std::fs::write(&copy, NZB.replace("Some.Show.S01E01.1080p.WEB", "")).unwrap();
+    let copy = copy.to_string_lossy().into_owned();
+
+    let info = engine
+        .inspect(copy.clone(), Some("Some Show{{s3cret}}.nzb".into()))
+        .unwrap();
+    assert_eq!(info.title, "Some Show");
+    assert_eq!(info.passwords, vec!["pw".to_string(), "s3cret".to_string()]);
+    assert_eq!(engine.inspect(copy, None).unwrap().title, "1D4C6F0E");
 }
 
 #[test]
@@ -367,8 +387,7 @@ fn finished_jobs_leave_the_engine() {
     let recorder = Arc::new(Recorder::default());
     let job = engine.start(request(dir.path()), recorder.clone());
     block_on(job.wait());
-    assert!(engine.live.lock().running.is_empty());
-    assert!(engine.live.lock().finished_early.is_empty());
+    assert!(engine.core.stop_all().is_empty());
 }
 
 #[test]
@@ -411,18 +430,13 @@ deobfuscate_file_names = false
     .unwrap();
     let source = path.to_string_lossy().into_owned();
     let imported = cli_config_import(source.clone()).unwrap().unwrap();
-    assert_eq!(imported.source, source);
-    assert_eq!(imported.config.server.host, "news.example.com");
-    assert_eq!(imported.config.server.password, "p\"w#d");
-    assert_eq!(imported.config.server.connections, 40);
-    assert_eq!(imported.config.server.retry_attempts, 3);
-    assert!(!imported.config.server.verify_certificate);
-    assert!(!imported.config.auto_extract_rar);
-    assert!(imported.config.delete_par2_after_repair);
-    assert_eq!(
-        imported.download_dir.as_deref(),
-        Some("/Volumes/Media/Usenet")
-    );
+    assert_eq!(imported.server.host, "news.example.com");
+    assert_eq!(imported.server.password, "p\"w#d");
+    assert_eq!(imported.server.connections, 40);
+    assert_eq!(imported.server.retry_attempts, 3);
+    assert!(!imported.server.verify_certificate);
+    assert!(!imported.auto_extract_rar);
+    assert!(imported.delete_par2_after_repair);
 
     std::fs::write(&path, "[usenet]\nserver = \"\"\n").unwrap();
     let err = cli_config_import(source).unwrap_err();

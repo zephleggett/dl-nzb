@@ -20,8 +20,8 @@ flamegraph.svg
 .idea/
 .claude/
 
-# Rust
-Cargo.lock
+# Python
+__pycache__/
 
 # Config (user-specific)
 config.toml

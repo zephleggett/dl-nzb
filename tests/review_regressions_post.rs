@@ -13,25 +13,11 @@ use std::time::{Duration, Instant};
 
 use common::*;
 use dl_nzb::engine::{
-    Engine, ErrorKind, JobEvent, JobHandle, JobObserver, JobPhase, JobRequest, Outcome, Preflight,
+    Engine, ErrorKind, JobEvent, JobHandle, JobObserver, JobPhase, JobRequest, Outcome,
 };
 use rar5::Rar5;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
-
-fn config(port: u16, dir: &Path, connections: u16) -> dl_nzb::Config {
-    let mut config = make_config("127.0.0.1", port, dir.into());
-    config.usenet.connections = connections;
-    config.tuning.max_concurrent_connections = connections as usize;
-    config
-}
-
-fn request(nzb: &Path, out: &Path) -> JobRequest {
-    JobRequest {
-        preflight: Preflight::Never,
-        ..JobRequest::new(nzb, out)
-    }
-}
 
 fn names_in(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
@@ -40,25 +26,6 @@ fn names_in(dir: &Path) -> Vec<String> {
         .collect();
     names.sort();
     names
-}
-
-/// A single-part yEnc body without a `pcrc32`, so the wire can't vouch for
-/// the data and PAR2 really verifies it.
-fn article_without_crc(name: &str, plain: &[u8]) -> Vec<u8> {
-    let mut body = Vec::new();
-    body.extend_from_slice(
-        format!(
-            "=ybegin part=1 total=1 line=128 size={} name={}\r\n",
-            plain.len(),
-            name
-        )
-        .as_bytes(),
-    );
-    body.extend_from_slice(format!("=ypart begin=1 end={}\r\n", plain.len()).as_bytes());
-    body.extend_from_slice(&yenc_encode(plain));
-    body.extend_from_slice(b"\r\n");
-    body.extend_from_slice(format!("=yend size={} part=1\r\n", plain.len()).as_bytes());
-    body
 }
 
 /// A release: files posted under one name (`posted`) whose PAR2 set knows

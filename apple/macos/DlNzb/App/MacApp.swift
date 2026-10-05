@@ -33,7 +33,7 @@ final class MacApp: OpenTarget {
   /// Opened again: "Already in the List" or "Already Downloaded", one at a time.
   var duplicates: [DuplicateNZB] = []
   /// Files that could not be added, for one alert.
-  var addProblems: [AddProblem] = []
+  var addProblems: [OpenFailure] = []
   /// The open panel (⌘O, Add NZB).
   var isImporting = false
   /// First launch without a server, or Settings asked for again.
@@ -110,12 +110,7 @@ final class MacApp: OpenTarget {
   ///
   /// `-simulate YES` asks for the simulated engine; otherwise the Rust one.
   private static func makeModel() -> AppModel {
-    let makeEngine: (AppModel.EngineKind) -> any DownloadEngine = { kind in
-      switch kind {
-      case .rust: RustEngine()
-      case .simulated: SimulatedEngine()
-      }
-    }
+    let makeEngine: (AppModel.EngineKind) -> any DownloadEngine = { $0.makeEngine() }
     #if DEBUG
       // `-scratchState YES`: settings, password and queue of this run only, so
       // trying the app (screenshots, demos) leaves the real ones alone.
@@ -187,7 +182,7 @@ final class MacApp: OpenTarget {
       case .duplicate(let duplicate):
         duplicates.append(duplicate)
       case .failed(let fileName, let message):
-        addProblems.append(AddProblem(fileName: fileName, message: message))
+        addProblems.append(OpenFailure(fileName: fileName, message: message))
       }
     }
     if let added { selection = [added] }
@@ -222,7 +217,7 @@ final class MacApp: OpenTarget {
       let result = await queue.addAgain(duplicate)
       switch result {
       case .added(let id): selection = [id]
-      case .failed(let fileName, let message): addProblems.append(AddProblem(fileName: fileName, message: message))
+      case .failed(let fileName, let message): addProblems.append(OpenFailure(fileName: fileName, message: message))
       case .duplicate: break
       }
     }
@@ -266,13 +261,9 @@ final class MacApp: OpenTarget {
     queue.items.filter { ids.contains($0.id) }
   }
 
-  func canReveal(_ ids: Set<DownloadItem.ID>) -> Bool { !ids.isEmpty && !items(ids).isEmpty }
-
   func reveal(_ ids: Set<DownloadItem.ID>) {
     FileActions.reveal(items(ids).map(FileActions.revealTarget))
   }
-
-  func canOpenFiles(_ ids: Set<DownloadItem.ID>) -> Bool { items(ids).contains(where: \.isFinished) }
 
   func openFiles(_ ids: Set<DownloadItem.ID>) {
     for item in items(ids) where item.isFinished {
@@ -287,17 +278,11 @@ final class MacApp: OpenTarget {
     NSPasteboard.general.setString(names.joined(separator: "\n"), forType: .string)
   }
 
-  func canPause(_ ids: Set<DownloadItem.ID>) -> Bool { items(ids).contains(where: \.canPause) }
-
   func pause(_ ids: Set<DownloadItem.ID>) {
     for item in items(ids) where item.canPause { queue.pause(item.id) }
   }
 
   /// Resume for paused items, Start for ones waiting on it.
-  func canResume(_ ids: Set<DownloadItem.ID>) -> Bool {
-    items(ids).contains { $0.canResume || queue.awaitsStart($0) }
-  }
-
   func resume(_ ids: Set<DownloadItem.ID>) {
     for item in items(ids) {
       if item.canResume {
@@ -308,39 +293,16 @@ final class MacApp: OpenTarget {
     }
   }
 
-  func canRetry(_ ids: Set<DownloadItem.ID>) -> Bool { items(ids).contains(where: \.canRetry) }
-
   func retry(_ ids: Set<DownloadItem.ID>) {
     for item in items(ids) where item.canRetry { queue.retry(item.id) }
   }
 
-  /// "Retry", or "Download Again" when the one item selected would start
-  /// over (`StatusText.retryTitle`).
-  func retryTitle(_ ids: Set<DownloadItem.ID>) -> String {
-    let chosen = items(ids).filter(\.canRetry)
-    return chosen.count == 1 ? StatusText.retryTitle(for: chosen[0]) : "Retry"
-  }
-
   /// One item selected that a pre-flight scan stopped: Download Anyway.
-  func canDownloadAnyway(_ ids: Set<DownloadItem.ID>) -> Bool {
-    let chosen = items(ids)
-    guard chosen.count == 1, case .needsAttention(.unrepairable) = chosen[0].state else { return false }
-    return true
-  }
-
   func downloadAnyway(_ ids: Set<DownloadItem.ID>) {
-    guard canDownloadAnyway(ids), let id = ids.first else { return }
-    queue.downloadAnyway(id)
-  }
-
-  /// One item selected that waits for its archive's password: Enter Password….
-  func canEnterPassword(_ ids: Set<DownloadItem.ID>) -> Bool {
     let chosen = items(ids)
-    guard chosen.count == 1, case .needsAttention(.password) = chosen[0].state else { return false }
-    return true
+    guard chosen.count == 1, case .needsAttention(.unrepairable) = chosen[0].state else { return }
+    queue.downloadAnyway(chosen[0].id)
   }
-
-  func canStop(_ ids: Set<DownloadItem.ID>) -> Bool { items(ids).contains(where: \.canStop) }
 
   /// Stops at once when nothing has downloaded yet; otherwise asks whether
   /// to keep the data (so Retry continues) or delete it.
@@ -375,10 +337,7 @@ final class MacApp: OpenTarget {
   /// A finished download's files always stay.
   func remove(_ request: ItemRequest, deletingData: Bool) {
     removeRequest = nil
-    let removed = Set(request.ids)
-    let next = selectionAfterRemoving(removed)
-    for id in request.ids { queue.remove(id, deletingData: deletingData) }
-    if !selection.isDisjoint(with: removed) { selection = next }
+    takeOffList(request) { queue.remove($0, deletingData: deletingData) }
   }
 
   func requestTrash(_ ids: Set<DownloadItem.ID>) {
@@ -389,9 +348,15 @@ final class MacApp: OpenTarget {
 
   func moveToTrash(_ request: ItemRequest) {
     trashRequest = nil
+    takeOffList(request) { queue.moveToTrash($0) }
+  }
+
+  /// Takes the request's items off the list with `removing`, and moves a
+  /// selection that held any of them on to the next row.
+  private func takeOffList(_ request: ItemRequest, removing: (DownloadItem.ID) -> Void) {
     let removed = Set(request.ids)
     let next = selectionAfterRemoving(removed)
-    for id in request.ids { queue.moveToTrash(id) }
+    for id in request.ids { removing(id) }
     if !selection.isDisjoint(with: removed) { selection = next }
   }
 
@@ -457,11 +422,6 @@ final class MacApp: OpenTarget {
     queue.dismissServerProblem()
   }
 
-  /// Try Again after a server problem.
-  func retryServer() {
-    queue.retryServer()
-  }
-
   /// Settings… in the menu bar item's menu.
   func showSettings() {
     NSApp.activate()
@@ -472,13 +432,6 @@ final class MacApp: OpenTarget {
     NSApp.activate()
     openWindowAction?(id: "acknowledgements")
   }
-}
-
-/// A file that could not be added, and why.
-struct AddProblem: Identifiable, Equatable {
-  let id = UUID()
-  let fileName: String
-  let message: String
 }
 
 /// Items a confirmation or sheet is about, with the name it shows.

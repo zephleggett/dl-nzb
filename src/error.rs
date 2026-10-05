@@ -87,13 +87,11 @@ impl DlNzbError {
                 NntpError::TlsError { .. } | NntpError::NotTls { .. } => ErrorKind::Tls,
                 NntpError::Timeout { .. } => ErrorKind::Timeout,
                 NntpError::ProtocolError(_)
-                | NntpError::ServerError { .. }
                 | NntpError::GroupNotFound { .. }
                 | NntpError::YencDecode(_)
                 | NntpError::UnhealthyConnection => ErrorKind::Protocol,
             },
             DlNzbError::Download(e) => match e {
-                DownloadError::InsufficientSegments { .. } => ErrorKind::Nzb,
                 DownloadError::PoolExhausted => ErrorKind::Connect,
                 DownloadError::DiskFull { .. } => ErrorKind::DiskFull,
             },
@@ -120,9 +118,6 @@ impl DlNzbError {
             DlNzbError::Download(DownloadError::PoolExhausted) => {
                 "Could not get a connection to the server.".into()
             }
-            DlNzbError::Download(DownloadError::InsufficientSegments { .. }) => {
-                "Too few of the NZB's articles are available.".into()
-            }
             // Already a full sentence of our own.
             DlNzbError::Download(e @ DownloadError::DiskFull { .. }) => e.to_string(),
             DlNzbError::Job { message, .. } => message.clone(),
@@ -145,16 +140,9 @@ impl DlNzbError {
                     format!("The folder {} can't be used.", path.display())
                 }
             },
-            DlNzbError::PostProcessing(e) => match e {
-                PostProcessingError::Par2(_) => "PAR2 could not finish checking the files.".into(),
-                PostProcessingError::FileRenameError { from, .. } => {
-                    let name = from
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| from.display().to_string());
-                    format!("Could not rename {name}.")
-                }
-            },
+            DlNzbError::PostProcessing(PostProcessingError::Par2(_)) => {
+                "PAR2 could not finish checking the files.".into()
+            }
             DlNzbError::Io(e) => io_message(e),
             DlNzbError::SerdeJson(_) => "Saved job data could not be read.".into(),
         }
@@ -189,7 +177,6 @@ fn nntp_message(e: &NntpError) -> String {
         NntpError::NotTls { .. } => "The server doesn't use SSL on this port.".into(),
         NntpError::Timeout { .. } => "The server did not respond in time.".into(),
         NntpError::ProtocolError(_)
-        | NntpError::ServerError { .. }
         | NntpError::GroupNotFound { .. }
         | NntpError::YencDecode(_)
         | NntpError::UnhealthyConnection => "The server sent an unexpected response.".into(),
@@ -316,9 +303,6 @@ pub enum NntpError {
     #[error("Protocol error: {0}")]
     ProtocolError(String),
 
-    #[error("Server response error: {code} {message}")]
-    ServerError { code: u16, message: String },
-
     #[error("Group not found: {group}")]
     GroupNotFound { group: String },
 
@@ -352,9 +336,6 @@ pub enum ConfigError {
 
 #[derive(Error, Debug)]
 pub enum DownloadError {
-    #[error("Insufficient segments: {available}/{required} available")]
-    InsufficientSegments { available: usize, required: usize },
-
     #[error("Connection pool exhausted")]
     PoolExhausted,
 
@@ -371,13 +352,6 @@ pub enum DownloadError {
 pub enum PostProcessingError {
     #[error("PAR2 error: {0}")]
     Par2(#[from] par2_rs::Par2Error),
-
-    #[error("Failed to rename file from {from} to {to}: {source}")]
-    FileRenameError {
-        from: PathBuf,
-        to: PathBuf,
-        source: std::io::Error,
-    },
 }
 
 pub type Result<T> = std::result::Result<T, DlNzbError>;

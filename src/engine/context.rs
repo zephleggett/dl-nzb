@@ -52,9 +52,14 @@ pub(crate) struct JobCtx {
     cancel_flag: Arc<AtomicBool>,
     pause_tx: watch::Sender<bool>,
     observer: Arc<dyn JobObserver>,
-    gate: Mutex<Gate>,
-    /// Set just before `Finished` is delivered (readable from inside the
-    /// observer, which holds the gate).
+    /// Serialises observer calls, and holds the last `Progress` delivered.
+    /// Holding the lock while calling out keeps events strictly ordered
+    /// across the threads that emit them, and `finished` (set under it)
+    /// drops anything that races in after `Finished`. Lock order: the gate,
+    /// then `progress`.
+    gate: Mutex<Option<JobProgress>>,
+    /// Set under the gate just before `Finished` is delivered (readable from
+    /// inside the observer, which holds the gate).
     finished: AtomicBool,
     progress: Mutex<ProgressState>,
     wire_bytes: AtomicU64,
@@ -72,15 +77,6 @@ pub(crate) struct JobCtx {
     /// at all; lets the job report "server unreachable" with its real kind
     /// instead of "articles missing".
     connection_error: Mutex<Option<(ErrorKind, String)>>,
-}
-
-/// Serialises observer calls. Holding the lock while calling out keeps events
-/// strictly ordered across the threads that emit them, and `finished` drops
-/// anything that races in after `Finished`. Lock order: the gate, then
-/// `progress`.
-struct Gate {
-    finished: bool,
-    last_progress: Option<JobProgress>,
 }
 
 struct ProgressState {
@@ -188,10 +184,7 @@ impl JobCtx {
             cancel_flag: Arc::new(AtomicBool::new(false)),
             pause_tx,
             observer,
-            gate: Mutex::new(Gate {
-                finished: false,
-                last_progress: None,
-            }),
+            gate: Mutex::new(None),
             finished: AtomicBool::new(false),
             progress: Mutex::new(ProgressState {
                 phase: None,
@@ -364,7 +357,7 @@ impl JobCtx {
     fn enter_phase(&self, phase: JobPhase, init: impl FnOnce(&mut ProgressState)) {
         // The gate is held while the phase changes, so nothing (the ticker
         // included) can report progress in the new phase before its `Phase`.
-        let mut gate = lock(&self.gate);
+        let mut last_progress = lock(&self.gate);
         {
             let mut p = lock(&self.progress);
             if p.phase == Some(phase) {
@@ -384,12 +377,12 @@ impl JobCtx {
             p.speed.restart();
             init(&mut p);
         }
-        if gate.finished {
+        if self.is_finished() {
             return;
         }
         self.deliver(JobEvent::Phase(phase));
         if let Some(snapshot) = self.snapshot() {
-            gate.last_progress = Some(snapshot.clone());
+            *last_progress = Some(snapshot.clone());
             self.deliver(JobEvent::Progress(snapshot));
         }
     }
@@ -482,17 +475,17 @@ impl JobCtx {
     /// Emit a `Progress` now if anything changed since the last one; used at
     /// the end of a download phase so its final (100%) state is always seen.
     pub(crate) fn emit_progress_if_changed(&self) {
-        let mut gate = lock(&self.gate);
-        if gate.finished {
+        let mut last_progress = lock(&self.gate);
+        if self.is_finished() {
             return;
         }
         let Some(snapshot) = self.snapshot() else {
             return;
         };
-        if gate.last_progress.as_ref() == Some(&snapshot) {
+        if last_progress.as_ref() == Some(&snapshot) {
             return;
         }
-        gate.last_progress = Some(snapshot.clone());
+        *last_progress = Some(snapshot.clone());
         self.deliver(JobEvent::Progress(snapshot));
     }
 
@@ -516,12 +509,11 @@ impl JobCtx {
     // --- other events ----------------------------------------------------
 
     fn emit(&self, event: JobEvent) {
-        let mut gate = lock(&self.gate);
-        if gate.finished {
+        let _gate = lock(&self.gate);
+        if self.is_finished() {
             return;
         }
         if matches!(event, JobEvent::Finished(_)) {
-            gate.finished = true;
             self.finished.store(true, Ordering::Release);
         }
         self.deliver(event);

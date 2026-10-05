@@ -37,7 +37,7 @@
 		C63487AA9B6534B6376AED41 /* TextTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F60E418613EC4EE2F152AE32 /* TextTests.swift */; };
 		CBC6BEAA3978CEE1447D21C4 /* DlNzbRust in Frameworks */ = {isa = PBXBuildFile; productRef = 89E633B113B5B7D85C82E7CF /* DlNzbRust */; };
 		CFAC4DAC5015F91A119D37B1 /* AppLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = C45E47DC785F45BBFE611FE1 /* AppLog.swift */; };
-		E58599207753B9BB509E2626 /* Engines.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDFD7341D2C00999D8686B7C /* Engines.swift */; };
+		D6D6A13C324A7E2637864BBA /* PrimaryAction.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AF0FEC604E6F94657C9A89D /* PrimaryAction.swift */; };
 		E8A9275A02B7FE1F1889F5E5 /* QueueHolds.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06B182DF4B68404303F794E3 /* QueueHolds.swift */; };
 		EAEB2ECB2152A569CC33AD03 /* BackgroundRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A43D282E18E700861501375 /* BackgroundRunner.swift */; };
 		EB81CF1B51C9D05DB9882C20 /* OnboardingSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FE5813569C6527755C13EC8 /* OnboardingSheet.swift */; };
@@ -62,6 +62,7 @@
 		06E11DC3528BD5E540D9F438 /* DownloadRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadRowView.swift; sourceTree = "<group>"; };
 		103EB9AF0553DA08B7DB4C2B /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		1199E4D9777B45F278BFA01F /* AppIntents.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AppIntents.framework; path = System/Library/Frameworks/AppIntents.framework; sourceTree = SDKROOT; };
+		1AF0FEC604E6F94657C9A89D /* PrimaryAction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrimaryAction.swift; sourceTree = "<group>"; };
 		27642D2F2487FA90259E9FFF /* OpenRouterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenRouterTests.swift; sourceTree = "<group>"; };
 		471DDD4F217FD32E53D083A4 /* NetworkGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkGate.swift; sourceTree = "<group>"; };
 		4FD0911F634B92B9E933C6C2 /* ReadableWidth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReadableWidth.swift; sourceTree = "<group>"; };
@@ -87,7 +88,6 @@
 		C550D0ED473EF25D2BDB8E6C /* FilesLocation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FilesLocation.swift; sourceTree = "<group>"; };
 		C67D206F2498E5529DDAE141 /* ContinuedTasks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContinuedTasks.swift; sourceTree = "<group>"; };
 		CCAF1C7B7E1F943636F8B6AC /* Notifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Notifier.swift; sourceTree = "<group>"; };
-		CDFD7341D2C00999D8686B7C /* Engines.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Engines.swift; sourceTree = "<group>"; };
 		D39C69F38F9655BE51B73923 /* RowStatus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RowStatus.swift; sourceTree = "<group>"; };
 		D49038CAD5B3F8CF848AC6CB /* TestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestSupport.swift; sourceTree = "<group>"; };
 		E9A43B2C9DA46D1AA68456C8 /* DownloadsScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadsScreen.swift; sourceTree = "<group>"; };
@@ -135,9 +135,9 @@
 				C45E47DC785F45BBFE611FE1 /* AppLog.swift */,
 				5FCDE2417CB521AB315846BC /* AppRuntime.swift */,
 				A1A3B5CC1C61270E491AC86E /* DlNzbApp.swift */,
-				CDFD7341D2C00999D8686B7C /* Engines.swift */,
 				ED72CF604B3E541E8E890A21 /* OpenRouter.swift */,
 				8B814299EAC9E71B73946110 /* PhoneSettings.swift */,
+				1AF0FEC604E6F94657C9A89D /* PrimaryAction.swift */,
 				06B182DF4B68404303F794E3 /* QueueHolds.swift */,
 			);
 			path = App;
@@ -389,7 +389,6 @@
 				00AE8DC30876A0373A2C5A4C /* DownloadDetailView.swift in Sources */,
 				F3E078F0BEC2A89AD10D6F1E /* DownloadRowView.swift in Sources */,
 				0E34BDB7F5B5171EE60F4AD8 /* DownloadsScreen.swift in Sources */,
-				E58599207753B9BB509E2626 /* Engines.swift in Sources */,
 				A5AB788B953FA14C4A293724 /* FilesLocation.swift in Sources */,
 				5E82FA1D9227F4DCEFE34C22 /* ItemPrompts.swift in Sources */,
 				B97BDF089B5726115735C991 /* NetworkGate.swift in Sources */,
@@ -397,6 +396,7 @@
 				EB81CF1B51C9D05DB9882C20 /* OnboardingSheet.swift in Sources */,
 				A4DFE6A13A0E145900C124EA /* OpenRouter.swift in Sources */,
 				FFC76CAB1F2E4FA78EA79D6A /* PhoneSettings.swift in Sources */,
+				D6D6A13C324A7E2637864BBA /* PrimaryAction.swift in Sources */,
 				E8A9275A02B7FE1F1889F5E5 /* QueueHolds.swift in Sources */,
 				ED067231603F550E281DFC0F /* ReadableWidth.swift in Sources */,
 				34F4C501F7A5651AA0573697 /* RootView.swift in Sources */,

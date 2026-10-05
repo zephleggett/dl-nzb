@@ -4,7 +4,7 @@
 //! to more meaningful names based on the NZB name.
 
 use super::file_extension;
-use crate::error::{DlNzbError, PostProcessingError};
+use crate::error::DlNzbError;
 use crate::patterns::par2 as par2_patterns;
 use par2_rs::Par2Info;
 use std::collections::{HashMap, HashSet};
@@ -13,13 +13,8 @@ use std::{fs, io::Read};
 
 type Result<T> = std::result::Result<T, DlNzbError>;
 
-/// Outcome of the PAR2-driven filename recovery pass.
-pub struct Par2NameRecovery {
-    pub files_renamed: usize,
-}
-
 /// Rename obfuscated files to their real names using the authoritative file
-/// table embedded in the PAR2 set.
+/// table embedded in the PAR2 set, returning how many were renamed.
 ///
 /// Each protected file is identified by the MD5 of its first 16 KiB (the PAR2
 /// `hash_16k`), so this works even when every filename on disk is scrambled —
@@ -32,7 +27,7 @@ pub fn recover_par2_names(
     directory: &Path,
     par2_files: &[PathBuf],
     on_rename: &mut dyn FnMut(&Path, &Path),
-) -> Result<Par2NameRecovery> {
+) -> usize {
     // Prefer the index par2 (no `.vol`), else any par2 file; `Par2Info::load`
     // discovers sibling volumes by recovery-set id regardless.
     let index = par2_files
@@ -40,7 +35,7 @@ pub fn recover_par2_names(
         .find(|p| par2_patterns::is_main_par2(p))
         .or_else(|| par2_files.first());
     let Some(index) = index else {
-        return Ok(Par2NameRecovery { files_renamed: 0 });
+        return 0;
     };
 
     let info = match Par2Info::load(index) {
@@ -51,7 +46,7 @@ pub fn recover_par2_names(
                 index.display(),
                 e
             );
-            return Ok(Par2NameRecovery { files_renamed: 0 });
+            return 0;
         }
     };
 
@@ -75,7 +70,7 @@ pub fn recover_par2_names(
         by_hash.remove(h);
     }
     if by_hash.is_empty() {
-        return Ok(Par2NameRecovery { files_renamed: 0 });
+        return 0;
     }
 
     let entries: Vec<PathBuf> = match fs::read_dir(directory) {
@@ -84,7 +79,7 @@ pub fn recover_par2_names(
             .map(|e| e.path())
             .filter(|p| p.is_file())
             .collect(),
-        Err(_) => return Ok(Par2NameRecovery { files_renamed: 0 }),
+        Err(_) => return 0,
     };
 
     let mut files_renamed = 0;
@@ -137,7 +132,7 @@ pub fn recover_par2_names(
         }
     }
 
-    Ok(Par2NameRecovery { files_renamed })
+    files_renamed
 }
 
 /// MD5 of the first 16 KiB of a file (or the whole file if smaller), matching
@@ -290,16 +285,6 @@ fn get_unique_filename(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
-/// Rename a file, returning the new path
-fn rename_file(old_path: &Path, new_path: &Path) -> Result<PathBuf> {
-    fs::rename(old_path, new_path).map_err(|e| PostProcessingError::FileRenameError {
-        from: old_path.to_path_buf(),
-        to: new_path.to_path_buf(),
-        source: e,
-    })?;
-    Ok(new_path.to_path_buf())
-}
-
 /// A job's title made safe as a file name stem: no path separators or
 /// characters file systems refuse, no control or invisible characters, no
 /// leading or trailing spaces or dots, at most 200 bytes. `None` when nothing
@@ -449,18 +434,17 @@ pub fn deobfuscate_files(
             new_file_list.push(file.clone());
         } else if let Some(new_ext) = file_extension::what_is_most_likely_extension(file) {
             // Detected file type - add extension
-            let new_path = file.with_extension(&new_ext[1..]); // Remove leading dot
-            let new_path = get_unique_filename(&new_path);
+            let new_path = get_unique_filename(&file.with_extension(new_ext));
 
             tracing::debug!(
                 "Adding extension: {} -> {}",
                 file.display(),
                 new_path.display()
             );
-            match rename_file(file, &new_path) {
-                Ok(renamed) => {
-                    on_rename(file, &renamed);
-                    new_file_list.push(renamed);
+            match fs::rename(file, &new_path) {
+                Ok(()) => {
+                    on_rename(file, &new_path);
+                    new_file_list.push(new_path);
                 }
                 Err(e) => {
                     tracing::debug!("Failed to rename {}: {}", file.display(), e);
@@ -542,8 +526,8 @@ pub fn deobfuscate_files(
         new_path.display()
     );
 
-    match rename_file(&biggest_file, &new_path) {
-        Ok(_) => {
+    match fs::rename(&biggest_file, &new_path) {
+        Ok(()) => {
             files_renamed += 1;
             on_rename(&biggest_file, &new_path);
         }
@@ -584,8 +568,8 @@ pub fn deobfuscate_files(
                 new_path.display()
             );
 
-            match rename_file(file, &new_path) {
-                Ok(_) => {
+            match fs::rename(file, &new_path) {
+                Ok(()) => {
                     files_renamed += 1;
                     on_rename(file, &new_path);
                 }

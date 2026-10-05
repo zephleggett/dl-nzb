@@ -16,3 +16,4 @@ mod test_rar5;
 
 pub use par2::Par2Status;
 pub use post_processor::{PostProcessingOutcome, PostProcessor};
+pub use rar::RarExtractionReport;

@@ -142,7 +142,7 @@ struct DownloadQueueTests {
     }
     var peakInQueue = 0
     let done = await eventually(timeout: .seconds(30)) {
-      peakInQueue = max(peakInQueue, harness.queue.downloadingCount)
+      peakInQueue = max(peakInQueue, harness.queue.items.count(where: \.usesNetwork))
       return ids.allSatisfy { harness.isFinished($0) }
     }
     #expect(done)
@@ -379,6 +379,23 @@ struct DownloadQueueTests {
     try await harness.launch()
     let id = try await harness.add("Encrypted.Password.With.Meta", password: "fromtheindexer")
     #expect(await eventually { harness.isFinished(id) })
+  }
+
+  @Test("A password in the NZB's file name stays out of the title and folder, and opens the archive")
+  func passwordInFileName() async throws {
+    let harness = QueueHarness()
+    try await harness.launch()
+    let url = try TestNZB.write(title: "Encrypted.Release", in: harness.inbox, fileName: "Encrypted.Release{{letmein}}.nzb", titled: false)
+    guard case .added(let id) = await harness.queue.add(url) else {
+      Issue.record("the NZB was not added")
+      return
+    }
+    let item = try #require(harness.queue.item(id))
+    #expect(item.title == "Encrypted.Release")
+    #expect(item.outputDirectory.lastPathComponent == "Encrypted.Release")
+    #expect(item.info?.passwords == ["letmein"])
+    #expect(await eventually { harness.isFinished(id) })
+    #expect(harness.queue.item(id)?.passwords == [])
   }
 
   @Test("Not enough space needs attention, with the engine's sentence")
@@ -672,11 +689,11 @@ struct DownloadQueueTests {
   func aggregates() {
     let queue = DownloadQueue.preview(items: [PreviewData.downloading, PreviewData.extracting, PreviewData.queued, PreviewData.paused, PreviewData.finished])
     #expect(queue.activeCount == 2)
-    #expect(queue.downloadingCount == 1)
+    #expect(queue.items.count(where: \.usesNetwork) == 1)
     #expect(queue.queuedCount == 1)
     #expect(queue.pausedCount == 1)
     #expect(queue.unfinishedCount == 4)
-    #expect(queue.aggregateSpeed == 84_400_000)
+    #expect(queue.speed() == 84_400_000)
     #expect(queue.currentItem?.id == PreviewData.downloading.id)
     // Downloading 38% of 8.6 GB, extracting 5.1 GB (downloaded), waiting 8.6 GB, paused at 41% of 5.1 GB.
     #expect((0.35...0.41).contains(queue.overallFraction ?? -1))
@@ -738,14 +755,32 @@ struct DownloadQueueTests {
     #expect(queue.live(item).progress == progress)
   }
 
-  @Test("The speed and the overall fraction follow every running item's numbers")
+  @Test("The speed and the overall fraction follow every transfer's numbers")
   func aggregatesHearProgress() throws {
+    let queue = DownloadQueue.preview(items: [PreviewData.downloading, PreviewData.extracting])
+    queue.progressInterval = .zero
+    var progress = try #require(PreviewData.downloading.progress)
+    let heard = ChangeCount()
+    withObservationTracking {
+      _ = queue.speed()
+      _ = queue.overallFraction
+    } onChange: {
+      heard.increment()
+    }
+
+    progress.bytesDone += 1_000_000
+    queue.apply(.progress(progress), to: PreviewData.downloading.id)
+    #expect(heard.value == 1)
+  }
+
+  @Test("Post-processing numbers do not wake the speed or the overall fraction, which they cannot change")
+  func aggregatesIgnorePostProcessing() throws {
     let queue = DownloadQueue.preview(items: [PreviewData.downloading, PreviewData.extracting])
     queue.progressInterval = .zero
     var progress = try #require(PreviewData.extracting.progress)
     let heard = ChangeCount()
     withObservationTracking {
-      _ = queue.aggregateSpeed
+      _ = queue.speed()
       _ = queue.overallFraction
     } onChange: {
       heard.increment()
@@ -753,7 +788,8 @@ struct DownloadQueueTests {
 
     progress.fraction += 0.1
     queue.apply(.progress(progress), to: PreviewData.extracting.id)
-    #expect(heard.value == 1)
+    #expect(heard.value == 0)
+    #expect(queue.item(PreviewData.extracting.id)?.progress == progress)
   }
 
   @Test("Pause All is offered only while something can pause, Resume All only while something is held")

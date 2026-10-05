@@ -11,12 +11,12 @@
 		066D171F9AF670CB1CE0190B /* DlNzbKit in Frameworks */ = {isa = PBXBuildFile; productRef = 226C24E5270B74F58ADD2EA1 /* DlNzbKit */; };
 		0712731C5C44C1330F7BFFE4 /* Shared.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AF91E07BFA4FAFDE8C8E4177 /* Shared.xcassets */; };
 		0ABFA836E72AA5FEE83ECFB9 /* InspectorPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D64BD8690FB8F53716CE9CF /* InspectorPanel.swift */; };
+		0B52D657E6352D8A6C80BF4F /* MacLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8DB52C62AE433A8748C70EE /* MacLog.swift */; };
 		1010AD0380A657BA15AF3987 /* Watcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70164926C63D94BC7CC7BC04 /* Watcher.swift */; };
 		116F7B1F3C40F6B341310202 /* MenuState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A4CED39D441DF8AC293B73A /* MenuState.swift */; };
 		14D4D4F0F0AE047D2DF10450 /* AppDelegateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3333C6F70654AAF6C7856042 /* AppDelegateTests.swift */; };
 		151E2F0E01210307AC221A72 /* UpdateController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25BCD36D070FDCABF2D5710E /* UpdateController.swift */; };
 		161FD09D470076EE71320F9C /* FinderProgress.swift in Sources */ = {isa = PBXBuildFile; fileRef = A24FAA2ED9876F737F7AF5A5 /* FinderProgress.swift */; };
-		173F0322FC1A0D7C884C2344 /* NZBType.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD93DA841B9CA87E54C77492 /* NZBType.swift */; };
 		1A4B14156D986A4F156B974B /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37EAEF5B58ED2EB642529BB1 /* SettingsView.swift */; };
 		1D1CBB88C4C459E8B6C742C0 /* SystemServices.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3492E76FBCA9A93A37655452 /* SystemServices.swift */; };
 		2B98B2103577B7859ED0352F /* LogExport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79D5B52F54D6659C008B1366 /* LogExport.swift */; };
@@ -66,8 +66,8 @@
 		CFC38275339285EF291FFBF2 /* Sheets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C4EF417900F8EF673B60B0E /* Sheets.swift */; };
 		D0E8B328422B96F51133D6B9 /* CopyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65D8D863FD6DE3F3A3D477C7 /* CopyTests.swift */; };
 		D65BA8EFD4994996950A0E37 /* DownloadList.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CF4D88D82EDA30766E9AA09 /* DownloadList.swift */; };
-		D91F042879ED7F2F72CE9FF2 /* NZBType.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD93DA841B9CA87E54C77492 /* NZBType.swift */; };
 		DBD923C200F3E9CD2D4888F9 /* DlNzbApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A3B5CC1C61270E491AC86E /* DlNzbApp.swift */; };
+		E3A69B51B252B8FFAB69AAE3 /* MacLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8DB52C62AE433A8748C70EE /* MacLog.swift */; };
 		E3B10B4B25124F8891998EEE /* QueueAlerts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26F6EA2E984013FA03E08151 /* QueueAlerts.swift */; };
 		E4A896289CA5C144A2127AAA /* DockTileMachineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A572F95FCF5568C4C38D664 /* DockTileMachineTests.swift */; };
 		E6A19FFE6B363EFBABEEDCBB /* QuitPromptTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B56C3BE8A29E669649C1E77 /* QuitPromptTests.swift */; };
@@ -119,6 +119,7 @@
 		9A572F95FCF5568C4C38D664 /* DockTileMachineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DockTileMachineTests.swift; sourceTree = "<group>"; };
 		A1A3B5CC1C61270E491AC86E /* DlNzbApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DlNzbApp.swift; sourceTree = "<group>"; };
 		A24FAA2ED9876F737F7AF5A5 /* FinderProgress.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinderProgress.swift; sourceTree = "<group>"; };
+		A8DB52C62AE433A8748C70EE /* MacLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacLog.swift; sourceTree = "<group>"; };
 		AA52B193D8552BEB7DFDD477 /* FileActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileActions.swift; sourceTree = "<group>"; };
 		AECD8A3DEE86A2AB95CE0765 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		AF91E07BFA4FAFDE8C8E4177 /* Shared.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Shared.xcassets; sourceTree = "<group>"; };
@@ -127,7 +128,6 @@
 		BBD8D41238C16E888074AC32 /* DownloadRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadRow.swift; sourceTree = "<group>"; };
 		BE6DC3357F679115A37BB742 /* Signing.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Signing.xcconfig; sourceTree = "<group>"; };
 		CC07A95B8A41AF4E7DAF5A24 /* Notifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Notifier.swift; sourceTree = "<group>"; };
-		CD93DA841B9CA87E54C77492 /* NZBType.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NZBType.swift; sourceTree = "<group>"; };
 		D15AE374A9A82C4DB7EFD607 /* IntentRouterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntentRouterTests.swift; sourceTree = "<group>"; };
 		EE61929B05F949EED3665108 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		F0EC5076D637CF332CCCA9DB /* dl-nzb.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "dl-nzb.app"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -188,7 +188,7 @@
 			isa = PBXGroup;
 			children = (
 				AA52B193D8552BEB7DFDD477 /* FileActions.swift */,
-				CD93DA841B9CA87E54C77492 /* NZBType.swift */,
+				A8DB52C62AE433A8748C70EE /* MacLog.swift */,
 			);
 			path = Support;
 			sourceTree = "<group>";
@@ -475,9 +475,9 @@
 				0ABFA836E72AA5FEE83ECFB9 /* InspectorPanel.swift in Sources */,
 				2B98B2103577B7859ED0352F /* LogExport.swift in Sources */,
 				F4F8B5C49EE4163CD2EA1837 /* MacApp.swift in Sources */,
+				0B52D657E6352D8A6C80BF4F /* MacLog.swift in Sources */,
 				BA98BAB55887FE3833BCDFA7 /* MainWindow.swift in Sources */,
 				116F7B1F3C40F6B341310202 /* MenuState.swift in Sources */,
-				D91F042879ED7F2F72CE9FF2 /* NZBType.swift in Sources */,
 				F43D70B33CE3C264BB58FB62 /* Notifier.swift in Sources */,
 				CF0B78BEDE48438571A9D7DB /* OpenRequestBuffer.swift in Sources */,
 				E3B10B4B25124F8891998EEE /* QueueAlerts.swift in Sources */,
@@ -521,9 +521,9 @@
 				74C82093ED34DAD7642EF0B2 /* InspectorPanel.swift in Sources */,
 				57483A03667CADCA67E42AB8 /* LogExport.swift in Sources */,
 				37DE878E108FB5B2EBA0C6BA /* MacApp.swift in Sources */,
+				E3A69B51B252B8FFAB69AAE3 /* MacLog.swift in Sources */,
 				8545FE7B7BA835C476D6E5FD /* MainWindow.swift in Sources */,
 				65DA8C43D1404A6579A82FA2 /* MenuState.swift in Sources */,
-				173F0322FC1A0D7C884C2344 /* NZBType.swift in Sources */,
 				707DD200ECA34445447C2AA8 /* Notifier.swift in Sources */,
 				ED3BE505580B6F1322D43FAA /* OpenRequestBuffer.swift in Sources */,
 				3AE76397386418D1A06235C0 /* QueueAlerts.swift in Sources */,

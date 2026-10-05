@@ -143,18 +143,6 @@ impl EngineConfig {
     }
 }
 
-/// The dl-nzb CLI's settings, read from its `config.toml`, password included.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
-pub struct ImportedConfig {
-    pub config: EngineConfig,
-    /// The CLI's `download.dir` when it is absolute (a leading `~` is
-    /// expanded with the process's home directory, which in a sandbox is the
-    /// container). Only a suggestion: the app may not write there.
-    pub download_dir: Option<String>,
-    /// The file it came from.
-    pub source: String,
-}
-
 // MARK: Requests
 
 #[uniffi::remote(Enum)]

@@ -1,11 +1,10 @@
 import Foundation
 
-/// Reads the dl-nzb CLI's `config.toml` for the first-launch import.
+/// Reads the dl-nzb CLI's `config.toml` in Swift, for the simulated engine
+/// and previews (`RustEngine` reads it with the CLI's own parser), and says
+/// where the Mac's open panel should look for it.
 ///
-/// The sandboxed Mac app cannot read the CLI's file until the user picks it in
-/// an open panel, which hands over a URL the engine's own `cli_config_import()`
-/// never sees. So the import is read here, from whatever URL the panel gives,
-/// and only the CLI's own shape of TOML is understood: `[section]` headers and
+/// Only the CLI's own shape of TOML is understood: `[section]` headers and
 /// `key = value` lines with strings, integers and booleans.
 public enum CLIConfig {
   /// `~/Library/Application Support/dl-nzb/config.toml` in the user's real home,
@@ -20,29 +19,22 @@ public enum CLIConfig {
 
   #if os(macOS)
     /// The home directory from the user database: inside the sandbox,
-    /// `NSHomeDirectory()` is the container.
-    public static var realHomeDirectory: URL {
+    /// `NSHomeDirectory()` is the container. Looked up once.
+    public static let realHomeDirectory: URL = {
       if let entry = getpwuid(getuid()), let dir = entry.pointee.pw_dir {
         return URL(filePath: String(cString: dir), directoryHint: .isDirectory)
       }
       return URL(filePath: NSHomeDirectory(), directoryHint: .isDirectory)
-    }
+    }()
   #endif
 
   /// Reads and converts a config file. Handles a security-scoped URL from an
   /// open panel. Synchronous file work: call it off the main actor.
   public static func read(from url: URL) throws -> ImportedSettings {
-    let accessing = url.startAccessingSecurityScopedResource()
-    defer { if accessing { url.stopAccessingSecurityScopedResource() } }
-    let text: String
-    do {
-      text = try String(contentsOf: url, encoding: .utf8)
-    } catch {
+    guard let text = url.withSecurityScopedAccess({ try? String(contentsOf: url, encoding: .utf8) }) else {
       throw EngineError(.io, "dl-nzb could not read \(url.lastPathComponent).")
     }
-    var settings = try parse(text)
-    settings.source = url
-    return settings
+    return try parse(text)
   }
 
   /// Converts the text of a config file. Throws `EngineError(.config)` when it
@@ -94,8 +86,7 @@ public enum CLIConfig {
       server: server,
       password: string("usenet.password") ?? "",
       processing: processing,
-      advanced: advanced,
-      downloadDirectory: string("download.dir").flatMap(absoluteDirectory))
+      advanced: advanced)
   }
 
   enum Value: Equatable {
@@ -161,20 +152,5 @@ public enum CLIConfig {
       }
     }
     return nil
-  }
-
-  private static func absoluteDirectory(_ path: String) -> URL? {
-    #if os(macOS)
-      if path.hasPrefix("~/") {
-        return realHomeDirectory.appending(path: String(path.dropFirst(2)), directoryHint: .isDirectory)
-      }
-    #endif
-    return path.hasPrefix("/") ? URL(filePath: path, directoryHint: .isDirectory) : nil
-  }
-}
-
-extension Comparable {
-  func clamped(to range: ClosedRange<Self>) -> Self {
-    min(max(self, range.lowerBound), range.upperBound)
   }
 }

@@ -22,7 +22,10 @@ fn expand_tilde(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
-/// Main configuration structure with builder pattern support
+/// Main configuration structure with builder pattern support. Keys it no
+/// longer has (`usenet.timeout`, `download.force_redownload`,
+/// `tuning.large_file_threshold`, `[logging]`, and older ones) are ignored, so
+/// an old file still loads.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
@@ -33,9 +36,6 @@ pub struct Config {
 
     #[serde(default)]
     pub post_processing: PostProcessingConfig,
-
-    #[serde(default)]
-    pub logging: LoggingConfig,
 
     #[serde(default)]
     pub tuning: TuningConfig,
@@ -81,7 +81,6 @@ pub struct UsenetConfig {
     pub ssl: bool,
     pub verify_ssl_certs: bool,
     pub connections: u16,
-    pub timeout: u64, // seconds
     pub retry_attempts: u8,
     pub retry_delay: u64, // milliseconds
 }
@@ -97,7 +96,6 @@ impl std::fmt::Debug for UsenetConfig {
             .field("ssl", &self.ssl)
             .field("verify_ssl_certs", &self.verify_ssl_certs)
             .field("connections", &self.connections)
-            .field("timeout", &self.timeout)
             .field("retry_attempts", &self.retry_attempts)
             .field("retry_delay", &self.retry_delay)
             .finish()
@@ -108,8 +106,6 @@ impl std::fmt::Debug for UsenetConfig {
 pub struct DownloadConfig {
     pub dir: PathBuf,
     pub create_subfolders: bool,
-    #[serde(default)]
-    pub force_redownload: bool,
     /// Cap on the engine's total download speed, in bytes per second; `None`
     /// is unlimited. In the file: an integer, or a string with a K, M or G
     /// suffix (1024-based, as curl's `--limit-rate`), e.g. `"500K"`, `"10M"`;
@@ -256,13 +252,6 @@ pub struct PostProcessingConfig {
     pub download_all_par2: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoggingConfig {
-    pub level: String,
-    pub file: Option<PathBuf>,
-    pub format: String,
-}
-
 /// Performance tuning parameters
 /// These are advanced settings that typically don't need adjustment
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -280,8 +269,6 @@ pub struct TuningConfig {
     pub decode_retry_cap: u8,
     /// Maximum concurrent connection creation attempts
     pub max_concurrent_connections: usize,
-    /// File size threshold (bytes) above which to show progress during RAR extraction
-    pub large_file_threshold: u64,
     /// `fsync` each finished file at finalize. Default `false`: PAR2 verifies
     /// integrity and a crash just means re-download, so we skip hundreds of
     /// fsync barriers (a large wall-clock win on big sets / slow or network
@@ -309,7 +296,6 @@ impl Default for UsenetConfig {
             ssl: true, // Default to SSL
             verify_ssl_certs: true,
             connections: 30,   // Most providers allow 30-50; saturates a fast link
-            timeout: 30,       // Reduced from 45s
             retry_attempts: 2, // Faster failover
             retry_delay: 500,  // Quick retries
         }
@@ -321,7 +307,6 @@ impl Default for DownloadConfig {
         Self {
             dir: PathBuf::from("downloads"),
             create_subfolders: true,
-            force_redownload: false,
             speed_limit: None,
         }
     }
@@ -340,23 +325,12 @@ impl Default for PostProcessingConfig {
     }
 }
 
-impl Default for LoggingConfig {
-    fn default() -> Self {
-        Self {
-            level: "info".to_string(),
-            file: None,
-            format: "pretty".to_string(),
-        }
-    }
-}
-
 impl Default for TuningConfig {
     fn default() -> Self {
         Self {
             pipeline_depth: default_pipeline_depth(), // in-flight BODY requests per connection
             decode_retry_cap: default_decode_retry_cap(), // bounded yEnc-decode retries
             max_concurrent_connections: 30,           // Concurrent connection creation limit
-            large_file_threshold: 10 * 1024 * 1024,   // 10MB for progress monitoring
             fsync_on_finalize: false,                 // skip fsync; PAR2 verifies integrity
         }
     }
@@ -467,9 +441,6 @@ impl Config {
         let mut config: Config = toml::from_str(content)
             .map_err(|e| ConfigError::ParseError(format!("Failed to parse config: {}", e)))?;
         config.download.dir = expand_tilde(&config.download.dir);
-        if let Some(log_file) = config.logging.file.as_ref() {
-            config.logging.file = Some(expand_tilde(log_file));
-        }
         Ok(config)
     }
 
@@ -500,7 +471,6 @@ impl Config {
 # password     - Your Usenet account password (REQUIRED)
 # ssl          - Use encrypted SSL/TLS connection (recommended)
 # connections  - Number of connections (30-50 typical, check your provider's limit)
-# timeout      - Connection timeout in seconds
 # retry_attempts - Number of times to retry failed downloads
 #
 # [download]
@@ -689,6 +659,66 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(config.download.speed_limit, None);
+    }
+
+    /// Keys dl-nzb no longer reads stay harmless in an old file.
+    #[test]
+    fn an_old_config_with_removed_keys_still_loads() {
+        let config = Config::from_toml_str(
+            r#"
+[usenet]
+server = "news.example.com"
+port = 563
+username = "user"
+password = "pass"
+ssl = true
+verify_ssl_certs = true
+connections = 20
+timeout = 30
+retry_attempts = 2
+retry_delay = 500
+
+[download]
+dir = "downloads"
+create_subfolders = true
+force_redownload = false
+
+[post_processing]
+auto_par2_repair = true
+auto_extract_rar = true
+delete_rar_after_extract = false
+delete_par2_after_repair = false
+deobfuscate_file_names = true
+
+[memory]
+max_segments_in_memory = 800
+
+[tuning]
+pipeline_size = 50
+connection_wait_timeout = 300
+max_concurrent_connections = 20
+large_file_threshold = 10485760
+
+[logging]
+level = "info"
+format = "pretty"
+file = "~/dl-nzb.log"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.usenet.server, "news.example.com");
+        assert_eq!(config.usenet.connections, 20);
+        assert_eq!(config.tuning.max_concurrent_connections, 20);
+        assert_eq!(config.tuning.pipeline_depth, 4);
+        let shown = config.display_toml().unwrap();
+        for gone in [
+            "timeout",
+            "force_redownload",
+            "large_file_threshold",
+            "logging",
+        ] {
+            assert!(!shown.contains(gone), "{gone} in {shown}");
+        }
     }
 
     #[test]

@@ -52,10 +52,48 @@ extension AppPaths {
   }
 }
 
+extension URL {
+  /// The standardised path without a trailing slash ("/" stays itself), so
+  /// two spellings of one folder compare equal. Symbolic links are not
+  /// followed.
+  public var normalisedPath: String {
+    var path = standardizedFileURL.path(percentEncoded: false)
+    while path.count > 1 && path.hasSuffix("/") { path.removeLast() }
+    return path
+  }
+
+  /// Whether this lies somewhere within `folder` (not `folder` itself), by
+  /// `normalisedPath`.
+  public func isInside(_ folder: URL) -> Bool {
+    let base = folder.normalisedPath
+    let path = normalisedPath
+    return path != base && path.hasPrefix(base.hasSuffix("/") ? base : base + "/")
+  }
+
+  /// Runs `body` with the security-scoped access this URL carries (an open
+  /// panel's, a bookmark's, an open event's) taken up, and gives it back
+  /// after. A URL without any, or outside the sandbox, just runs `body`.
+  public func withSecurityScopedAccess<T, E: Error>(_ body: () throws(E) -> T) throws(E) -> T {
+    let accessing = startAccessingSecurityScopedResource()
+    defer { if accessing { stopAccessingSecurityScopedResource() } }
+    return try body()
+  }
+}
+
 /// A stable identity for an NZB's contents, so opening the same file twice is
 /// noticed whatever it is called.
 public enum NzbFingerprint {
+  /// SHA-256 as lowercase hex. NZBs run to hundreds of megabytes: call it off
+  /// the main actor.
   public static func of(_ data: Data) -> String {
-    SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    var hex: [UInt8] = []
+    hex.reserveCapacity(SHA256.byteCount * 2)
+    for byte in SHA256.hash(data: data) {
+      hex.append(hexDigits[Int(byte >> 4)])
+      hex.append(hexDigits[Int(byte & 0x0f)])
+    }
+    return String(decoding: hex, as: UTF8.self)
   }
+
+  private static let hexDigits = Array("0123456789abcdef".utf8)
 }

@@ -181,8 +181,8 @@ public final class SimulatedEngine: DownloadEngine {
       greeting: "200 \(host) NNRP Service Ready (posting ok)", tls: server.useSSL, latencyMilliseconds: configuration.latencyMilliseconds)
   }
 
-  public func inspect(_ nzb: URL) async throws -> NzbInfo {
-    try NzbParser.parse(contentsOf: nzb)
+  public func inspect(_ nzb: URL, fileName: String?) async throws -> NzbInfo {
+    try NzbParser.parse(contentsOf: nzb, fileName: fileName)
   }
 
   public func start(_ request: JobRequest) async throws -> JobSession {
@@ -217,11 +217,6 @@ public final class SimulatedEngine: DownloadEngine {
         fingerprint: sidecar?.fingerprint ?? "")
       return await run.reprocess()
     }
-  }
-
-  public func importCLIConfig() async -> ImportedSettings? {
-    guard let url = CLIConfig.defaultURL, FileManager.default.isReadableFile(atPath: url.path(percentEncoded: false)) else { return nil }
-    return try? CLIConfig.read(from: url)
   }
 
   public func shutdown() async {

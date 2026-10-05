@@ -97,14 +97,12 @@ password = "pass"
 ssl = true
 verify_ssl_certs = true
 connections = 20              # check your provider's limit
-timeout = 30
 retry_attempts = 2
-retry_delay = 500
+retry_delay = 500             # milliseconds
 
 [download]
 dir = "downloads"
 create_subfolders = true      # folder per NZB
-force_redownload = false
 # speed_limit = "10M"         # bytes/s cap; K/M/G are 1024-based; absent or 0 = unlimited
 
 [post_processing]
@@ -114,21 +112,15 @@ delete_rar_after_extract = false
 delete_par2_after_repair = false
 deobfuscate_file_names = true
 
-[memory]
-max_segments_in_memory = 800
-max_concurrent_files = 100
-
 [tuning]
-pipeline_size = 50            # segments per batch
-connection_wait_timeout = 300 # seconds
+pipeline_depth = 4            # requests in flight per connection
 max_concurrent_connections = 20 # parallel connection creation (raise for faster ramp)
-large_file_threshold = 10485760  # 10MB, for progress display
-
-[logging]
-level = "info"
-format = "pretty"
-# file = "/path/to/dl-nzb.log"  # optional log file
+fsync_on_finalize = false     # flush each finished file to disk
 ```
+
+Keys from older versions that dl-nzb no longer reads (`timeout`,
+`force_redownload`, `large_file_threshold`, `[logging]`) are ignored; `-v`
+turns on more log output.
 
 Environment variables with the `DL_NZB_` prefix override the config:
 ```bash

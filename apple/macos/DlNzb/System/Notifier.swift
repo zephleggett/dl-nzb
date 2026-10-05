@@ -3,21 +3,6 @@ import DlNzbKit
 import DlNzbUI
 import UserNotifications
 
-/// What one notification says (the Kit's `NotificationText`), and whether
-/// it offers Show in Finder, as finished downloads do.
-struct FinishNotification: Equatable {
-  let title: String
-  let body: String
-  let offersReveal: Bool
-
-  init?(_ item: DownloadItem) {
-    guard let text = NotificationText(item) else { return nil }
-    title = text.title
-    body = text.body
-    offersReveal = item.isFinished
-  }
-}
-
 /// One notification per job that finishes, fails or needs attention, through
 /// `UNUserNotificationCenter`. Permission is asked for the first time there is
 /// something to say, not at launch. Banners only show while dl-nzb is in the
@@ -47,13 +32,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
   }
 
   func notify(_ item: DownloadItem) {
-    guard let message = FinishNotification(item) else { return }
-    let content = UNMutableNotificationContent()
-    content.title = message.title
-    content.body = message.body
-    content.threadIdentifier = "downloads"
-    content.userInfo = ["item": item.id.uuidString]
-    if message.offersReveal { content.categoryIdentifier = Self.finishedCategory }
+    guard let content = Self.content(for: item) else { return }
     let request = UNNotificationRequest(identifier: item.id.uuidString, content: content, trigger: nil)
     Task {
       guard await authorise() else { return }
@@ -63,6 +42,14 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         Log.mac.error("the notification was not shown: \(error.localizedDescription, privacy: .public)")
       }
     }
+  }
+
+  /// The Kit's notification for the item, offering Show in Finder once it
+  /// has finished.
+  static func content(for item: DownloadItem) -> UNMutableNotificationContent? {
+    guard let content = NotificationText.content(for: item) else { return nil }
+    if item.isFinished { content.categoryIdentifier = finishedCategory }
+    return content
   }
 
   /// Asks the system each time rather than remembering an answer: the user
@@ -104,7 +91,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
 
   nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
     let action = response.actionIdentifier
-    guard let text = response.notification.request.content.userInfo["item"] as? String, let id = UUID(uuidString: text) else { return }
+    guard let id = NotificationText.itemID(from: response.notification.request.content.userInfo) else { return }
     await MainActor.run {
       if action == Self.revealAction {
         onReveal?(id)

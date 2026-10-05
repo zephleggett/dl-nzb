@@ -4,7 +4,7 @@
 //! and determine whether files have meaningful extensions.
 
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::Read;
 use std::path::Path;
 
 /// Common/popular file extensions that are considered meaningful
@@ -29,7 +29,8 @@ pub const IGNORED_MOVIE_FOLDERS: &[&str] = &["VIDEO_TS", "AUDIO_TS", "BDMV", "CE
 /// File extensions to exclude from deobfuscation
 pub const EXCLUDED_FILE_EXTS: &[&str] = &[".par2", ".sfv", ".nfo", ".txt", ".srr"];
 
-/// Magic bytes for common file types
+/// Magic bytes for common file types, and the extension (without its dot)
+/// they mean. The first entry that matches wins.
 struct MagicBytes {
     bytes: &'static [u8],
     extension: &'static str,
@@ -40,152 +41,137 @@ const MAGIC_BYTES: &[MagicBytes] = &[
     // Images
     MagicBytes {
         bytes: b"\xFF\xD8\xFF",
-        extension: ".jpg",
+        extension: "jpg",
         offset: 0,
     },
     MagicBytes {
         bytes: b"\x89PNG\r\n\x1a\n",
-        extension: ".png",
+        extension: "png",
         offset: 0,
     },
     MagicBytes {
         bytes: b"GIF87a",
-        extension: ".gif",
+        extension: "gif",
         offset: 0,
     },
     MagicBytes {
         bytes: b"GIF89a",
-        extension: ".gif",
+        extension: "gif",
         offset: 0,
     },
     MagicBytes {
         bytes: b"BM",
-        extension: ".bmp",
+        extension: "bmp",
         offset: 0,
     },
     MagicBytes {
         bytes: b"RIFF",
-        extension: ".webp",
+        extension: "webp",
         offset: 0,
-    }, // needs further validation
+    }, // WAV, AVI or WebP by its subtype
     // Archives
     MagicBytes {
         bytes: b"PK\x03\x04",
-        extension: ".zip",
+        extension: "zip",
         offset: 0,
-    },
+    }, // or an Office document or EPUB, by its first part's name
     MagicBytes {
         bytes: b"PK\x05\x06",
-        extension: ".zip",
+        extension: "zip",
         offset: 0,
     },
     MagicBytes {
         bytes: b"Rar!\x1a\x07\x00",
-        extension: ".rar",
+        extension: "rar",
         offset: 0,
     }, // RAR 4.x
     MagicBytes {
         bytes: b"Rar!\x1a\x07\x01\x00",
-        extension: ".rar",
+        extension: "rar",
         offset: 0,
     }, // RAR 5.x
     MagicBytes {
         bytes: b"7z\xBC\xAF\x27\x1C",
-        extension: ".7z",
+        extension: "7z",
         offset: 0,
     },
     MagicBytes {
         bytes: b"\x1f\x8b\x08",
-        extension: ".gz",
+        extension: "gz",
         offset: 0,
     },
     MagicBytes {
         bytes: b"BZh",
-        extension: ".bz2",
+        extension: "bz2",
         offset: 0,
     },
     // Video
     MagicBytes {
         bytes: b"ftyp",
-        extension: ".mp4",
+        extension: "mp4",
         offset: 4,
     }, // MP4/M4V/MOV
     MagicBytes {
         bytes: b"\x1aE\xdf\xa3",
-        extension: ".mkv",
+        extension: "mkv",
         offset: 0,
     }, // Matroska/WebM EBML header
     MagicBytes {
-        bytes: b"RIFF",
-        extension: ".avi",
-        offset: 0,
-    }, // needs further validation
-    MagicBytes {
         bytes: b"\x00\x00\x01\xBA",
-        extension: ".mpg",
+        extension: "mpg",
         offset: 0,
     }, // MPEG PS
     MagicBytes {
         bytes: b"\x00\x00\x01\xB3",
-        extension: ".mpg",
+        extension: "mpg",
         offset: 0,
     }, // MPEG PS
     // Audio
     MagicBytes {
         bytes: b"ID3",
-        extension: ".mp3",
+        extension: "mp3",
         offset: 0,
     },
     MagicBytes {
         bytes: b"\xFF\xFB",
-        extension: ".mp3",
+        extension: "mp3",
         offset: 0,
     },
     MagicBytes {
         bytes: b"fLaC",
-        extension: ".flac",
+        extension: "flac",
         offset: 0,
     },
     MagicBytes {
-        bytes: b"RIFF",
-        extension: ".wav",
-        offset: 0,
-    }, // needs further validation
-    MagicBytes {
         bytes: b"OggS",
-        extension: ".ogg",
+        extension: "ogg",
         offset: 0,
     },
     // Documents
     MagicBytes {
         bytes: b"%PDF",
-        extension: ".pdf",
+        extension: "pdf",
         offset: 0,
     },
     MagicBytes {
         bytes: b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1",
-        extension: ".doc",
+        extension: "doc",
         offset: 0,
     }, // OLE/DOC/XLS
-    MagicBytes {
-        bytes: b"PK\x03\x04",
-        extension: ".docx",
-        offset: 0,
-    }, // Also matches ZIP, needs further validation
     // ISO
     MagicBytes {
         bytes: b"CD001",
-        extension: ".iso",
+        extension: "iso",
         offset: 0x8001,
     },
     MagicBytes {
         bytes: b"CD001",
-        extension: ".iso",
+        extension: "iso",
         offset: 0x8801,
     },
     MagicBytes {
         bytes: b"CD001",
-        extension: ".iso",
+        extension: "iso",
         offset: 0x9001,
     },
 ];
@@ -201,66 +187,58 @@ pub fn has_popular_extension<P: AsRef<Path>>(path: P) -> bool {
     false
 }
 
-/// Detect the most likely file extension by reading magic bytes
-pub fn what_is_most_likely_extension<P: AsRef<Path>>(path: P) -> Option<String> {
-    let path = path.as_ref();
-
+/// Detect the most likely file extension (without its dot) by reading magic
+/// bytes.
+pub fn what_is_most_likely_extension<P: AsRef<Path>>(path: P) -> Option<&'static str> {
     // Open file and read first chunk
-    let mut file = File::open(path).ok()?;
+    let mut file = File::open(path.as_ref()).ok()?;
     let mut buffer = vec![0u8; 0x10000]; // 64KB should be enough for magic bytes
 
     let bytes_read = file.read(&mut buffer).ok()?;
     if bytes_read == 0 {
         return None;
     }
+    let buffer = &buffer[..bytes_read];
 
-    // Check magic bytes
     for magic in MAGIC_BYTES {
-        if magic.offset + magic.bytes.len() <= bytes_read
-            && &buffer[magic.offset..magic.offset + magic.bytes.len()] == magic.bytes
-        {
-            // Special handling for formats that share magic bytes
-            if magic.bytes == b"RIFF" {
-                // RIFF format - check subtype
-                if bytes_read >= 12 {
-                    match &buffer[8..12] {
-                        b"WAVE" => return Some(".wav".to_string()),
-                        b"AVI " => return Some(".avi".to_string()),
-                        b"WEBP" => return Some(".webp".to_string()),
-                        _ => continue,
-                    }
-                }
-            } else if magic.bytes == b"PK\x03\x04" && bytes_read >= 30 {
-                // ZIP-based formats - check for Office formats
-                file.seek(SeekFrom::Start(0)).ok()?;
-                let mut zip_buffer = vec![0u8; 512];
-                let _ = file.read(&mut zip_buffer).ok()?;
-
-                let content = String::from_utf8_lossy(&zip_buffer);
-                if content.contains("word/") {
-                    return Some(".docx".to_string());
+        if buffer.get(magic.offset..magic.offset + magic.bytes.len()) != Some(magic.bytes) {
+            continue;
+        }
+        // Special handling for formats that share magic bytes
+        match magic.bytes {
+            // RIFF: the subtype says which (an unknown one is no match)
+            b"RIFF" if buffer.len() >= 12 => match &buffer[8..12] {
+                b"WAVE" => return Some("wav"),
+                b"AVI " => return Some("avi"),
+                b"WEBP" => return Some("webp"),
+                _ => continue,
+            },
+            // ZIP-based formats: Office documents and EPUB name their parts
+            // early on
+            b"PK\x03\x04" if buffer.len() >= 30 => {
+                let content = String::from_utf8_lossy(&buffer[..buffer.len().min(512)]);
+                return Some(if content.contains("word/") {
+                    "docx"
                 } else if content.contains("xl/") {
-                    return Some(".xlsx".to_string());
+                    "xlsx"
                 } else if content.contains("ppt/") {
-                    return Some(".pptx".to_string());
+                    "pptx"
                 } else if content.contains("epub") {
-                    return Some(".epub".to_string());
-                }
-                // Default to ZIP if no specific format detected
-                return Some(".zip".to_string());
-            } else if magic.bytes == b"ftyp" {
-                // MP4 container - could be MP4, M4V, M4A, MOV
-                if bytes_read >= 12 {
-                    match &buffer[8..12] {
-                        b"M4A " => return Some(".m4a".to_string()),
-                        b"M4V " => return Some(".m4v".to_string()),
-                        b"qt  " => return Some(".mov".to_string()),
-                        _ => return Some(".mp4".to_string()),
-                    }
-                }
+                    "epub"
+                } else {
+                    "zip"
+                });
             }
-
-            return Some(magic.extension.to_string());
+            // MP4 container: could be MP4, M4V, M4A, MOV
+            b"ftyp" if buffer.len() >= 12 => {
+                return Some(match &buffer[8..12] {
+                    b"M4A " => "m4a",
+                    b"M4V " => "m4v",
+                    b"qt  " => "mov",
+                    _ => "mp4",
+                });
+            }
+            _ => return Some(magic.extension),
         }
     }
 
@@ -293,7 +271,7 @@ mod tests {
         temp.flush().unwrap();
 
         let detected = what_is_most_likely_extension(temp.path());
-        assert_eq!(detected, Some(".mkv".to_string()));
+        assert_eq!(detected, Some("mkv"));
     }
 
     #[test]
@@ -306,7 +284,7 @@ mod tests {
         temp.flush().unwrap();
 
         let detected = what_is_most_likely_extension(temp.path());
-        assert_eq!(detected, Some(".rar".to_string()));
+        assert_eq!(detected, Some("rar"));
     }
 
     #[test]
@@ -319,6 +297,39 @@ mod tests {
         temp.flush().unwrap();
 
         let detected = what_is_most_likely_extension(temp.path());
-        assert_eq!(detected, Some(".rar".to_string()));
+        assert_eq!(detected, Some("rar"));
+    }
+
+    /// Formats that share magic bytes are told apart by what follows.
+    #[test]
+    fn shared_magic_bytes_are_told_apart() {
+        let detect = |bytes: &[u8]| {
+            let mut temp = NamedTempFile::new().unwrap();
+            temp.write_all(bytes).unwrap();
+            temp.flush().unwrap();
+            what_is_most_likely_extension(temp.path())
+        };
+        assert_eq!(detect(b"RIFF\0\0\0\0WAVEfmt "), Some("wav"));
+        assert_eq!(detect(b"RIFF\0\0\0\0AVI LIST"), Some("avi"));
+        assert_eq!(detect(b"RIFF\0\0\0\0WEBPVP8 "), Some("webp"));
+        assert_eq!(detect(b"RIFF\0\0\0\0ABCDEFGH"), None);
+        assert_eq!(detect(b"RIFF\0\0"), Some("webp"));
+
+        let zip = |name: &str| {
+            let mut bytes = b"PK\x03\x04".to_vec();
+            bytes.extend_from_slice(&[0; 26]);
+            bytes.extend_from_slice(name.as_bytes());
+            bytes
+        };
+        assert_eq!(detect(&zip("word/document.xml")), Some("docx"));
+        assert_eq!(detect(&zip("xl/workbook.xml")), Some("xlsx"));
+        assert_eq!(detect(&zip("ppt/slides/1.xml")), Some("pptx"));
+        assert_eq!(detect(&zip("mimetypeapplication/epub+zip")), Some("epub"));
+        assert_eq!(detect(&zip("readme.txt")), Some("zip"));
+        assert_eq!(detect(b"PK\x03\x04short"), Some("zip"));
+
+        assert_eq!(detect(b"\0\0\0\x18ftypqt  \0\0"), Some("mov"));
+        assert_eq!(detect(b"\0\0\0\x18ftypM4A \0\0"), Some("m4a"));
+        assert_eq!(detect(b"\0\0\0\x18ftypisom\0\0"), Some("mp4"));
     }
 }

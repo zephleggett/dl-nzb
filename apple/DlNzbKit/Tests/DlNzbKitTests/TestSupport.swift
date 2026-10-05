@@ -12,9 +12,12 @@ enum TestNZB {
   ///   - dataBytes: Split over `volumes` RAR volumes.
   ///   - salt: Changes the bytes without changing the title, for two NZBs
   ///     of the same release.
-  static func xml(title: String, dataBytes: Int64 = 100_000_000, par2Bytes: Int64 = 8_000_000, volumes: Int = 4, password: String? = nil, salt: String = "")
-    -> String
-  {
+  ///   - titled: False leaves the `<meta type="title">` out, so the NZB is
+  ///     named after its file.
+  static func xml(
+    title: String, dataBytes: Int64 = 100_000_000, par2Bytes: Int64 = 8_000_000, volumes: Int = 4, password: String? = nil, salt: String = "",
+    titled: Bool = true
+  ) -> String {
     let segmentBytes: Int64 = 768_000
     var files = ""
     func file(_ name: String, _ bytes: Int64) {
@@ -42,14 +45,14 @@ enum TestNZB {
       file("\(title).par2", 20_000)
       file("\(title).vol00+10.par2", par2Bytes - 20_000)
     }
+    let titleMeta = titled ? "    <meta type=\"title\">\(title)</meta>\n" : ""
     let passwordMeta = password.map { "    <meta type=\"password\">\($0)</meta>\n" } ?? ""
     return """
       <?xml version="1.0" encoding="UTF-8"?>
       <!DOCTYPE nzb PUBLIC "-//newzBin//DTD NZB 1.1//EN" "http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
       <nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
         <head>
-          <meta type="title">\(title)</meta>
-      \(passwordMeta)  </head>
+      \(titleMeta)\(passwordMeta)  </head>
       \(files)</nzb>
       """
   }
@@ -58,11 +61,11 @@ enum TestNZB {
   @discardableResult
   static func write(
     title: String, in directory: URL, fileName: String? = nil, dataBytes: Int64 = 100_000_000, par2Bytes: Int64 = 8_000_000, volumes: Int = 4,
-    password: String? = nil, salt: String = ""
+    password: String? = nil, salt: String = "", titled: Bool = true
   ) throws -> URL {
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     let url = directory.appending(path: fileName ?? "\(title).nzb")
-    let text = xml(title: title, dataBytes: dataBytes, par2Bytes: par2Bytes, volumes: volumes, password: password, salt: salt)
+    let text = xml(title: title, dataBytes: dataBytes, par2Bytes: par2Bytes, volumes: volumes, password: password, salt: salt, titled: titled)
     try Data(text.utf8).write(to: url)
     return url
   }

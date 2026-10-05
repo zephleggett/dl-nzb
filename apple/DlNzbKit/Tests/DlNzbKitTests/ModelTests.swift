@@ -58,13 +58,27 @@ struct ModelTests {
     #expect(try NzbParser.parse(data: Data(subjectName.utf8), fileName: "The_Linux_Command_Line.nzb").title == "The_Linux_Command_Line")
   }
 
+  @Test("A password in the file's name is split off, as the engine does")
+  func fileNamePassword() throws {
+    let untitled = """
+      <nzb><file subject="&quot;a.rar&quot; yEnc (1/1)"><segments><segment bytes="10" number="1">a@b</segment></segments></file></nzb>
+      """
+    let info = try NzbParser.parse(data: Data(untitled.utf8), fileName: "Some Release {{s3cret}}.nzb")
+    #expect(info.title == "Some Release")
+    #expect(info.passwords == ["s3cret"])
+    #expect(NzbParser.splitPassword("Show.S01E01{{a}} b}}") == ("Show.S01E01", "a}} b"))
+    #expect(NzbParser.splitPassword("{{x}}") == ("{{x}}", nil))
+    #expect(NzbParser.splitPassword("Name{{ }}") == ("Name{{ }}", nil))
+    #expect(NzbParser.splitPassword("Name}}x{{") == ("Name}}x{{", nil))
+  }
+
   @Test(
     "The real NZBs in Downloads can be inspected",
     .enabled(if: !ModelTests.realNZBs.isEmpty, "no NZBs in ~/Downloads"))
   func realFiles() async throws {
     let engine = SimulatedEngine(configuration: .fast())
     for url in Self.realNZBs {
-      let info = try await engine.inspect(url)
+      let info = try await engine.inspect(url, fileName: nil)
       #expect(info.totalBytes > 0, "\(url.lastPathComponent)")
       #expect(info.articleCount > 0)
       #expect(!ReleaseName.looksObfuscated(info.title), "\(info.title)")
@@ -194,7 +208,6 @@ struct ModelTests {
         == ProcessingSettings(
           repairWithPar2: true, extractArchives: false, deleteArchivesAfterExtracting: true, deletePar2AfterRepairing: true, renameObfuscatedFiles: false))
     #expect(imported.advanced.downloadAllRecoveryUpFront && imported.advanced.flushFilesWhenFinished)
-    #expect(imported.downloadDirectory == URL(filePath: "/Volumes/Media/Usenet", directoryHint: .isDirectory))
   }
 
   @Test("A CLI config without a server is not worth importing, and missing keys take defaults")
@@ -204,15 +217,14 @@ struct ModelTests {
     #expect(imported.server.port == 119)
     #expect(imported.server.connections == ServerSettings.defaultConnections)
     #expect(imported.processing == ProcessingSettings())
-    #expect(imported.downloadDirectory == nil)
   }
 
-  @Test("Reading a config file records where it came from")
+  @Test("A config file is read from where the user picked it; a missing one is an error")
   func cliConfigFile() throws {
     let scratch = Scratch()
     let url = scratch.url.appending(path: "config.toml")
     try Data("[usenet]\nserver = \"news.example.com\"\n".utf8).write(to: url)
-    #expect(try CLIConfig.read(from: url).source == url)
+    #expect(try CLIConfig.read(from: url).server.host == "news.example.com")
     #expect(throws: EngineError.self) { try CLIConfig.read(from: scratch.url.appending(path: "missing.toml")) }
   }
 

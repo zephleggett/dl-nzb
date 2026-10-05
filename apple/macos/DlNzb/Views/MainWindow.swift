@@ -106,7 +106,7 @@ struct ServerProblemNotice: View {
               app.prepareServerSettings()
               openSettings()
             }
-            Button("Try Again") { app.retryServer() }
+            Button("Try Again") { queue.retryServer() }
           }
           .controlSize(.small)
         }

@@ -58,23 +58,19 @@ mod code {
 pub enum ArticleOutcome {
     /// Successfully downloaded and decoded — placement uses the yEnc `=ypart` offset.
     Ok {
-        message_id: String,
         offset: u64,
         data: Bytes,
         /// True iff the article carried a pcrc32/crc32 that matched on decode.
         crc_verified: bool,
-        /// The whole file's size as the article's `=ybegin size=` gives it,
-        /// if it does (the part lies inside it).
-        file_size: Option<u64>,
     },
     /// Server reported the article doesn't exist (430/423). Permanent.
-    Missing { message_id: String },
+    Missing,
     /// Body arrived but failed to yEnc-decode (CRC/size mismatch). The wire is
     /// still in sync (whole body consumed); retry a bounded number of times.
-    DecodeFailed { message_id: String },
+    DecodeFailed,
     /// Wire/timeout/unexpected error. The connection is poisoned; retry the
     /// article on a fresh connection without counting it against the budget.
-    Transient { message_id: String },
+    Transient,
 }
 
 /// Whether `id` (without its angle brackets) may go into a command. RFC 3977
@@ -199,16 +195,9 @@ impl AsyncNntpConnection {
             Box<dyn AsyncRead + Unpin + Send>,
             Box<dyn AsyncWrite + Unpin + Send>,
         ) = if config.ssl {
-            let connector = if let Some(shared) = tls_connector {
-                shared
-            } else {
-                let mut tls_builder = native_tls::TlsConnector::builder();
-                if !config.verify_ssl_certs {
-                    tls_builder.danger_accept_invalid_certs(true);
-                    tls_builder.danger_accept_invalid_hostnames(true);
-                }
-                let native_connector = tls_builder.build()?;
-                Arc::new(TlsConnector::from(native_connector))
+            let connector = match tls_connector {
+                Some(shared) => shared,
+                None => Arc::new(TlsConnector::from(native_tls_connector(config)?)),
             };
 
             // A handshake can fail because the server reset or closed the
@@ -371,10 +360,15 @@ impl AsyncNntpConnection {
         }
     }
 
-    async fn read_article_body_poisoning(&mut self, deadline: Duration) -> Result<Vec<u8>> {
+    async fn read_article_body_poisoning(
+        &mut self,
+        decoder: &mut yenc::Decoder,
+        deadline: Duration,
+    ) -> Result<()> {
         let throttle = self.throttle.clone();
-        match timeout_unthrottled(throttle.as_deref(), deadline, self.read_article_body()).await {
-            Some(Ok(b)) => Ok(b),
+        let read = self.read_article_body(decoder);
+        match timeout_unthrottled(throttle.as_deref(), deadline, read).await {
+            Some(Ok(())) => Ok(()),
             Some(Err(e)) => Err(self.poison(e)),
             None => Err(self.poison_timeout(deadline)),
         }
@@ -495,50 +489,48 @@ impl AsyncNntpConnection {
         message_id: &str,
         head_timeout: Duration,
     ) -> ArticleOutcome {
-        let mid = || message_id.to_string();
         let response = match self.read_response_poisoning(head_timeout).await {
             Ok(r) => r,
-            Err(_) => return ArticleOutcome::Transient { message_id: mid() },
+            Err(_) => return ArticleOutcome::Transient,
         };
 
         if response.starts_with(code::BODY_FOLLOWS) {
-            let body = match self
-                .read_article_body_poisoning(TIMEOUT_RESPONSE_BODY)
+            let mut decoder = yenc::Decoder::default();
+            if self
+                .read_article_body_poisoning(&mut decoder, TIMEOUT_RESPONSE_BODY)
                 .await
+                .is_err()
             {
-                Ok(b) => b,
-                Err(_) => return ArticleOutcome::Transient { message_id: mid() },
-            };
+                return ArticleOutcome::Transient;
+            }
             self.response_consumed();
-            match yenc::decode_article(&body) {
+            match decoder.finish() {
                 Ok(decoded) => ArticleOutcome::Ok {
-                    message_id: mid(),
                     offset: decoded.offset,
                     data: Bytes::from(decoded.data),
                     crc_verified: decoded.crc_verified,
-                    file_size: decoded.file_size,
                 },
                 Err(e) => {
                     // The wire is in sync (full body consumed); only the payload
                     // is bad. Bounded retry happens at the caller.
                     tracing::debug!("yEnc decode failed for {}: {}", message_id, e);
-                    ArticleOutcome::DecodeFailed { message_id: mid() }
+                    ArticleOutcome::DecodeFailed
                 }
             }
         } else if code::NO_ARTICLE.iter().any(|c| response.starts_with(c)) {
             self.response_consumed();
-            ArticleOutcome::Missing { message_id: mid() }
+            ArticleOutcome::Missing
         } else if response.starts_with(code::NO_GROUP_SELECTED) {
             // Server insists on a selected group; drop the cache so the worker
             // re-selects before retrying this (transient) article.
             self.response_consumed();
             self.current_group = None;
-            ArticleOutcome::Transient { message_id: mid() }
+            ArticleOutcome::Transient
         } else {
             // Unknown status — the wire may be desynced relative to our request
             // stream. Poison so the connection is discarded.
             self.poisoned = true;
-            ArticleOutcome::Transient { message_id: mid() }
+            ArticleOutcome::Transient
         }
     }
 
@@ -593,11 +585,14 @@ impl AsyncNntpConnection {
         Ok(results)
     }
 
-    /// Read a dot-terminated body, undoing dot-stuffing and ending every line
-    /// with a bare `\n`. Lines are read straight into the body and never past
-    /// the room left under [`MAX_ARTICLE_BODY_BYTES`], so a line that never
-    /// ends can't hold more memory than that.
-    async fn read_article_body(&mut self) -> Result<Vec<u8>> {
+    /// Read a dot-terminated body into `decoder` a line at a time, each line
+    /// found in the read buffer and handed over from there, its line end
+    /// removed and dot-stuffing undone. Only a line split between two reads
+    /// is copied, to join its halves. The body, counting each line end as one
+    /// byte, may be at most [`MAX_ARTICLE_BODY_BYTES`], and a line is never
+    /// gathered past the room left under that, so a line that never ends
+    /// can't hold more memory than that.
+    async fn read_article_body(&mut self, decoder: &mut yenc::Decoder) -> Result<()> {
         let too_long = || {
             DlNzbError::from(NntpError::ProtocolError(format!(
                 "article body exceeds {} bytes",
@@ -606,45 +601,53 @@ impl AsyncNntpConnection {
         };
         /// The line that ends a body.
         const TERMINATOR: &[u8] = b".\r\n";
-        let mut body = Vec::with_capacity(768 * 1024);
+        let Self { reader, server, .. } = self;
+        // The start of a line the next read continues.
+        let mut split_line = Vec::new();
+        // The body so far, each line end counted as one byte.
+        let mut body_len = 0usize;
         loop {
-            let start = body.len();
-            // Room for one more line whose content still fits (its CRLF
-            // becomes a single `\n`), and always for the terminator, which
-            // isn't part of the body: the limit is on the body.
-            let room = (MAX_ARTICLE_BODY_BYTES + 2)
-                .saturating_sub(start)
-                .max(TERMINATOR.len()) as u64;
-            let n = (&mut self.reader)
-                .take(room)
-                .read_until(b'\n', &mut body)
-                .await
-                .map_err(|e| lost(&self.server, e))?;
-            if n == 0 {
-                return Err(lost(&self.server, closed_by_server()));
-            }
-            let line = &body[start..];
-            if line.last() != Some(&b'\n') {
-                if n as u64 == room {
-                    return Err(too_long());
+            let buf = reader.fill_buf().await.map_err(|e| lost(server, e))?;
+            if buf.is_empty() {
+                if split_line.is_empty() {
+                    return Err(lost(server, closed_by_server()));
                 }
                 return Err(NntpError::ProtocolError("unterminated article body".into()).into());
             }
-            if line == TERMINATOR || line == b".\n" {
-                body.truncate(start);
-                return Ok(body);
+            let mut used = 0;
+            while let Some(at) = memchr::memchr(b'\n', &buf[used..]) {
+                let end = used + at + 1;
+                let line = if split_line.is_empty() {
+                    &buf[used..end]
+                } else {
+                    split_line.extend_from_slice(&buf[used..end]);
+                    &split_line[..]
+                };
+                used = end;
+                let Some(content) = body_line(line) else {
+                    reader.consume(used);
+                    return Ok(());
+                };
+                body_len += content.len() + 1;
+                if body_len > MAX_ARTICLE_BODY_BYTES {
+                    return Err(too_long());
+                }
+                decoder.line(content);
+                split_line.clear();
             }
-            // Dot-stuffing: leading ".." becomes "."
-            if line.starts_with(b"..") {
-                body.remove(start);
-            }
-            let line_end = if body.ends_with(b"\r\n") { 2 } else { 1 };
-            body.truncate(body.len() - line_end);
-            body.push(b'\n');
-
-            if body.len() > MAX_ARTICLE_BODY_BYTES {
+            // Room for the rest of a line whose content still fits (its CRLF
+            // counts as one byte), and always for the terminator, which isn't
+            // part of the body: the limit is on the body.
+            let rest = &buf[used..];
+            let room = (MAX_ARTICLE_BODY_BYTES + 2)
+                .saturating_sub(body_len)
+                .max(TERMINATOR.len());
+            if split_line.len() + rest.len() >= room {
                 return Err(too_long());
             }
+            split_line.extend_from_slice(rest);
+            let read = buf.len();
+            reader.consume(read);
         }
     }
 
@@ -741,6 +744,19 @@ impl AsyncNntpConnection {
     }
 }
 
+/// The TLS settings for `config`'s server: certificates and host names go
+/// unchecked when `verify_ssl_certs` is off.
+pub(super) fn native_tls_connector(
+    config: &UsenetConfig,
+) -> std::result::Result<native_tls::TlsConnector, native_tls::Error> {
+    let mut builder = native_tls::TlsConnector::builder();
+    if !config.verify_ssl_certs {
+        builder.danger_accept_invalid_certs(true);
+        builder.danger_accept_invalid_hostnames(true);
+    }
+    builder.build()
+}
+
 /// The server reset or closed the connection to `server`.
 fn lost(server: &str, source: std::io::Error) -> DlNzbError {
     NntpError::ConnectionLost {
@@ -756,6 +772,21 @@ fn closed_by_server() -> std::io::Error {
         std::io::ErrorKind::UnexpectedEof,
         "the server closed the connection",
     )
+}
+
+/// One line of an article body as read, ending in LF: `None` for the line
+/// that ends the body (a lone dot), else its content, the line end removed
+/// and dot-stuffing undone (a leading `..` becomes `.`).
+fn body_line(line: &[u8]) -> Option<&[u8]> {
+    let content = line.strip_suffix(b"\n").unwrap_or(line);
+    let content = content.strip_suffix(b"\r").unwrap_or(content);
+    if content == b"." {
+        None
+    } else if content.starts_with(b"..") {
+        Some(&content[1..])
+    } else {
+        Some(content)
+    }
 }
 
 /// The TCP stream under TLS, noting the first time the server closes or
@@ -978,5 +1009,144 @@ mod tests {
             .await
             .is_none());
         assert!(started.elapsed() < Duration::from_millis(300));
+    }
+
+    /// A connection that reads `wire` through a buffer of `capacity` bytes
+    /// and writes nowhere.
+    fn reading(wire: Vec<u8>, capacity: usize) -> AsyncNntpConnection {
+        AsyncNntpConnection {
+            writer: Box::new(tokio::io::sink()),
+            reader: BufReader::with_capacity(capacity, Box::new(std::io::Cursor::new(wire))),
+            current_group: None,
+            poisoned: false,
+            outstanding: 0,
+            bytes_read: Arc::new(AtomicU64::new(0)),
+            throttle: None,
+            greeting: String::new(),
+            server: "test".into(),
+        }
+    }
+
+    /// `body` as a `222` reply: dot-stuffed, then the terminator.
+    fn reply(body: &[u8]) -> Vec<u8> {
+        let mut wire = b"222 0 <a@b> body follows\r\n".to_vec();
+        for line in body.split_inclusive(|&b| b == b'\n') {
+            if line.starts_with(b".") {
+                wire.push(b'.');
+            }
+            wire.extend_from_slice(line);
+        }
+        wire.extend_from_slice(b".\r\n");
+        wire
+    }
+
+    /// Read the next `BODY` reply on `conn`, expecting it to decode to `plain`.
+    async fn expect_article(conn: &mut AsyncNntpConnection, plain: &[u8]) {
+        match conn.read_body_outcome("a@b").await {
+            ArticleOutcome::Ok { data, offset, .. } => {
+                assert_eq!(offset, 0);
+                assert!(data[..] == plain[..], "decoded data differs");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(conn.is_clean());
+    }
+
+    /// Two articles back to back, then the reply to a further command, read
+    /// through buffers of many sizes: lines (the terminator too) split
+    /// between reads anywhere, a line spanning several, and what follows a
+    /// body is left for the next read.
+    #[tokio::test]
+    async fn bodies_are_read_whatever_the_reads_split() {
+        let first = yenc::sample::noise(3_000, 1);
+        let second = yenc::sample::noise(2_000, 2);
+        let mut wire = reply(&yenc::sample::article(&first));
+        wire.extend(reply(&yenc::sample::article(&second)));
+        wire.extend_from_slice(b"430 no such article\r\n");
+        for capacity in [1, 2, 3, 5, 7, 16, 64, 129, 130, 1000, 1 << 16] {
+            let mut conn = reading(wire.clone(), capacity);
+            expect_article(&mut conn, &first).await;
+            expect_article(&mut conn, &second).await;
+            assert_eq!(conn.read_response().await.unwrap(), "430 no such article");
+        }
+    }
+
+    /// The terminator split between two reads still ends the body, and a
+    /// line spanning two reads is joined whole.
+    #[tokio::test]
+    async fn the_terminator_and_a_line_may_span_two_reads() {
+        let plain = yenc::sample::noise(1_000, 4);
+        let wire = reply(&yenc::sample::article(&plain));
+        // Every split point: a buffer as large as the whole reply less one,
+        // two, ... bytes leaves the rest, the end of the terminator among
+        // them, to a second read.
+        for short in 1..=4 {
+            let mut conn = reading(wire.clone(), wire.len() - short);
+            expect_article(&mut conn, &plain).await;
+        }
+        // A buffer of half a line: every line spans two reads (or three).
+        let mut conn = reading(wire, 64);
+        expect_article(&mut conn, &plain).await;
+    }
+
+    /// Lines starting with a dot arrive dot-stuffed (`..`) and are read with
+    /// one dot; a line that is only a dot arrives as `..` and is data, not
+    /// the end of the body.
+    #[tokio::test]
+    async fn dot_stuffed_lines_are_undone() {
+        // Byte 4 encodes as `.`: three lines of 128 dots, then a lone one.
+        let plain = vec![4u8; 128 * 3 + 1];
+        let body = yenc::sample::article(&plain);
+        assert!(body.windows(5).any(|w| w == b"\r\n.\r\n"));
+        let wire = reply(&body);
+        assert!(wire.windows(6).any(|w| w == b"\r\n..\r\n"));
+        for capacity in [1, 2, 3, 128, 1 << 16] {
+            let mut conn = reading(wire.clone(), capacity);
+            expect_article(&mut conn, &plain).await;
+        }
+    }
+
+    /// A body cut off before its terminator fails the article and poisons
+    /// the connection, whether the stream ends mid-line or between lines.
+    #[tokio::test]
+    async fn a_body_cut_short_poisons_the_connection() {
+        let plain = yenc::sample::noise(1_000, 6);
+        let wire = reply(&yenc::sample::article(&plain));
+        for cut in [3, 5] {
+            let mut conn = reading(wire[..wire.len() - cut].to_vec(), 64);
+            let outcome = conn.read_body_outcome("a@b").await;
+            assert!(matches!(outcome, ArticleOutcome::Transient));
+            assert!(conn.is_poisoned());
+        }
+    }
+
+    /// Reading and decoding speed on typical 700 KB articles. Run with
+    /// `cargo test --profile release-fast --lib -- --ignored --nocapture article_read_speed`.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore]
+    async fn article_read_speed() {
+        let plain = yenc::sample::noise(700_000, 11);
+        let one = reply(&yenc::sample::article(&plain));
+        let rounds = 500;
+        let wire: Vec<u8> = one
+            .iter()
+            .copied()
+            .cycle()
+            .take(one.len() * rounds)
+            .collect();
+        let mut conn = reading(wire, READ_BUFFER_BYTES);
+        let started = std::time::Instant::now();
+        for _ in 0..rounds {
+            match conn.read_body_outcome("a@b").await {
+                ArticleOutcome::Ok { data, .. } => assert_eq!(data.len(), plain.len()),
+                other => panic!("{other:?}"),
+            }
+        }
+        let secs = started.elapsed().as_secs_f64();
+        println!(
+            "article read + decode: {:.0} MB/s, {:.0} us per article",
+            (one.len() * rounds) as f64 / secs / 1e6,
+            secs / rounds as f64 * 1e6
+        );
     }
 }

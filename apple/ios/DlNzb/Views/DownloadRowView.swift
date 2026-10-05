@@ -60,15 +60,13 @@ struct DownloadRowView: View {
     .padding(.vertical, 4)
   }
 
-  /// A line that changes several times a second: no animated transition,
-  /// which would leave its digits forever half-blurred.
+  /// The shared status line in this row's wording, with a question given
+  /// room to wrap.
   private var statusLine: some View {
-    Text(status)
-      .font(.subheadline)
-      .foregroundStyle(StatusText.tone(for: item).textStyle)
-      .monospacedDigit()
-      .lineLimit(item.needsAttention || isLarge ? 3 : (isLargerText ? 2 : 1))
-      .fixedSize(horizontal: false, vertical: item.needsAttention)
+    DownloadStatusLine(
+      text: status, tone: StatusText.tone(for: item), lineLimit: item.needsAttention || isLarge ? 3 : (isLargerText ? 2 : 1)
+    )
+    .fixedSize(horizontal: false, vertical: item.needsAttention)
   }
 
   /// The two decisions a row can ask for, right where the question is; side
@@ -113,21 +111,17 @@ struct DownloadRowControl: View {
   var body: some View {
     Group {
       switch item.state {
-      case .queued where runtime.queue.isHeld(item):
-        // Held back (Pause All, or a server problem): drawn as paused, and a
-        // tap starts it, or tries the server again when that is what holds it.
-        ringButton(ProgressRing(fraction: item.downloadFraction, glyph: .resume, isPaused: true), label: "Resume") {
-          runtime.resumeHeld(item.id)
+      case .queued, .running, .paused:
+        // The ring does what it shows; with nothing to pause or resume
+        // (post-processing), it stops.
+        let action = runtime.primaryAction(for: item)
+        ringButton(ring(for: action), label: action?.title ?? "Stop") {
+          if let action {
+            runtime.perform(action, on: item.id)
+          } else {
+            runtime.requestStop(item, prompts: &prompts)
+          }
         }
-      case .queued where runtime.queue.awaitsStart(item):
-        ringButton(ProgressRing(fraction: item.downloadFraction, glyph: .resume, isPaused: true), label: "Start") { runtime.start(item.id) }
-      case .queued:
-        // Waiting: drawn quietly, with a clock rather than the pause a
-        // running ring shows, so the one ring that moves stands out.
-        ringButton(ProgressRing(fraction: item.downloadFraction, glyph: .waiting, isPaused: true), label: "Pause") { runtime.pause(item.id) }
-      case .running, .paused:
-        let action = ringAction
-        ringButton(ProgressRing(item), label: action.label, action: action.perform)
       case .failed, .stopped, .needsAttention(.diskFull):
         Button {
           runtime.retry(item.id)
@@ -168,11 +162,17 @@ struct DownloadRowControl: View {
     .accessibilityHidden(true)
   }
 
-  /// What tapping the ring does, as `ProgressRing(item)` draws it.
-  private var ringAction: (label: String, perform: () -> Void) {
-    if item.canResume { return ("Resume", { runtime.resume(item.id) }) }
-    if item.canPause { return ("Pause", { runtime.pause(item.id) }) }
-    return ("Stop", { runtime.requestStop(item, prompts: &prompts) })
+  private func ring(for action: PrimaryAction?) -> ProgressRing {
+    guard item.isQueued else { return ProgressRing(item) }
+    if action == .pause {
+      // Waiting: drawn quietly, with a clock rather than the pause a
+      // running ring shows, so the one ring that moves stands out.
+      return ProgressRing(fraction: item.downloadFraction, glyph: .waiting, isPaused: true)
+    }
+    // Held back (Pause All, or a server problem) or waiting for Start: drawn
+    // as paused, and a tap starts it, or tries the server again when that is
+    // what holds it.
+    return ProgressRing(fraction: item.downloadFraction, glyph: .resume, isPaused: true)
   }
 
   private func ringButton(_ ring: ProgressRing, label: String, action: @escaping () -> Void) -> some View {

@@ -25,11 +25,8 @@ pub fn multi() -> &'static MultiProgress {
 /// Progress display style.
 #[derive(Debug, Clone, Copy)]
 pub enum ProgressStyle {
-    Download,
     Par2,
-    Par2Verify,
     Par2Repair,
-    Par2Error,
     Extract,
 }
 
@@ -144,11 +141,8 @@ impl DelayedSpinner {
 /// Apply a style to an existing progress bar.
 pub fn apply_style(bar: &ProgressBar, style: ProgressStyle) {
     let template = match style {
-        ProgressStyle::Download => return apply_download_style_fallback(bar),
         ProgressStyle::Par2 => simple_template("yellow", "33"),
-        ProgressStyle::Par2Verify => simple_template("cyan/blue", "36"),
         ProgressStyle::Par2Repair => simple_template("magenta/red", "35"),
-        ProgressStyle::Par2Error => simple_template("red", "31"),
         ProgressStyle::Extract => simple_template("green", "32"),
     };
     bar.set_style(
@@ -170,25 +164,18 @@ fn simple_template(bar_color: &str, msg_sgr: &str) -> String {
 }
 
 fn apply_download_style(bar: &ProgressBar, live_speed_bps: Arc<AtomicU64>) {
-    bar.set_style(download_style_template(Some(live_speed_bps)));
+    bar.set_style(download_style_template(live_speed_bps));
 }
 
-/// Used when `apply_style(ProgressStyle::Download)` is called without a live
-/// speed source (falls back to indicatif's `per_sec()`).
-fn apply_download_style_fallback(bar: &ProgressBar) {
-    bar.set_style(download_style_template(None));
-}
-
-/// Build the Download style. With a `live_speed_bps` source the `bytes_per_sec`
-/// widget reads from it; otherwise it uses indicatif's `state.per_sec()`.
-fn download_style_template(live_speed_bps: Option<Arc<AtomicU64>>) -> IndicatifStyle {
+/// Build the download style. Its `bytes_per_sec` widget reads `live_speed_bps`.
+fn download_style_template(live_speed_bps: Arc<AtomicU64>) -> IndicatifStyle {
     let template = if colors_enabled() {
         "[{wide_bar:.cyan/blue}] \x1b[1m{percent:>3}%\x1b[0m \x1b[36m{bytes:>10}\x1b[0m\x1b[90m/{total_bytes:<10}\x1b[0m \x1b[90m│\x1b[0m {bytes_per_sec} \x1b[90m│\x1b[0m {eta} \x1b[36m{msg}\x1b[0m"
     } else {
         "[{wide_bar}] {percent:>3}% {bytes:>10}/{total_bytes:<10} | {bytes_per_sec} | {eta} {msg}"
     };
 
-    let style = IndicatifStyle::with_template(template)
+    IndicatifStyle::with_template(template)
         .expect("invalid download progress template")
         .progress_chars(bar_chars())
         .with_key(
@@ -201,23 +188,14 @@ fn download_style_template(live_speed_bps: Option<Arc<AtomicU64>>) -> IndicatifS
                     let _ = write!(w, "ETA {eta:>6}");
                 }
             },
-        );
-
-    match live_speed_bps {
-        Some(source) => style.with_key(
+        )
+        .with_key(
             "bytes_per_sec",
             move |_state: &indicatif::ProgressState, w: &mut dyn std::fmt::Write| {
-                let bytes_per_sec = f64::from_bits(source.load(Ordering::Relaxed));
+                let bytes_per_sec = f64::from_bits(live_speed_bps.load(Ordering::Relaxed));
                 write_speed(w, bytes_per_sec);
             },
-        ),
-        None => style.with_key(
-            "bytes_per_sec",
-            |state: &indicatif::ProgressState, w: &mut dyn std::fmt::Write| {
-                write_speed(w, state.per_sec());
-            },
-        ),
-    }
+        )
 }
 
 fn write_speed(w: &mut dyn std::fmt::Write, bytes_per_sec: f64) {

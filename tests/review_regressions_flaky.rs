@@ -14,30 +14,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::*;
-use dl_nzb::engine::{Engine, ErrorKind, JobRequest, Outcome, Preflight};
+use dl_nzb::engine::{Engine, ErrorKind, Outcome};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-
-fn config(port: u16, dir: &Path) -> dl_nzb::Config {
-    let mut config = make_config("127.0.0.1", port, dir.into());
-    config.usenet.connections = 2;
-    config.tuning.max_concurrent_connections = 2;
-    config
-}
-
-fn request(nzb: &Path, out: &Path) -> JobRequest {
-    JobRequest {
-        preflight: Preflight::Never,
-        ..JobRequest::new(nzb, out)
-    }
-}
-
-fn brief(s: &dl_nzb::JobSummary) -> String {
-    format!(
-        "{:?} kind={:?} resumable={} failed={}/{} {:?}",
-        s.outcome, s.error_kind, s.resumable, s.articles_failed, s.articles_total, s.message
-    )
-}
 
 // --- A server that resets at random, the same way every run ------------------------
 
@@ -173,7 +152,7 @@ async fn serve(srv: Arc<Srv>) -> u16 {
 
 async fn run(srv: Arc<Srv>, temp: &Path, nzb: &Path, par2: bool) -> dl_nzb::JobSummary {
     let port = serve(srv).await;
-    let mut cfg = config(port, temp);
+    let mut cfg = config(port, temp, 2);
     cfg.usenet.retry_attempts = 3;
     cfg.post_processing.auto_par2_repair = par2;
     let engine = Engine::new(cfg).unwrap();
@@ -312,19 +291,6 @@ async fn poison_articles_are_still_left_to_par2() {
             big
         );
     }
-}
-
-/// A single-part body: the whole file `name`.
-fn single(plain: &[u8], name: &str) -> Vec<u8> {
-    let mut body = Vec::new();
-    body.extend_from_slice(
-        format!("=ybegin line=128 size={} name={name}\r\n", plain.len()).as_bytes(),
-    );
-    body.extend_from_slice(&yenc_encode(plain));
-    body.extend_from_slice(b"\r\n");
-    let crc = crc32fast::hash(plain);
-    body.extend_from_slice(format!("=yend size={} crc32={crc:08x}\r\n", plain.len()).as_bytes());
-    body
 }
 
 /// Small jobs without PAR2 (an ebook, a single file): a random reset can hit

@@ -6,38 +6,40 @@ import Testing
 @testable import DlNzbApp
 
 @Suite("Notifications")
-struct FinishNotificationTests {
+@MainActor
+struct NotificationTests {
   @Test("A finished download says so, with the release and its size, and offers Show in Finder")
   func finished() throws {
-    let message = try #require(FinishNotification(PreviewData.finished))
-    #expect(message.title == "Download Finished")
+    let content = try #require(Notifier.content(for: PreviewData.finished))
+    #expect(content.title == "Download Finished")
     // Plain text: no invisible break characters in a notification.
-    #expect(message.body == "\(PreviewData.sintelTitle) · \(Format.bytes(PreviewData.finished.totalBytes))")
-    #expect(message.offersReveal)
+    #expect(content.body == "\(PreviewData.sintelTitle) · \(Format.bytes(PreviewData.finished.totalBytes))")
+    #expect(content.categoryIdentifier == Notifier.finishedCategory)
+    #expect(NotificationText.itemID(from: content.userInfo) == PreviewData.finished.id)
   }
 
   @Test("A download with problems says so")
   func finishedWithIssues() throws {
-    let message = try #require(FinishNotification(PreviewData.finishedWithIssues))
-    #expect(message.title == "Download Finished with Problems")
+    let content = try #require(Notifier.content(for: PreviewData.finishedWithIssues))
+    #expect(content.title == "Download Finished with Problems")
   }
 
   @Test("Failures and questions name the problem instead of the size, with nothing to reveal")
   func problems() throws {
-    let failed = try #require(FinishNotification(PreviewData.failed))
+    let failed = try #require(Notifier.content(for: PreviewData.failed))
     #expect(failed.title == "Download Failed")
     #expect(failed.body == "\(PreviewData.cosmosLaundromatTitle) · \(StatusText.line(for: PreviewData.failed))")
-    #expect(!failed.offersReveal)
+    #expect(failed.categoryIdentifier.isEmpty)
 
-    #expect(FinishNotification(PreviewData.needsPassword)?.title == "Password Required")
-    #expect(FinishNotification(PreviewData.needsAttentionUnrepairable)?.title == "Needs Attention")
-    #expect(FinishNotification(PreviewData.needsSpace)?.title == "Not Enough Space")
+    #expect(Notifier.content(for: PreviewData.needsPassword)?.title == "Password Required")
+    #expect(Notifier.content(for: PreviewData.needsAttentionUnrepairable)?.title == "Needs Attention")
+    #expect(Notifier.content(for: PreviewData.needsSpace)?.title == "Not Enough Space")
   }
 
   @Test("Nothing to say while a download waits, runs or was stopped")
   func quiet() {
     for item in [PreviewData.queued, PreviewData.downloading, PreviewData.paused, PreviewData.stopped] {
-      #expect(FinishNotification(item) == nil)
+      #expect(Notifier.content(for: item) == nil)
     }
   }
 }

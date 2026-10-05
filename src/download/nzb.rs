@@ -1,7 +1,7 @@
 pub use nzb_rs::Nzb as NzbRs;
 use once_cell::sync::Lazy;
 use regex::Regex;
-use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::Path;
 use std::str::FromStr;
@@ -13,8 +13,8 @@ static SUBJECT_FILENAME_REGEX: Lazy<Regex> =
 
 type Result<T> = std::result::Result<T, DlNzbError>;
 
-// Re-export types for compatibility with existing code
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One article of a file.
+#[derive(Debug, Clone)]
 pub struct NzbSegment {
     pub bytes: u64,
     pub number: u32,
@@ -42,30 +42,24 @@ fn normalize_message_id(raw: &str) -> String {
         .to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NzbGroup {
-    pub name: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct NzbFile {
-    pub poster: String,
-    pub date: u64,
-    pub subject: String,
     /// The on-disk name for this file: extracted from the subject, sanitized,
     /// and de-duplicated across the whole NZB (case-insensitively, since the
     /// default macOS/iOS file systems are). Assigned once at parse time in NZB
     /// order, so it is stable across runs (resume relies on that) and the
     /// same in every download phase.
     pub filename: String,
-    pub groups: NzbGroups,
-    pub segments: NzbSegments,
+    /// The newsgroups it was posted to (only names fit for a `GROUP` command).
+    pub groups: Vec<String>,
+    /// Its articles, in the NZB's order (by number).
+    pub segments: Vec<NzbSegment>,
 }
 
 impl NzbFile {
     /// Sum of the NZB's per-segment byte counts (the posted, encoded size).
     pub fn bytes(&self) -> u64 {
-        self.segments.segment.iter().map(|s| s.bytes).sum()
+        self.segments.iter().map(|s| s.bytes).sum()
     }
 
     pub fn is_par2(&self) -> bool {
@@ -74,7 +68,7 @@ impl NzbFile {
 }
 
 /// The NZB's `<head>` metadata.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct NzbMeta {
     /// `<meta type="title">`, without any `{{password}}` (that is in
     /// `passwords`).
@@ -120,20 +114,9 @@ pub fn split_password(name: &str) -> (String, Option<String>) {
     (rest.trim().to_string(), Some(password.to_string()))
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NzbGroups {
-    pub group: Vec<NzbGroup>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NzbSegments {
-    pub segment: Vec<NzbSegment>,
-}
-
-// Wrapper struct that provides the same interface as before
+/// A parsed NZB: its files, each with its on-disk name, and its metadata.
 #[derive(Debug, Clone)]
 pub struct Nzb {
-    // Cache converted files for performance
     files: Vec<NzbFile>,
     meta: NzbMeta,
 }
@@ -150,91 +133,6 @@ impl Nzb {
             nzb.meta.add_password(password);
         }
         Ok(nzb)
-    }
-
-    fn parse_content(content: &str) -> Result<Self> {
-        // Strip DOCTYPE declaration if present (nzb-rs doesn't handle it)
-        let content = Self::strip_doctype(content);
-
-        let inner = NzbRs::parse(&content)
-            .map_err(|e| NzbError::ParseError(format!("Failed to parse NZB: {}", e)))?;
-
-        let filenames = assign_filenames(&inner.files);
-
-        // Convert nzb-rs structures to our compatible structures
-        let files = inner
-            .files
-            .iter()
-            .zip(filenames)
-            .map(|(file, filename)| {
-                let segments = file
-                    .segments
-                    .iter()
-                    .map(|segment| NzbSegment {
-                        bytes: segment.size as u64,
-                        number: segment.number,
-                        message_id: normalize_message_id(&segment.message_id),
-                    })
-                    .collect();
-
-                // A group name that can't go into a `GROUP` command is
-                // dropped; a file left with none is skipped like one that
-                // lists no newsgroup.
-                let groups = file
-                    .groups
-                    .iter()
-                    .map(|group| group.trim())
-                    .filter(|group| crate::nntp::is_valid_group_name(group))
-                    .map(|group| NzbGroup {
-                        name: group.to_string(),
-                    })
-                    .collect();
-
-                NzbFile {
-                    poster: file.poster.clone(),
-                    date: file.posted_at.timestamp().max(0) as u64,
-                    subject: file.subject.clone(),
-                    filename,
-                    groups: NzbGroups { group: groups },
-                    segments: NzbSegments { segment: segments },
-                }
-            })
-            .collect::<Vec<NzbFile>>();
-
-        let any_valid = files
-            .iter()
-            .flat_map(|f| &f.segments.segment)
-            .any(NzbSegment::has_valid_id);
-        if !any_valid {
-            return Err(NzbError::NoValidArticles.into());
-        }
-
-        let non_empty = |v: &Option<String>| {
-            v.as_deref()
-                .map(str::trim)
-                .filter(|t| !t.is_empty())
-                .map(str::to_string)
-        };
-        let (title, title_password) = match non_empty(&inner.meta.title) {
-            Some(title) => {
-                let (title, password) = split_password(&title);
-                (Some(title).filter(|t| !t.is_empty()), password)
-            }
-            None => (None, None),
-        };
-        let mut meta = NzbMeta {
-            title,
-            passwords: Vec::new(),
-            category: non_empty(&inner.meta.category),
-        };
-        for password in inner.meta.passwords.iter().map(|p| p.trim().to_string()) {
-            meta.add_password(password);
-        }
-        if let Some(password) = title_password {
-            meta.add_password(password);
-        }
-
-        Ok(Nzb { files, meta })
     }
 
     pub fn files(&self) -> &[NzbFile] {
@@ -261,19 +159,8 @@ impl Nzb {
         }
     }
 
-    pub fn total_size(&self) -> u64 {
-        self.files
-            .iter()
-            .flat_map(|file| &file.segments.segment)
-            .map(|segment| segment.bytes)
-            .sum()
-    }
-
     pub fn total_segments(&self) -> usize {
-        self.files
-            .iter()
-            .map(|file| file.segments.segment.len())
-            .sum()
+        self.files.iter().map(|file| file.segments.len()).sum()
     }
 
     pub fn get_filename_from_subject(subject: &str) -> Option<String> {
@@ -282,20 +169,21 @@ impl Nzb {
             .and_then(|caps| caps.get(1))
             .map(|m| m.as_str().to_string())
     }
+}
 
-    /// Strip DOCTYPE declaration from NZB content (nzb-rs doesn't handle DTDs)
-    fn strip_doctype(content: &str) -> String {
-        // Find and remove <!DOCTYPE ... > which can span multiple lines
-        if let Some(start) = content.find("<!DOCTYPE") {
-            if let Some(end) = content[start..].find('>') {
-                let mut result = String::with_capacity(content.len());
-                result.push_str(&content[..start]);
-                result.push_str(&content[start + end + 1..]);
-                return result;
-            }
+/// Strip DOCTYPE declaration from NZB content (nzb-rs doesn't handle DTDs).
+/// Content without one is passed through as it is.
+fn strip_doctype(content: &str) -> Cow<'_, str> {
+    // Find and remove <!DOCTYPE ... > which can span multiple lines
+    if let Some(start) = content.find("<!DOCTYPE") {
+        if let Some(end) = content[start..].find('>') {
+            let mut result = String::with_capacity(content.len());
+            result.push_str(&content[..start]);
+            result.push_str(&content[start + end + 1..]);
+            return Cow::Owned(result);
         }
-        content.to_string()
     }
+    Cow::Borrowed(content)
 }
 
 /// Choose an on-disk name for every file, in NZB order: the quoted subject name
@@ -389,8 +277,83 @@ pub(crate) fn sanitize_filename(raw: &str, fallback: &str) -> String {
 impl FromStr for Nzb {
     type Err = DlNzbError;
 
-    fn from_str(s: &str) -> Result<Self> {
-        Self::parse_content(s)
+    fn from_str(content: &str) -> Result<Self> {
+        // Strip DOCTYPE declaration if present (nzb-rs doesn't handle it)
+        let content = strip_doctype(content);
+
+        let inner = NzbRs::parse(&content)
+            .map_err(|e| NzbError::ParseError(format!("Failed to parse NZB: {}", e)))?;
+
+        let filenames = assign_filenames(&inner.files);
+
+        let files = inner
+            .files
+            .iter()
+            .zip(filenames)
+            .map(|(file, filename)| {
+                let segments = file
+                    .segments
+                    .iter()
+                    .map(|segment| NzbSegment {
+                        bytes: segment.size as u64,
+                        number: segment.number,
+                        message_id: normalize_message_id(&segment.message_id),
+                    })
+                    .collect();
+
+                // A group name that can't go into a `GROUP` command is
+                // dropped; a file left with none is skipped like one that
+                // lists no newsgroup.
+                let groups = file
+                    .groups
+                    .iter()
+                    .map(|group| group.trim())
+                    .filter(|group| crate::nntp::is_valid_group_name(group))
+                    .map(str::to_string)
+                    .collect();
+
+                NzbFile {
+                    filename,
+                    groups,
+                    segments,
+                }
+            })
+            .collect::<Vec<NzbFile>>();
+
+        let any_valid = files
+            .iter()
+            .flat_map(|f| &f.segments)
+            .any(NzbSegment::has_valid_id);
+        if !any_valid {
+            return Err(NzbError::NoValidArticles.into());
+        }
+
+        let non_empty = |v: &Option<String>| {
+            v.as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(str::to_string)
+        };
+        let (title, title_password) = match non_empty(&inner.meta.title) {
+            Some(title) => {
+                let (title, password) = split_password(&title);
+                (Some(title).filter(|t| !t.is_empty()), password)
+            }
+            None => (None, None),
+        };
+        let mut meta = NzbMeta {
+            title,
+            passwords: Vec::new(),
+            category: non_empty(&inner.meta.category),
+        };
+        for password in inner.meta.passwords.iter().map(|p| p.trim().to_string()) {
+            meta.add_password(password);
+        }
+        if let Some(password) = title_password {
+            meta.add_password(password);
+        }
+
+        Ok(Nzb { files, meta })
     }
 }
 
@@ -430,11 +393,10 @@ mod tests {
         </segment><segment bytes="10" number="2">two@x&#13;&#10;QUIT</segment><segment bytes="10" number="3">thr ee@x</segment></segments></file></nzb>"#;
         let nzb: Nzb = xml.parse().unwrap();
         let file = &nzb.files()[0];
-        let groups: Vec<&str> = file.groups.group.iter().map(|g| g.name.as_str()).collect();
-        assert_eq!(groups, ["alt.binaries.test"]);
+        assert_eq!(file.groups, ["alt.binaries.test"]);
         // Every segment stays (positions are what resume records), but only
         // the first can be asked for.
-        let segments = &file.segments.segment;
+        let segments = &file.segments;
         assert_eq!(segments.len(), 3);
         assert_eq!(segments[0].message_id, "one@x");
         let valid: Vec<bool> = segments.iter().map(NzbSegment::has_valid_id).collect();

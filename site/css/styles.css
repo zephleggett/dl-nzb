@@ -142,7 +142,6 @@ main h2 {
 main h3 { margin-top: 2rem; font-size: 1.2rem; font-weight: 600; color: var(--head); }
 main h3 + p, .prose { margin-top: 0.5rem; max-width: 44em; }
 .intro { margin-top: 0.7rem; max-width: 44em; }
-.note { margin-top: 1rem; max-width: 44em; font-size: var(--fs-small); color: var(--dim); }
 
 /* a row of plain links under a paragraph */
 .links { margin-top: 0.8rem; display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1.3rem;
@@ -151,10 +150,9 @@ main h3 + p, .prose { margin-top: 0.5rem; max-width: 44em; }
 .links .badge img { display: block; height: 40px; width: auto; }
 
 /* bullets: one short line each, a small cyan square */
-ul.bullets, ol.log ul { list-style: none; display: grid; gap: 0.45rem; }
-ul.bullets { margin-top: 1rem; max-width: 46em; }
-ul.bullets li, ol.log ul li { position: relative; padding-left: 1.1rem; }
-ul.bullets li::before, ol.log ul li::before {
+ul.bullets { list-style: none; display: grid; gap: 0.45rem; margin-top: 1rem; max-width: 46em; }
+ul.bullets li { position: relative; padding-left: 1.1rem; }
+ul.bullets li::before {
   content: ""; position: absolute; left: 0; top: 0.62em; width: 5px; height: 5px;
   background: var(--accent); opacity: 0.8;
 }
@@ -197,28 +195,10 @@ dl.features dd { margin-top: 0.3rem; max-width: 32em; }
   margin-top: 0.9rem; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.3rem 1rem;
   font-family: var(--mono); font-size: var(--fs-label);
 }
-.rel-line .ver, ol.log .ver { color: var(--accent); font-weight: 700; font-family: var(--mono); }
+.rel-line .ver { color: var(--accent); font-weight: 700; font-family: var(--mono); }
 .rel-line a { color: var(--dim); text-decoration: none; }
 .rel-line a:hover { color: var(--head); }
 .rel-line span { color: var(--dim); }
-
-.fold { margin-top: 1.6rem; border-block: 1px solid var(--line); }
-.fold > summary {
-  cursor: pointer; padding: 0.9rem 0 1rem; list-style-position: inside;
-  font-family: var(--mono); font-weight: 700; font-size: var(--fs-small); color: var(--head);
-}
-.fold > summary::marker { color: var(--accent); }
-.fold[open] > summary { border-bottom: 1px solid var(--line); }
-
-ol.log { list-style: none; }
-ol.log > li {
-  display: grid; grid-template-columns: 7rem 1fr; gap: 1rem;
-  padding: 0.9rem 0 1rem; border-bottom: 1px solid var(--line);
-}
-ol.log .rel { display: grid; align-content: start; gap: 0.1rem; padding-top: 0.15rem;
-  font-family: var(--mono); font-size: var(--fs-label); }
-ol.log time { color: var(--dim); }
-ol.log > li.more { display: block; border-bottom: 0; font-size: var(--fs-small); }
 
 /* ── footer: the base16 colours, flat, sign the page off ────────────── */
 .bands {
@@ -249,8 +229,6 @@ ol.log > li.more { display: block; border-bottom: 0; font-size: var(--fs-small);
   .hero { grid-template-columns: 1fr; padding-top: 2.8rem; }
   dl.features { grid-template-columns: 1fr; gap: 1.3rem; }
   dl.ledger > div { grid-template-columns: 1fr; gap: 0.2rem; }
-  ol.log > li { grid-template-columns: 1fr; gap: 0.3rem; }
-  ol.log .rel { display: flex; gap: 0.7rem; padding-top: 0; }
   main > section { padding-top: 2.8rem; }
 }
 @media (max-width: 600px) {

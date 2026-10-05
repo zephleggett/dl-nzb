@@ -23,3 +23,17 @@ public struct LiveItem<Content: View>: View {
     content(queue.live(item))
   }
 }
+
+extension DownloadItem {
+  /// The same download apart from its progress. A view inside `LiveItem`
+  /// that shows none of the numbers (the files, the folder, the details)
+  /// compares its item this way, so it is not drawn again with every
+  /// progress update.
+  public func equalsIgnoringProgress(_ other: DownloadItem) -> Bool {
+    var this = self
+    var other = other
+    this.progress = nil
+    other.progress = nil
+    return this == other
+  }
+}

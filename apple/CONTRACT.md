@@ -59,9 +59,15 @@ impl Engine {
     pub fn set_speed_limit(&self, bytes_per_sec: Option<u64>); // live, engine-wide token bucket; None = unlimited
     pub async fn test_connection(server: &UsenetConfig) -> Result<ServerCheck>; // connect + auth, real error kind
     pub fn inspect(nzb_path: &Path) -> Result<NzbInfo>;      // parse only, no network
+    pub fn inspect_named(nzb_path: &Path, file_name: &str) -> Result<NzbInfo>; // added: a copy kept under another name (the
+                                   // apps' Queue/<id>.nzb) described as the file it was opened as: the title falls back to
+                                   // that name and its {{password}} joins the passwords. Jobs on the copy see neither, so
+                                   // the apps pass the title and NzbInfo.passwords in the JobRequest.
     pub fn start(&self, request: JobRequest, observer: Arc<dyn JobObserver>) -> JobHandle; // spawns on the current tokio runtime
     pub fn reprocess(&self, output_dir: PathBuf, passwords: Vec<String>, observer: Arc<dyn JobObserver>) -> JobHandle; // post-processing only (e.g. after a password is supplied)
     pub async fn shutdown(&self);                            // stops every job resumably, closes the pool
+    pub fn stop_all(&self) -> Vec<JobHandle>;                // added: shutdown's first half (stop every job, no waiting);
+                                                             // the FFI's Drop uses it, then waits a bounded while
     pub fn config(&self) -> Config;                          // added: current config
     pub fn speed_limit(&self) -> Option<u64>;                // added: what set_speed_limit stored
 }
@@ -155,7 +161,8 @@ pub struct JobSummary {
 pub struct AvailabilityInfo { pub articles_total: u64, pub articles_missing: u64, pub missing_bytes: u64,
     pub recovery_bytes: u64, pub verdict: Verdict /* Complete | Repairable | Unrepairable | Unknown */ }
 
-pub struct NzbInfo { pub title: String /* <meta title> unless it looks obfuscated, else file stem */, pub passwords: Vec<String>,
+pub struct NzbInfo { pub title: String /* <meta title> unless it looks obfuscated or is generic ("download", "api",
+    digits), else the file stem without its {{password}} */, pub passwords: Vec<String>,
     pub category: Option<String>, pub total_bytes: u64, pub data_bytes: u64, pub par2_bytes: u64,
     pub files: Vec<NzbFile> /* name (as written: sanitized, de-duplicated), bytes, segments: u32, kind: FileKind (Data|Par2|Archive|Other) */,
     pub content_kind: ContentKind /* Video|Audio|Archive|Image|Document|Software|Other, by dominant bytes */ }
@@ -170,9 +177,8 @@ pub enum ErrorKind { Config, Auth, Dns, Connect, Tls, Timeout, Protocol, Nzb, Io
 // DlNzbError::kind() -> ErrorKind; DlNzbError::user_message() -> one or two plain sentences, never credentials and
 // never a library's wording in parentheses (e.g. "The connection to news.example.com was lost.");
 // DlNzbError::Job { kind, message } carries a finished job's error back as an error (added)
-pub fn cli_config_import() -> Option<(Config, PathBuf)>;   // reads the CLI's config file if present (password included)
-pub fn cli_config_path() -> Option<PathBuf>;              // added: real-home path even when sandboxed (for the open panel)
-pub fn cli_config_import_from(path: &Path) -> Result<Config>; // added: parse a user-picked file (sandboxed import)
+pub fn cli_config_import_from(path: &Path) -> Result<Config>; // parse the CLI's config file the user picked (password
+                                                             // included; the open panel starts at CLIConfig.defaultURL)
 ```
 
 Behaviour the API guarantees:
@@ -250,22 +256,21 @@ class Engine {                                   // owns a multi-thread tokio ru
   func setSpeedLimit(bytesPerSecond: UInt64?)    // nil or 0 = unlimited
   func speedLimit() -> UInt64?
   func testConnection(server: ServerConfig) async throws -> ServerCheck
-  func inspect(nzbPath: String) throws -> NzbInfo                 // blocking file I/O: call off the main actor
+  func inspect(nzbPath: String, fileName: String?) throws -> NzbInfo // blocking file I/O: call off the main actor;
+                                                 // fileName: engine::inspect_named (nil: engine::inspect)
   func start(request: JobRequest, listener: JobListener) -> JobHandle
   func reprocess(outputDir: String, passwords: [String], listener: JobListener) -> JobHandle
   func shutdown() async
-}
+}                                                // dropping it stops every job (engine::stop_all) and waits up to 5 s
 class JobHandle { func pause(); func resume(); func stop(); func isFinished() -> Bool; func wait() async -> JobSummary }
                                                  // pause() stops within about a second and closes the job's sockets
                                                  // (call it before an iOS background task expires); resume() reconnects
 protocol JobListener: AnyObject, Sendable { func onEvent(event: JobEvent) }   // #[uniffi::export(foreign)]
-func cliConfigPath() -> String?                                  // engine::cli_config_path
-func cliConfigImport(path: String) throws -> ImportedConfig?     // nil: no file; .Config: names no server
+func cliConfigImport(path: String) throws -> EngineConfig?       // nil: no file; .Config: names no server
 
 struct ServerConfig { host, port: UInt16, ssl, verifyCertificate, username, password, connections: UInt16, retryAttempts: UInt8 }
 struct EngineConfig { server: ServerConfig, autoPar2Repair, autoExtractRar, deleteRarAfterExtract, deletePar2AfterRepair,
                       deobfuscateFileNames, downloadAllPar2, fsyncOnFinalize, speedLimitBytesPerSecond: UInt64? }
-struct ImportedConfig { config: EngineConfig, downloadDir: String?, source: String }
 struct JobRequest { nzbPath, outputDir: String, passwords, preflight, onUnrepairable, freeSpaceHint: UInt64?, title: String? }
 enum JobEvent { phase(phase:), progress(progress:), availability(info:), warning(message:), finished(summary:) }
 enum EngineError: Error { Config(message:), Auth, Dns, Connect, Tls, Timeout, Protocol, Nzb, Io, DiskFull }  // flat: case = kind,
@@ -307,11 +312,11 @@ public protocol DownloadEngine: AnyObject, Sendable {
   func apply(_ settings: EngineSettings) async throws
   func setSpeedLimit(bytesPerSecond: Int64?) async
   func testConnection(_ server: ServerSettings, password: String) async throws -> ServerCheck
-  func inspect(_ nzb: URL) async throws -> NzbInfo
+  func inspect(_ nzb: URL, fileName: String?) async throws -> NzbInfo  // fileName: the name the user opened, for the
+                                                                       // queue's copy (title fallback, {{password}})
   func start(_ request: JobRequest) async throws -> JobSession
   func reprocess(directory: URL, passwords: [String]) async throws -> JobSession
-  func importCLIConfig() async -> ImportedSettings?
-  func importCLIConfig(from url: URL) async throws -> ImportedSettings  // added: a picked file; RustEngine uses the CLI's
+  func importCLIConfig(from url: URL) async throws -> ImportedSettings  // a picked file; RustEngine uses the CLI's
                                                                        // own parser (default: Kit's CLIConfig, for the simulator)
   func shutdown() async
 }
@@ -327,7 +332,9 @@ public final class JobSession: Sendable {   // events: AsyncStream<JobEvent>; pa
   `.preview()`; password through `Keychain` as `kSecClassInternetPassword`, protocol NNTPS), `DownloadQueue`.
 - `DownloadQueue` owns: items (`DownloadItem`: id, stored NZB copy, title, output folder, added/finished dates,
   `NzbInfo`, state, latest progress, summary), `add(urls:)` (copies the NZB into Application Support/dl-nzb/Queue,
-  de-duplicates the output folder name, flags duplicates), scheduler (one job in network phases at a time,
+  has the engine inspect the copy as the file opened, so the item takes the engine's title and a `{{password}}` in
+  the file name, which every job request then carries after the user's passwords; de-duplicates the output folder
+  name, flags duplicates), scheduler (one job in network phases at a time,
   post-processing may overlap the next download), pause/resume/stop/retry/remove/trash, password and
   "download anyway" follow-ups, persistence (`queue.json` in Application Support, restored on launch, interrupted
   jobs resume), retention policy, aggregate speed and fraction for Dock / menu bar / Finder.

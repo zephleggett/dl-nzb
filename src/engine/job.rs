@@ -26,13 +26,14 @@ use super::types::{
     OutputFile, Par2Report, Preflight, Verdict,
 };
 use super::EngineInner;
+use crate::config::Config;
 use crate::download::{AvailabilityReport, DownloadResult, Downloader, Nzb};
 use crate::error::{ConfigError, DlNzbError, NzbError};
 use crate::nntp::NntpPoolExt;
 use crate::patterns::{self, rar as rar_patterns};
 use crate::processing::deobfuscate::name_from_title;
 use crate::processing::{Par2Status, PostProcessingOutcome, PostProcessor};
-use crate::util::format_percent;
+use crate::util::{blocking, format_percent};
 
 /// Download and post-process one NZB.
 pub(crate) async fn run(
@@ -110,12 +111,24 @@ impl JobRun {
         let output_dir = &request.output_dir;
         require_absolute(output_dir)?;
 
-        let nzb = Nzb::from_file(&request.nzb_path)?;
-        if nzb.files().is_empty() {
-            return Err(NzbError::Empty.into());
-        }
-        std::fs::create_dir_all(output_dir)?;
-        let record = self.open_record(ctx, output_dir, &nzb, config.tuning.fsync_on_finalize);
+        // Reading the NZB and the folder's sidecar is file work: off the
+        // async threads.
+        let (nzb_path, dir, fsync) = (
+            request.nzb_path.clone(),
+            output_dir.clone(),
+            config.tuning.fsync_on_finalize,
+        );
+        let (nzb, opened) = blocking(move || -> Result<_, DlNzbError> {
+            let nzb = Nzb::from_file(&nzb_path)?;
+            if nzb.files().is_empty() {
+                return Err(NzbError::Empty.into());
+            }
+            std::fs::create_dir_all(&dir)?;
+            let opened = JobRecord::open(&dir, &nzb, fsync);
+            Ok((nzb, opened))
+        })
+        .await?;
+        let record = self.take_record(ctx, opened);
         // The job's name, for renaming: the request's title, else the NZB's
         // (a title that makes no file name, ".." say, doesn't count); never
         // the folder's (the caller may have de-duplicated it). Kept in the
@@ -127,10 +140,6 @@ impl JobRun {
             .unwrap_or_else(|| super::inspect::nzb_title(&nzb, &request.nzb_path));
         record.set_title(&name);
 
-        // The user's passwords are tried first (newest first), then the NZB's own.
-        let passwords = request.passwords.clone();
-        let nzb_passwords = nzb.meta().passwords.clone();
-
         // An earlier session downloaded everything: straight to
         // post-processing, without connecting (and with nothing to download,
         // no free-space check: its files may be renamed or deleted by now).
@@ -138,19 +147,42 @@ impl JobRun {
             self.download_done = true;
             self.results = record.results(output_dir, |_, attempted| attempted);
             ctx.add_recorded(&self.results);
-            self.post_process(
-                &config,
-                ctx,
-                output_dir,
-                Some(&name),
-                passwords,
-                nzb_passwords,
-            )
-            .await;
-            return Ok(());
+        } else {
+            self.fetch(engine, ctx, request, &config, &nzb, &record)
+                .await?;
+            if !self.download_done {
+                return Ok(());
+            }
         }
 
-        disk::check_free_space(output_dir, &nzb, &config, request.free_space_hint, &record)?;
+        // The user's passwords are tried first (newest first), then the NZB's own.
+        self.post_process(
+            &config,
+            ctx,
+            output_dir,
+            Some(&name),
+            request.passwords.clone(),
+            nzb.meta().passwords.clone(),
+        )
+        .await;
+        Ok(())
+    }
+
+    /// Download what `record` says is left of `nzb`: connect, scan when the
+    /// request asks, then fetch. Sets `download_done` once every download
+    /// phase has finished; it stays unset when the job was stopped, the scan
+    /// found it unrepairable, or a phase lost the server.
+    async fn fetch(
+        &mut self,
+        engine: &Arc<EngineInner>,
+        ctx: &Arc<JobCtx>,
+        request: &JobRequest,
+        config: &Config,
+        nzb: &Nzb,
+        record: &Arc<JobRecord>,
+    ) -> Result<(), DlNzbError> {
+        let output_dir = &request.output_dir;
+        disk::check_free_space(output_dir, nzb, config, request.free_space_hint, record)?;
         if ctx.is_cancelled() {
             return Ok(());
         }
@@ -158,7 +190,7 @@ impl JobRun {
         // Connect: one connection up front so a wrong password, unknown host or
         // TLS problem ends the job immediately with its real cause.
         ctx.set_phase(JobPhase::Connecting);
-        let pool = engine.pool_for(&config)?;
+        let pool = engine.pool_for(config)?;
         let Some(first) = first_connection(&pool, &config.usenet, ctx).await else {
             return Ok(());
         };
@@ -179,30 +211,22 @@ impl JobRun {
         if scan {
             ctx.set_phase(JobPhase::Checking);
             let scan_started = Instant::now();
-            let report = downloader.check_all_availability(&nzb).await;
+            let report = downloader.check_all_availability(nzb).await;
             self.summary.check_secs = scan_started.elapsed().as_secs_f64();
             if ctx.is_cancelled() {
                 return Ok(());
             }
-            match report {
-                Ok(report) => {
-                    let info = availability_info(&report);
-                    ctx.availability(info.clone());
-                    self.summary.availability = Some(info.clone());
-                    if info.verdict == Verdict::Unrepairable
-                        && request.on_unrepairable == OnUnrepairable::Stop
-                    {
-                        self.unrepairable = Some(unrepairable_message(&report));
-                        return Ok(());
-                    }
-                    if !report.missing_ids.is_empty() {
-                        skip_message_ids = Some(report.missing_ids);
-                    }
-                }
-                Err(e) => ctx.warn(format!(
-                    "Could not check article availability. {}",
-                    e.user_message()
-                )),
+            let info = availability_info(&report);
+            ctx.availability(info.clone());
+            self.summary.availability = Some(info.clone());
+            if info.verdict == Verdict::Unrepairable
+                && request.on_unrepairable == OnUnrepairable::Stop
+            {
+                self.unrepairable = Some(unrepairable_message(&report));
+                return Ok(());
+            }
+            if !report.missing_ids.is_empty() {
+                skip_message_ids = Some(report.missing_ids);
             }
         }
 
@@ -221,11 +245,11 @@ impl JobRun {
         let saver = record.spawn_saver(ctx);
         let outcome = downloader
             .download_nzb_resuming(
-                &nzb,
+                nzb,
                 download_config,
                 skip_message_ids.as_ref(),
                 config.post_processing.download_all_par2,
-                Some(&record),
+                Some(record),
             )
             .await;
         saver.abort();
@@ -240,30 +264,20 @@ impl JobRun {
             return Ok(());
         }
         // A phase that lost the server didn't finish: its files are fetched
-        // again on resume, so nothing may rename or delete them before then.
+        // again on resume, so nothing may rename or delete them before then
+        // (`judge` fails such a job with the connection's error).
         self.download_done = record.download_complete();
-        // `judge` fails such a job with the connection's error.
-        if !self.download_done {
-            return Ok(());
-        }
-
-        self.post_process(
-            &config,
-            ctx,
-            output_dir,
-            Some(&name),
-            passwords,
-            nzb_passwords,
-        )
-        .await;
         Ok(())
     }
 
-    /// Open the folder's resume record for `nzb`. A sidecar left by another
-    /// NZB, or one that can't be read, is not trusted: the job starts fresh
-    /// (and says so).
-    fn open_record(&mut self, ctx: &JobCtx, dir: &Path, nzb: &Nzb, fsync: bool) -> Arc<JobRecord> {
-        let (record, opened) = JobRecord::open(dir, nzb, fsync);
+    /// Keep the folder's resume record as [`JobRecord::open`] found it. A
+    /// sidecar left by another NZB, or one that can't be read, is not
+    /// trusted: the job starts fresh (and says so).
+    fn take_record(
+        &mut self,
+        ctx: &JobCtx,
+        (record, opened): (Arc<JobRecord>, Opened),
+    ) -> Arc<JobRecord> {
         match opened {
             Opened::Fresh | Opened::Resumed => {}
             Opened::Mismatch => ctx.warn(
@@ -346,7 +360,7 @@ impl JobRun {
     /// first, newest first), `nzb_passwords` the NZB's own.
     async fn post_process(
         &mut self,
-        config: &crate::config::Config,
+        config: &Config,
         ctx: &Arc<JobCtx>,
         output_dir: &Path,
         name: Option<&str>,
@@ -464,8 +478,8 @@ impl JobRun {
                 summary.par2.skipped_reason =
                     Some("PAR2 verified these files in an earlier run.".to_string());
             }
-            summary.archives_extracted = post.rar_archives_extracted as u32;
-            summary.archives_failed = post.rar_archives_failed as u32;
+            summary.archives_extracted = post.rar.archives_extracted as u32;
+            summary.archives_failed = post.rar.archives_failed as u32;
             summary.files_renamed = post.files_renamed as u32;
         } else {
             summary.par2.skipped_reason = Some("Post-processing did not run.".into());
@@ -479,10 +493,7 @@ impl JobRun {
         let ending = if ctx.is_cancelled() && !all_done {
             Ending::new(Outcome::Stopped, "Stopped; the downloaded data was kept.")
         } else if let Err(e) = &result {
-            Ending {
-                error_kind: Some(e.kind()),
-                ..Ending::new(Outcome::Failed, e.user_message())
-            }
+            Ending::failed(e.kind(), e.user_message())
         } else if let Some(message) = self.unrepairable.take() {
             Ending::new(Outcome::Unrepairable, message)
         } else {
@@ -502,13 +513,16 @@ impl JobRun {
             && sidecar_kept
             && work_left;
 
-        if summary.output_dir.is_dir() {
-            let extracted = self
-                .post
-                .as_ref()
-                .map(|p| p.extracted_archives.as_slice())
-                .unwrap_or_default();
-            summary.files = list_output_files(&summary.output_dir, extracted);
+        let dir = summary.output_dir.clone();
+        let extracted = self
+            .post
+            .as_ref()
+            .map(|p| p.rar.extracted.clone())
+            .unwrap_or_default();
+        if let Some(files) =
+            blocking(move || dir.is_dir().then(|| list_output_files(&dir, &extracted))).await
+        {
+            summary.files = files;
         }
         self.summary
     }
@@ -520,10 +534,7 @@ impl JobRun {
         // rest, and post-processing waited for that.
         if !self.download_done {
             return match ctx.connection_error() {
-                Some((kind, message)) => Ending {
-                    error_kind: Some(kind),
-                    ..Ending::new(Outcome::Failed, message)
-                },
+                Some((kind, message)) => Ending::failed(kind, message),
                 None => Ending::new(Outcome::Failed, "The download did not finish."),
             };
         }
@@ -547,10 +558,7 @@ impl JobRun {
             // resume fetches those articles again) rather than "articles
             // missing".
             if let Some((kind, message)) = ctx.connection_error() {
-                return Ending {
-                    error_kind: Some(kind),
-                    ..Ending::new(Outcome::Failed, message)
-                };
+                return Ending::failed(kind, message);
             }
             // Articles the server never got across aren't missing.
             let missing = format_percent(
@@ -577,8 +585,8 @@ impl JobRun {
         // An archive no password opened: the download is whole and stays in
         // place for `reprocess` with the right password. Never a success.
         if let Some(post) = &self.post {
-            if post.rar_archives_encrypted > 0 {
-                let message = if post.rar_user_passwords_failed {
+            if post.rar.archives_encrypted > 0 {
+                let message = if post.rar.user_passwords_failed {
                     "The password didn't work."
                 } else {
                     "This archive needs a password."
@@ -592,13 +600,13 @@ impl JobRun {
         } else if let Some(post) = &self.post {
             if post.par2_status == Par2Status::Failed {
                 Some("PAR2 verification failed.".to_string())
-            } else if post.rar_archives_failed > 0 {
-                Some(if post.rar_archives_failed == 1 {
+            } else if post.rar.archives_failed > 0 {
+                Some(if post.rar.archives_failed == 1 {
                     "1 archive could not be extracted.".to_string()
                 } else {
                     format!(
                         "{} archives could not be extracted.",
-                        post.rar_archives_failed
+                        post.rar.archives_failed
                     )
                 })
             } else {
@@ -645,6 +653,14 @@ impl Ending {
             outcome,
             message: Some(message.into()),
             error_kind: None,
+        }
+    }
+
+    /// The job failed because of an error of `kind`.
+    fn failed(kind: super::ErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            error_kind: Some(kind),
+            ..Self::new(Outcome::Failed, message)
         }
     }
 }
@@ -768,7 +784,7 @@ fn existing_files(dir: &Path) -> Result<Vec<DownloadResult>, DlNzbError> {
         let Ok(meta) = entry.metadata() else {
             continue;
         };
-        if !meta.is_file() || name.starts_with('.') || name.ends_with(".partial") {
+        if !meta.is_file() || name.starts_with('.') || name.ends_with(patterns::PARTIAL_EXT) {
             continue;
         }
         results.push(DownloadResult {
@@ -798,7 +814,7 @@ fn unfinished_files(dir: &Path) -> Vec<DownloadResult> {
             let name = entry
                 .file_name()
                 .to_str()?
-                .strip_suffix(".partial")?
+                .strip_suffix(patterns::PARTIAL_EXT)?
                 .to_string();
             let path = dir.join(&name);
             if name.is_empty() || name.starts_with('.') || path.exists() {

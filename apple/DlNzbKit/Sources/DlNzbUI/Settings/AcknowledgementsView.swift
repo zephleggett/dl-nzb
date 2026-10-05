@@ -33,14 +33,10 @@ public struct Acknowledgement: Identifiable, Codable, Sendable, Equatable {
 
   /// The Rust crates the engine links, with their licences. The FFI build
   /// regenerates DlNzbUI/Resources/rust-crates.json (an array of these, as
-  /// JSON) from `cargo about` or similar; until then it is empty.
-  public static func bundledRustCrates() -> [Acknowledgement] {
-    rustCrates
-  }
-
-  /// Read once: SwiftUI makes the view, and so would read the file, far
-  /// more often than it is shown.
-  private static let rustCrates: [Acknowledgement] = {
+  /// JSON) from `cargo about` or similar; until then it is empty. Read once:
+  /// SwiftUI makes the view, and so would read the file, far more often than
+  /// it is shown.
+  public static let bundledRustCrates: [Acknowledgement] = {
     guard let url = Bundle.module.url(forResource: "rust-crates", withExtension: "json"),
       let data = try? Data(contentsOf: url)
     else { return [] }
@@ -61,7 +57,7 @@ public struct AcknowledgementsView: View {
   /// - Parameter additional: components the app links itself (Sparkle on the
   ///   Mac's direct build), listed with the engine's Rust crates.
   public init(additional: [Acknowledgement] = []) {
-    self.components = (Acknowledgement.bundledRustCrates() + additional).sorted {
+    self.components = (Acknowledgement.bundledRustCrates + additional).sorted {
       $0.name.localizedStandardCompare($1.name) == .orderedAscending
     }
   }

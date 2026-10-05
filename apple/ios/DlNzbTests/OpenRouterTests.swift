@@ -1,4 +1,5 @@
 import DlNzbKit
+import DlNzbUI
 import Foundation
 import Testing
 
@@ -62,7 +63,7 @@ struct OpenRouterTests {
     try Data("not an nzb".utf8).write(to: junk)
     await router.handle([junk])
     #expect(router.failures.count == 1)
-    #expect(router.failureTitle == "Couldn’t Open “notes.nzb”")
+    #expect(AlertText.openFailureTitle(router.failures) == "Couldn’t Open “notes.nzb”")
     #expect(queue.items.count == 1)
   }
 

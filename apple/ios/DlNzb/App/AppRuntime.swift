@@ -1,4 +1,6 @@
 import DlNzbKit
+import DlNzbRust
+import DlNzbUI
 import Foundation
 import Observation
 import SwiftUI
@@ -35,7 +37,7 @@ final class AppRuntime {
   var settings: SettingsStore { model.settings }
 
   init(model: AppModel? = nil) {
-    let model = model ?? AppModel(makeEngine: Engines.make)
+    let model = model ?? AppModel(makeEngine: { $0.makeEngine() })
     let holds = QueueHolds(queue: model.queue)
     let phoneSettings = PhoneSettings()
     self.model = model
@@ -274,7 +276,7 @@ final class AppRuntime {
       var urls = [url]
       if url.hasDirectoryPath || (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
         let contents = (try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)) ?? []
-        urls = contents.filter { $0.pathExtension.lowercased() == "nzb" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+        urls = contents.filter(\.isNZB).sorted { $0.lastPathComponent < $1.lastPathComponent }
       }
       AppLog.open.info("-openOnLaunch: opening \(urls.count) NZBs")
       Task { await open(urls) }

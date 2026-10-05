@@ -183,12 +183,7 @@ public struct DownloadItem: Identifiable, Sendable, Codable, Equatable {
   public var canResume: Bool { state == .paused }
 
   /// Stop is offered for anything not yet done.
-  public var canStop: Bool {
-    switch state {
-    case .queued, .running, .paused: true
-    default: false
-    }
-  }
+  public var canStop: Bool { isUnfinished }
 
   public var canRetry: Bool {
     switch state {

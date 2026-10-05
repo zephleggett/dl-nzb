@@ -22,13 +22,6 @@ fn downloaded_at_least(bytes: u64) -> impl Fn(&JobEvent) -> bool {
     move |e| matches!(e, JobEvent::Progress(p) if p.phase == JobPhase::Downloading && p.bytes_done >= bytes)
 }
 
-fn config(port: u16, dir: &Path, connections: u16) -> dl_nzb::Config {
-    let mut config = make_config("127.0.0.1", port, dir.into());
-    config.usenet.connections = connections;
-    config.tuning.max_concurrent_connections = connections as usize;
-    config
-}
-
 fn never_scan(nzb: &Path, out: &Path) -> JobRequest {
     JobRequest {
         preflight: Preflight::Never,

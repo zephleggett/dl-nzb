@@ -69,8 +69,8 @@ pub(crate) fn fingerprint(nzb: &Nzb) -> String {
     buf.extend_from_slice(&(nzb.files().len() as u64).to_le_bytes());
     for file in nzb.files() {
         field(file.filename.as_bytes(), &mut buf);
-        buf.extend_from_slice(&(file.segments.segment.len() as u64).to_le_bytes());
-        for seg in &file.segments.segment {
+        buf.extend_from_slice(&(file.segments.len() as u64).to_le_bytes());
+        for seg in &file.segments {
             buf.extend_from_slice(&seg.number.to_le_bytes());
             buf.extend_from_slice(&seg.bytes.to_le_bytes());
             field(seg.message_id.as_bytes(), &mut buf);
@@ -201,17 +201,34 @@ impl SegmentSet {
         self.count = 0;
     }
 
+    /// The set as inclusive `[first, last]` runs, in order. Read a word (64
+    /// positions) at a time: an empty or full word takes one step, so a save
+    /// (which holds the record's lock meanwhile) stays quick on a big NZB.
+    /// Positions past `len` are never set.
     fn ranges(&self) -> Vec<[u32; 2]> {
         let mut out = Vec::new();
+        // Where the run being read began.
         let mut start: Option<u32> = None;
-        for i in 0..self.len {
-            match (self.contains(i), start) {
-                (true, None) => start = Some(i),
-                (false, Some(s)) => {
-                    out.push([s, i - 1]);
-                    start = None;
+        for (w, &word) in self.words.iter().enumerate() {
+            let base = w as u32 * 64;
+            let mut bit = 0;
+            while bit < 64 {
+                // The word from `bit` on (zeros shifted in at the top).
+                let rest = word >> bit;
+                match start {
+                    None if rest == 0 => break,
+                    None => {
+                        bit += rest.trailing_zeros();
+                        start = Some(base + bit);
+                    }
+                    Some(s) => {
+                        bit += rest.trailing_ones();
+                        if bit < 64 {
+                            out.push([s, base + bit - 1]);
+                            start = None;
+                        }
+                    }
                 }
-                _ => {}
             }
         }
         if let Some(s) = start {
@@ -337,7 +354,7 @@ impl JobRecord {
         let fresh_files = || {
             nzb.files()
                 .iter()
-                .map(|f| FileRec::new(f.filename.clone(), f.segments.segment.len() as u32))
+                .map(|f| FileRec::new(f.filename.clone(), f.segments.len() as u32))
                 .collect::<Vec<_>>()
         };
         let fresh = |opened: Opened| {
@@ -367,9 +384,11 @@ impl JobRecord {
         // Same fingerprint, so the same files in the same order; checked
         // anyway so a hand-edited sidecar can't index out of bounds.
         let consistent = doc.files.len() == nzb.files().len()
-            && doc.files.iter().zip(nzb.files()).all(|(d, f)| {
-                d.name == f.filename && d.segments as usize == f.segments.segment.len()
-            });
+            && doc
+                .files
+                .iter()
+                .zip(nzb.files())
+                .all(|(d, f)| d.name == f.filename && d.segments as usize == f.segments.len());
         if !consistent {
             return fresh(Opened::Unreadable(
                 "it does not match the NZB's file list".into(),
@@ -916,7 +935,7 @@ fn folder_stamps(dir: &Path) -> Vec<Stamp> {
         .filter_map(|e| e.ok())
         .filter_map(|e| {
             let name = e.file_name().to_str()?.to_string();
-            if name.starts_with('.') || name.ends_with(".partial") {
+            if name.starts_with('.') || name.ends_with(crate::patterns::PARTIAL_EXT) {
                 return None;
             }
             stamp(&e.path(), &name)
@@ -976,6 +995,66 @@ mod tests {
         assert_eq!(SegmentSet::from_ranges(130, &ranges), Some(set));
         assert_eq!(SegmentSet::from_ranges(130, &[[3, 2]]), None);
         assert_eq!(SegmentSet::from_ranges(130, &[[0, 130]]), None);
+    }
+
+    /// Reading a word at a time gives exactly the runs reading position by
+    /// position does, for sets of every density, scattered or in runs, and
+    /// sizes on and around word edges.
+    #[test]
+    fn ranges_match_a_position_by_position_reading() {
+        fn by_position(set: &SegmentSet) -> Vec<[u32; 2]> {
+            let mut out = Vec::new();
+            let mut start: Option<u32> = None;
+            for i in 0..set.len {
+                match (set.contains(i), start) {
+                    (true, None) => start = Some(i),
+                    (false, Some(s)) => {
+                        out.push([s, i - 1]);
+                        start = None;
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(s) = start {
+                out.push([s, set.len - 1]);
+            }
+            out
+        }
+        // xorshift64: random enough, and the same every run.
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut next = move |below: u32| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % u64::from(below.max(1))) as u32
+        };
+        for len in [
+            0, 1, 2, 63, 64, 65, 127, 128, 129, 191, 192, 193, 1000, 4096,
+        ] {
+            for percent in [0, 1, 10, 50, 90, 99, 100] {
+                for _ in 0..16 {
+                    // Scattered positions...
+                    let mut scattered = SegmentSet::new(len);
+                    for i in 0..len {
+                        if next(100) < percent {
+                            scattered.insert(i);
+                        }
+                    }
+                    // ... and runs of any length.
+                    let mut runs = SegmentSet::new(len);
+                    for _ in 0..next(8) {
+                        let first = next(len);
+                        let last = first.saturating_add(next(200)).min(len.saturating_sub(1));
+                        (first..=last).for_each(|i| runs.insert(i));
+                    }
+                    for set in [scattered, runs] {
+                        let ranges = set.ranges();
+                        assert_eq!(ranges, by_position(&set), "{len} positions");
+                        assert_eq!(SegmentSet::from_ranges(len, &ranges), Some(set));
+                    }
+                }
+            }
+        }
     }
 
     #[test]

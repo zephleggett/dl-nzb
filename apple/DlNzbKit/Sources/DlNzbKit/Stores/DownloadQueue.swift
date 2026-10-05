@@ -26,14 +26,16 @@ public struct DuplicateNZB: Sendable, Equatable, Identifiable {
   /// Where it was (or is being) downloaded, for Show in Finder.
   public let folder: URL
   let data: Data
+  let fingerprint: String
   let fileName: String
 
-  init(title: String, existingItemID: DownloadItem.ID?, folder: URL, data: Data, fileName: String) {
+  init(title: String, existingItemID: DownloadItem.ID?, folder: URL, data: Data, fingerprint: String, fileName: String) {
     self.id = UUID()
     self.title = title
     self.existingItemID = existingItemID
     self.folder = folder
     self.data = data
+    self.fingerprint = fingerprint
     self.fileName = fileName
   }
 }
@@ -65,6 +67,14 @@ public final class DownloadQueue {
     }
     set {
       withMutation(keyPath: \.items) { storedItems = newValue }
+    }
+    // As the @Observable macro writes it, so `items[i].x = y` changes the
+    // list in place rather than copying all of it to set it back.
+    _modify {
+      access(keyPath: \.items)
+      _$observationRegistrar.willSet(self, keyPath: \.items)
+      defer { _$observationRegistrar.didSet(self, keyPath: \.items) }
+      yield &storedItems
     }
   }
   /// Pause All is on, or a server problem paused everything. Nothing starts
@@ -173,10 +183,12 @@ public final class DownloadQueue {
     return current
   }
 
-  /// Subscribes the reader to the progress of every running item, for the
-  /// aggregates that add it up.
-  private func observeRunningProgress() {
-    for item in items where item.isRunning {
+  /// Subscribes the reader to the progress of every item moving bytes, for
+  /// the aggregates that add it up. Only those items' numbers change the
+  /// sums: one in another phase counts as downloaded or not yet, at no speed.
+  /// A phase change goes through `items`, so the reader subscribes afresh.
+  private func observeTransferProgress() {
+    for item in items where item.phase?.isTransfer == true {
       signal(for: item.id).observe()
     }
   }
@@ -193,9 +205,6 @@ public final class DownloadQueue {
   /// Items running in any phase.
   public var activeCount: Int { items.count(where: \.isRunning) }
 
-  /// Items in a network phase: at most one, by design.
-  public var downloadingCount: Int { items.count(where: \.usesNetwork) }
-
   public var queuedCount: Int { items.count(where: \.isQueued) }
 
   public var pausedCount: Int { items.count(where: \.isPaused) }
@@ -203,13 +212,10 @@ public final class DownloadQueue {
   /// Items quitting would interrupt.
   public var unfinishedCount: Int { items.count(where: \.isUnfinished) }
 
-  /// Bytes a second across every transfer.
-  public var aggregateSpeed: Double { speed() }
-
   /// Bytes a second across every transfer but `excluded`'s. The reader
-  /// updates with the running items' progress.
+  /// updates with the transfers' progress.
   public func speed(excluding excluded: DownloadItem.ID? = nil) -> Double {
-    observeRunningProgress()
+    observeTransferProgress()
     return items.reduce(0) { total, item in
       guard item.id != excluded, item.phase?.isTransfer == true, let speed = item.progress?.speedBytesPerSecond, speed.isFinite else { return total }
       return total + max(speed, 0)
@@ -220,13 +226,13 @@ public final class DownloadQueue {
   /// weighted by size) that has downloaded. Nil when nothing is running, which
   /// is when the Dock tile and Finder progress go away.
   public var overallFraction: Double? {
-    observeRunningProgress()
+    observeTransferProgress()
     let batch = items.filter { $0.isRunning || $0.isQueued || $0.isPaused }
     guard batch.contains(where: \.isRunning) else { return nil }
     let weights = batch.map { Double(max($0.totalBytes, 1)) }
     let total = weights.reduce(0, +)
     let done = zip(batch, weights).reduce(0) { $0 + $1.0.downloadFraction * $1.1 }
-    return total > 0 ? min(max(done / total, 0), 1) : 0
+    return total > 0 ? (done / total).clampedFraction : 0
   }
 
   /// The item downloading now, or else the first one being processed.
@@ -378,8 +384,8 @@ public final class DownloadQueue {
     let fileName = url.lastPathComponent
     guard isLive else { return .failed(fileName: fileName, message: "Downloads are not available here.") }
     do {
-      let data = try await NzbImport.read(url)
-      return await add(data: data, fileName: fileName, allowingDuplicate: false)
+      let (data, fingerprint) = try await NzbImport.read(url)
+      return await add(data: data, fingerprint: fingerprint, fileName: fileName, allowingDuplicate: false)
     } catch let error as EngineError {
       return .failed(fileName: fileName, message: error.message)
     } catch {
@@ -389,12 +395,13 @@ public final class DownloadQueue {
 
   /// Download Again: adds the duplicate under a fresh folder name.
   public func addAgain(_ duplicate: DuplicateNZB) async -> AddResult {
-    await add(data: duplicate.data, fileName: duplicate.fileName, allowingDuplicate: true)
+    await add(data: duplicate.data, fingerprint: duplicate.fingerprint, fileName: duplicate.fileName, allowingDuplicate: true)
   }
 
-  private func add(data: Data, fileName: String, allowingDuplicate: Bool) async -> AddResult {
+  /// `fileName` is the name the user opened: the engine reads the queue's
+  /// copy as that file, for its title and any `{{password}}` in the name.
+  private func add(data: Data, fingerprint: String, fileName: String, allowingDuplicate: Bool) async -> AddResult {
     guard isLive else { return .failed(fileName: fileName, message: "Downloads are not available here.") }
-    let fingerprint = NzbFingerprint.of(data)
     if !allowingDuplicate, let duplicate = listedDuplicate(fingerprint: fingerprint, data: data, fileName: fileName) {
       return .duplicate(duplicate)
     }
@@ -409,16 +416,14 @@ public final class DownloadQueue {
     }
     let info: NzbInfo
     do {
-      info = try await engine.inspect(copy)
+      info = try await engine.inspect(copy, fileName: fileName)
     } catch {
       storage.removeNZB(for: id)
       let message = (error as? EngineError)?.message ?? "\(fileName) is not a valid NZB file."
       return .failed(fileName: fileName, message: message)
     }
 
-    let stem = (fileName as NSString).deletingPathExtension
-    // The engine falls back to the file's name, which for the copy is the id.
-    let title = ReleaseName.best([info.title == id.uuidString ? nil : info.title, stem], fallback: stem)
+    let title = info.title
     let base = settings.downloadFolder
     // Checked again after the awaits: another add may have got there first.
     if !allowingDuplicate {
@@ -429,7 +434,7 @@ public final class DownloadQueue {
       let plain = base.appending(path: ReleaseName.folderName(title), directoryHint: .isDirectory)
       if !isListed(plain) && Self.holdsFiles(plain) {
         storage.removeNZB(for: id)
-        return .duplicate(DuplicateNZB(title: title, existingItemID: nil, folder: plain, data: data, fileName: fileName))
+        return .duplicate(DuplicateNZB(title: title, existingItemID: nil, folder: plain, data: data, fingerprint: fingerprint, fileName: fileName))
       }
     }
 
@@ -449,7 +454,8 @@ public final class DownloadQueue {
   private func listedDuplicate(fingerprint: String, data: Data, fileName: String) -> DuplicateNZB? {
     let matches = items.filter { $0.fingerprint == fingerprint }
     guard let existing = matches.first(where: { !$0.isFinished }) ?? matches.last else { return nil }
-    return DuplicateNZB(title: existing.title, existingItemID: existing.id, folder: existing.outputDirectory, data: data, fileName: fileName)
+    return DuplicateNZB(
+      title: existing.title, existingItemID: existing.id, folder: existing.outputDirectory, data: data, fingerprint: fingerprint, fileName: fileName)
   }
 
   /// "Name", or "Name 2", "Name 3" … when an item in the list or a folder on
@@ -466,14 +472,8 @@ public final class DownloadQueue {
   }
 
   private func isListed(_ folder: URL) -> Bool {
-    let path = Self.normalisedPath(folder)
-    return items.contains { Self.normalisedPath($0.outputDirectory) == path }
-  }
-
-  private static func normalisedPath(_ url: URL) -> String {
-    var path = url.standardizedFileURL.path(percentEncoded: false)
-    while path.count > 1 && path.hasSuffix("/") { path.removeLast() }
-    return path
+    let path = folder.normalisedPath
+    return items.contains { $0.outputDirectory.normalisedPath == path }
   }
 
   /// A folder with anything in it: an earlier download of the same release.
@@ -493,15 +493,20 @@ public final class DownloadQueue {
       return
     }
     guard items[index].isQueued else { return }
-    items[index].startRequested = true
-    scheduleSave()
-    schedule()
+    requeue(at: [index])
   }
 
   /// Start for every waiting item.
   public func startAll() {
     guard isLive else { return }
-    for index in items.indices where items[index].isQueued {
+    requeue(at: items.indices.filter { items[$0].isQueued })
+  }
+
+  /// In line (again) at the user's asking, so each runs even when downloads
+  /// do not start automatically or Pause All is on.
+  private func requeue(at indices: [Int]) {
+    for index in indices {
+      items[index].state = .queued
       items[index].startRequested = true
     }
     scheduleSave()
@@ -535,10 +540,7 @@ public final class DownloadQueue {
   /// automatically or Pause All is on: the user asked for it.
   public func resume(_ id: DownloadItem.ID) {
     guard isLive, let index = index(of: id), items[index].isPaused else { return }
-    items[index].state = .queued
-    items[index].startRequested = true
-    scheduleSave()
-    schedule()
+    requeue(at: [index])
   }
 
   /// Pauses what is downloading and holds back everything waiting.
@@ -554,55 +556,49 @@ public final class DownloadQueue {
     scheduleSave()
   }
 
-  /// Resumes every paused item, lifts the hold, and clears a server problem
-  /// so the queue tries the server again.
-  public func resumeAll() {
-    resumeAll(keepingPaused: [])
-  }
-
-  /// Resume All, except for the items in `kept`, which stay paused. The
-  /// iPhone pauses everything itself (on cellular, or when the system ends
-  /// its background time) and uses this to undo exactly that, leaving alone
+  /// Resumes every paused item but those in `kept`, lifts the hold, and
+  /// clears a server problem so the queue tries the server again. The iPhone
+  /// pauses everything itself (on cellular, or when the system ends its
+  /// background time) and passes `kept` to undo exactly that, leaving alone
   /// whatever the user had paused one by one before.
-  public func resumeAll(keepingPaused kept: Set<DownloadItem.ID>) {
+  public func resumeAll(keepingPaused kept: Set<DownloadItem.ID> = []) {
     guard isLive else { return }
     isPaused = false
     serverProblem = nil
     unresolvedServerProblem = nil
-    for index in items.indices where items[index].isPaused && !kept.contains(items[index].id) {
-      items[index].state = .queued
-      items[index].startRequested = true
-    }
-    scheduleSave()
-    schedule()
+    requeue(at: items.indices.filter { items[$0].isPaused && !kept.contains(items[$0].id) })
   }
 
   /// Stop. The data stays, so Retry continues, unless `deletingData`.
   public func stop(_ id: DownloadItem.ID, deletingData: Bool = false) {
     guard isLive, let index = index(of: id), items[index].canStop else { return }
     let item = items[index]
-    items[index].state = .stopped
-    if !interrupt(id, holdingSlot: item.usesNetwork, for: .cancel(deleteData: deletingData)) {
-      if deletingData {
-        items[index].progress = nil
-        items[index].earlierRunSeconds = nil
-        deleteFolder(item.outputDirectory)
-      } else {
-        removeFolderIfEmpty(item.outputDirectory)
-      }
+    if interrupt(id, holdingSlot: item.usesNetwork, for: .cancel(deleteData: deletingData)) {
+      // The rest when the engine has let go (`finish`).
+      items[index].state = .stopped
+    } else {
+      discardRun(&items[index], deletingData: deletingData)
     }
     Log.queue.info("stopped \(item.title, privacy: .public)\(deletingData ? " and deleted its data" : "", privacy: .public)")
     scheduleSave()
     schedule()
   }
 
+  /// Stopped by the user. What the run downloaded stays for Retry to
+  /// continue, unless `deletingData`.
+  private func discardRun(_ item: inout DownloadItem, deletingData: Bool) {
+    item.state = .stopped
+    if deletingData {
+      item.progress = nil
+      item.earlierRunSeconds = nil
+    }
+    dispose(item.outputDirectory, deletingData ? .delete : .keep)
+  }
+
   /// Back in line to continue (or start over, if its data was deleted).
   public func retry(_ id: DownloadItem.ID) {
     guard isLive, let index = index(of: id), items[index].canRetry else { return }
-    items[index].state = .queued
-    items[index].startRequested = true
-    scheduleSave()
-    schedule()
+    requeue(at: [index])
   }
 
   /// Takes the item off the list; a running job stops. Its files stay,
@@ -667,10 +663,7 @@ public final class DownloadQueue {
   public func downloadAnyway(_ id: DownloadItem.ID) {
     guard isLive, let index = index(of: id), case .needsAttention(.unrepairable) = items[index].state else { return }
     items[index].downloadAnyway = true
-    items[index].state = .queued
-    items[index].startRequested = true
-    scheduleSave()
-    schedule()
+    requeue(at: [index])
   }
 
   /// The archive's password: post-processing runs again with it. The
@@ -765,9 +758,7 @@ public final class DownloadQueue {
   private func holdFolderAccess(for id: UUID, folder: URL) {
     guard folderAccess[id] == nil else { return }
     let base = settings.downloadFolder
-    let basePath = Self.normalisedPath(base)
-    let folderPath = Self.normalisedPath(folder)
-    guard folderPath == basePath || folderPath.hasPrefix(basePath.hasSuffix("/") ? basePath : basePath + "/") else { return }
+    guard folder.isInside(base) || folder.normalisedPath == base.normalisedPath else { return }
     if base.startAccessingSecurityScopedResource() {
       folderAccess[id] = base
     }
@@ -803,8 +794,11 @@ public final class DownloadQueue {
     let item = items[index]
     items[index].state = .running(.connecting)
     if item.progress == nil { items[index].visitedPhases = [] }
+    // The job reads the queue's copy, which has lost the name the user
+    // opened, and with it any `{{password}}` the name held: the NZB's own
+    // passwords (that one among them) go in after the user's.
     let request = JobRequest(
-      nzbURL: item.nzbURL, outputDirectory: item.outputDirectory, passwords: item.passwords,
+      nzbURL: item.nzbURL, outputDirectory: item.outputDirectory, passwords: item.passwords + (item.info?.passwords ?? []),
       preflight: item.downloadAnyway ? .never : settings.preflight, onUnrepairable: item.downloadAnyway ? .continue : .stop,
       title: item.title)
     Log.queue.info("starting \(item.title, privacy: .public)")
@@ -966,14 +960,7 @@ public final class DownloadQueue {
     case .pause:
       item.state = .paused
     case .cancel(let deleteData):
-      item.state = .stopped
-      if deleteData {
-        item.progress = nil
-        item.earlierRunSeconds = nil
-        deleteFolder(item.outputDirectory)
-      } else {
-        removeFolderIfEmpty(item.outputDirectory)
-      }
+      discardRun(&item, deletingData: deleteData)
     case .quit:
       item.state = .queued
     case .remove:
@@ -1271,22 +1258,25 @@ enum NzbImport {
   static let maximumBytes = 256 * 1024 * 1024
 
   /// Takes up security-scoped access (an open event, the Files app), and
-  /// reads through a file coordinator so a file in iCloud Drive downloads first.
-  static func read(_ url: URL) async throws -> Data {
+  /// reads through a file coordinator so a file in iCloud Drive downloads
+  /// first. The bytes come with their fingerprint, worked out here too
+  /// rather than on the main actor.
+  static func read(_ url: URL) async throws -> (data: Data, fingerprint: String) {
     try await Task.detached(priority: .userInitiated) {
-      let accessing = url.startAccessingSecurityScopedResource()
-      defer { if accessing { url.stopAccessingSecurityScopedResource() } }
-      var coordinationError: NSError?
-      var result: Result<Data, any Error> = .failure(CocoaError(.fileReadUnknown))
-      NSFileCoordinator().coordinate(readingItemAt: url, options: [.withoutChanges], error: &coordinationError) { readable in
-        result = Result {
-          let size = (try? readable.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-          guard size <= maximumBytes else { throw EngineError(.nzb, "\(url.lastPathComponent) is too large to be an NZB file.") }
-          return try Data(contentsOf: readable)
+      let data = try url.withSecurityScopedAccess { () throws -> Data in
+        var coordinationError: NSError?
+        var result: Result<Data, any Error> = .failure(CocoaError(.fileReadUnknown))
+        NSFileCoordinator().coordinate(readingItemAt: url, options: [.withoutChanges], error: &coordinationError) { readable in
+          result = Result {
+            let size = (try? readable.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            guard size <= maximumBytes else { throw EngineError(.nzb, "\(url.lastPathComponent) is too large to be an NZB file.") }
+            return try Data(contentsOf: readable)
+          }
         }
+        if let coordinationError { throw coordinationError }
+        return try result.get()
       }
-      if let coordinationError { throw coordinationError }
-      return try result.get()
+      return (data, NzbFingerprint.of(data))
     }.value
   }
 }

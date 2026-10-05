@@ -35,6 +35,7 @@ use crate::error::DlNzbError;
 use crate::nntp::{
     ArticleOutcome, NntpPool, NntpPoolBuilder, NntpPoolExt, PooledConnection, SegmentRequest,
 };
+use crate::patterns::partial_path;
 
 type Result<T> = std::result::Result<T, DlNzbError>;
 
@@ -71,6 +72,18 @@ pub struct DownloadOutcome {
     pub actual_wire_bytes: u64,
 }
 
+impl DownloadOutcome {
+    /// Files settled without the network (nothing left to fetch, or finished
+    /// in an earlier session): no transfer to report.
+    fn local(files: Vec<DownloadResult>) -> Self {
+        Self {
+            files,
+            transfer_duration: Duration::ZERO,
+            actual_wire_bytes: 0,
+        }
+    }
+}
+
 /// Result of a pre-flight `STAT`-all availability scan. Byte tallies use the
 /// NZB's encoded segment sizes, which are proportional to PAR2 block counts, so
 /// comparing missing data bytes against available recovery bytes is a good
@@ -83,14 +96,11 @@ pub struct AvailabilityReport {
     pub articles_total: u64,
     pub total_data_bytes: u64,
     pub missing_data_bytes: u64,
-    pub total_par2_bytes: u64,
     pub available_par2_bytes: u64,
     /// All missing article ids — handed to the downloader so they aren't fetched.
     pub missing_ids: HashSet<String>,
     /// Names of data files with at least one CONFIRMED-missing segment.
     pub missing_files: Vec<String>,
-    /// Subset of `missing_files` that are essential (not .nfo/.sfv/.srr).
-    pub missing_essential_files: Vec<String>,
     pub has_par2: bool,
     /// Some segments could not be STAT-checked (no connection could, or the
     /// server's reply said nothing). Their bytes are counted pessimistically
@@ -106,21 +116,16 @@ pub struct AvailabilityReport {
 impl AvailabilityReport {
     /// True if every missing data file is non-essential (.nfo/.sfv/.srr only).
     pub fn only_nonessential_missing(&self) -> bool {
-        !self.missing_files.is_empty() && self.missing_essential_files.is_empty()
+        !self.missing_files.is_empty()
+            && self
+                .missing_files
+                .iter()
+                .all(|name| crate::patterns::is_auxiliary_name(name))
     }
 
     /// Whether the available PAR2 recovery can likely repair the missing data.
-    /// Recovery blocks are the same size as data blocks, so available recovery
-    /// bytes must cover the missing data bytes; a 10% headroom absorbs block-
-    /// alignment over-counting.
     pub fn likely_repairable(&self) -> bool {
-        if self.missing_data_bytes == 0 {
-            return true;
-        }
-        if !self.has_par2 {
-            return false;
-        }
-        self.available_par2_bytes as f64 >= self.missing_data_bytes as f64 * 1.1
+        self.covers(self.missing_data_bytes, self.available_par2_bytes)
     }
 
     /// Whether the recovery data could cover what is confirmed missing if
@@ -128,17 +133,61 @@ impl AvailabilityReport {
     /// [`likely_repairable`](Self::likely_repairable) when the scan checked
     /// everything; when only this holds, the unchecked articles decide.
     pub fn possibly_repairable(&self) -> bool {
-        let missing = self
-            .missing_data_bytes
-            .saturating_sub(self.unknown_data_bytes);
-        if missing == 0 {
-            return true;
-        }
-        if !self.has_par2 {
-            return false;
-        }
-        let available = self.available_par2_bytes + self.unknown_par2_bytes;
-        available as f64 >= missing as f64 * 1.1
+        self.covers(
+            self.missing_data_bytes
+                .saturating_sub(self.unknown_data_bytes),
+            self.available_par2_bytes + self.unknown_par2_bytes,
+        )
+    }
+
+    /// Whether `available` recovery bytes can repair `missing` data bytes.
+    /// Recovery blocks are the same size as data blocks, so they must cover
+    /// the missing bytes; a 10% headroom absorbs block-alignment
+    /// over-counting.
+    fn covers(&self, missing: u64, available: u64) -> bool {
+        missing == 0 || (self.has_par2 && available as f64 >= missing as f64 * 1.1)
+    }
+}
+
+/// The connections a phase's workers (download or scan) hold and have held.
+/// A worker that can't connect while another has (the provider allows fewer
+/// connections than configured) leaves the work to the others.
+#[derive(Default)]
+struct Census {
+    /// Workers holding a connection right now.
+    connected: AtomicUsize,
+    /// Connections workers have checked out so far.
+    acquired: AtomicU64,
+}
+
+impl Census {
+    /// Connections checked out so far, for
+    /// [`others_connected`](Self::others_connected).
+    fn acquired(&self) -> u64 {
+        self.acquired.load(Ordering::Acquire)
+    }
+
+    /// Whether another worker reached the server: one holds a connection
+    /// now, or got one since `acquired_before` was read.
+    fn others_connected(&self, acquired_before: u64) -> bool {
+        self.connected.load(Ordering::Acquire) > 0
+            || self.acquired.load(Ordering::Acquire) > acquired_before
+    }
+
+    /// Count a connection just checked out, held until the guard is dropped.
+    fn hold(&self) -> Holding<'_> {
+        self.connected.fetch_add(1, Ordering::AcqRel);
+        self.acquired.fetch_add(1, Ordering::AcqRel);
+        Holding(&self.connected)
+    }
+}
+
+/// A connection counted in [`Census::connected`] while this lives.
+struct Holding<'a>(&'a AtomicUsize);
+
+impl Drop for Holding<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -146,10 +195,7 @@ impl AvailabilityReport {
 /// workers, and how many of them reached the server.
 struct StatQueue {
     batches: std::sync::Mutex<VecDeque<StatBatch>>,
-    /// Workers holding a connection right now.
-    connected: AtomicUsize,
-    /// Connections workers have checked out so far.
-    acquired: AtomicU64,
+    census: Census,
 }
 
 struct StatBatch {
@@ -181,8 +227,7 @@ impl StatQueue {
                     })
                     .collect(),
             ),
-            connected: AtomicUsize::new(0),
-            acquired: AtomicU64::new(0),
+            census: Census::default(),
         }
     }
 
@@ -198,13 +243,6 @@ impl StatQueue {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push_back(batch);
-    }
-
-    /// Whether another worker reached the server: one holds a connection
-    /// now, or got one since `acquired_before` was read.
-    fn others_connected(&self, acquired_before: u64) -> bool {
-        self.connected.load(Ordering::Acquire) > 0
-            || self.acquired.load(Ordering::Acquire) > acquired_before
     }
 }
 
@@ -232,7 +270,7 @@ async fn stat_worker(
     results: mpsc::UnboundedSender<StatResults>,
 ) {
     'connect: loop {
-        let acquired_before = queue.acquired.load(Ordering::Acquire);
+        let acquired_before = queue.census.acquired();
         let mut attempt = 0u32;
         let mut conn = loop {
             match pool.get_connection().await {
@@ -240,7 +278,7 @@ async fn stat_worker(
                 Err(e) => {
                     tracing::debug!("STAT connection failed: {}", e);
                     attempt += 1;
-                    if queue.others_connected(acquired_before) {
+                    if queue.census.others_connected(acquired_before) {
                         return;
                     }
                     if attempt >= STAT_CONNECT_ATTEMPTS {
@@ -253,9 +291,7 @@ async fn stat_worker(
                 }
             }
         };
-        queue.connected.fetch_add(1, Ordering::AcqRel);
-        queue.acquired.fetch_add(1, Ordering::AcqRel);
-        let _held = ConnectedGuard(&queue.connected);
+        let _held = queue.census.hold();
         while let Some(mut batch) = queue.pop() {
             match conn.check_articles_exist(&batch.requests).await {
                 Ok(checked) => {
@@ -276,15 +312,6 @@ async fn stat_worker(
             }
         }
         return;
-    }
-}
-
-/// Counts a scan worker's connection in [`StatQueue::connected`] while held.
-struct ConnectedGuard<'a>(&'a AtomicUsize);
-
-impl Drop for ConnectedGuard<'_> {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -332,20 +359,19 @@ impl Downloader {
     /// Replaces the old first-segment-only heuristic: a file with its first
     /// segment present but later segments missing is now detected, and a file
     /// missing only its first segment still downloads its remaining segments.
-    pub async fn check_all_availability(&self, nzb: &Nzb) -> Result<AvailabilityReport> {
+    pub async fn check_all_availability(&self, nzb: &Nzb) -> AvailabilityReport {
         // Bail immediately if the job was already stopped.
         if self.job.is_cancelled() {
-            return Ok(AvailabilityReport {
+            return AvailabilityReport {
                 scan_incomplete: true,
                 ..Default::default()
-            });
+            };
         }
         let files: Vec<&NzbFile> = nzb.files().iter().collect();
 
         struct FileAcc {
             name: String,
             is_par2: bool,
-            essential: bool,
             total_bytes: u64,
             /// Confirmed-absent bytes (STAT said 430). Drives the skip set and
             /// the displayed "missing files" list.
@@ -367,23 +393,21 @@ impl Downloader {
         for file in &files {
             let filename = file.filename.clone();
             let is_par2 = file.is_par2();
-            let essential = !crate::patterns::is_auxiliary_name(&filename);
-            let group = file.groups.group.first().map(|g| g.name.clone());
+            let group = file.groups.first().cloned();
             let idx = file_accs.len();
-            let total_bytes: u64 = file.segments.segment.iter().map(|s| s.bytes).sum();
+            let total_bytes = file.bytes();
             let no_group = group.is_none();
             // A file with no newsgroup can't be fetched — count it as missing.
             let mut acc = FileAcc {
                 name: filename,
                 is_par2,
-                essential,
                 total_bytes,
                 missing_bytes: if no_group { total_bytes } else { 0 },
                 unknown_bytes: 0,
                 has_missing: no_group,
             };
             if let Some(group) = group {
-                for seg in &file.segments.segment {
+                for seg in &file.segments {
                     if !seg.has_valid_id() {
                         // Never sent; it can't be fetched either.
                         malformed += 1;
@@ -480,7 +504,6 @@ impl Downloader {
             let unavailable = fa.missing_bytes + fa.unknown_bytes;
             if fa.is_par2 {
                 report.has_par2 = true;
-                report.total_par2_bytes += fa.total_bytes;
                 report.available_par2_bytes += fa.total_bytes.saturating_sub(unavailable);
                 report.unknown_par2_bytes += fa.unknown_bytes;
             } else {
@@ -491,13 +514,10 @@ impl Downloader {
                 // on a transient STAT error).
                 if fa.has_missing {
                     report.missing_files.push(fa.name.clone());
-                    if fa.essential {
-                        report.missing_essential_files.push(fa.name.clone());
-                    }
                 }
             }
         }
-        Ok(report)
+        report
     }
 
     /// Run a full NZB download. Returns the per-file results plus the
@@ -556,27 +576,18 @@ impl Downloader {
             files.len() as u32,
         );
         if files.is_empty() {
-            return Ok(DownloadOutcome {
-                files: Vec::new(),
-                transfer_duration: Duration::ZERO,
-                actual_wire_bytes: 0,
-            });
+            return Ok(DownloadOutcome::local(Vec::new()));
         }
 
         // No pool warm-up first: each worker connects on its own and starts
         // as soon as its connection is up, so the first articles flow while
         // the rest connect, and one slow connection holds up only its worker
         // (waiting for all of them stalled whole jobs for 30 s).
-        let (results, transfer_duration, actual_wire_bytes) = self
+        let outcome = self
             .run_download(&files, starts, config, skip_message_ids, record)
-            .await?;
+            .await;
         self.job.emit_progress_if_changed();
-
-        Ok(DownloadOutcome {
-            files: results,
-            transfer_duration,
-            actual_wire_bytes,
-        })
+        Ok(outcome)
     }
 
     /// Run a phase, or, when an earlier session finished it (the record says
@@ -606,11 +617,7 @@ impl Downloader {
         };
         let files = record.results(&config.download.dir, |name, _| names.contains(name));
         self.job.add_recorded(&files);
-        Ok(DownloadOutcome {
-            files,
-            transfer_duration: Duration::ZERO,
-            actual_wire_bytes: 0,
-        })
+        Ok(DownloadOutcome::local(files))
     }
 
     /// The phase that just ran reached its end: not stopped, and no worker
@@ -751,7 +758,7 @@ impl Downloader {
         config: &Config,
         skip_message_ids: Option<&HashSet<String>>,
         record: Option<&Arc<JobRecord>>,
-    ) -> Result<(Vec<DownloadResult>, Duration, u64)> {
+    ) -> DownloadOutcome {
         let configured_depth = config.tuning.pipeline_depth.max(1);
         let decode_retry_cap = config.tuning.decode_retry_cap.max(1);
         // Transient (connection-level / 412) retries get a more generous budget
@@ -772,16 +779,38 @@ impl Downloader {
         let mut work: Vec<FileWork> = Vec::new();
         let mut finalize_now: Vec<Arc<FileHandle>> = Vec::new();
 
-        for (file, start) in files.iter().zip(starts) {
+        // Every file's articles are sorted out before anything is done about
+        // them, so the `.partial` files the phase writes can all be opened at
+        // once (one blocking task, not one each). Each is pre-allocated
+        // (sparse) to the file's encoded size, an upper bound of its decoded
+        // size; finalize truncates to the highest byte written. A resumed
+        // file is reopened without truncation so its finished articles
+        // survive.
+        let sorted: Vec<Articles> = files
+            .iter()
+            .zip(&starts)
+            .map(|(file, start)| Articles::sort(file, start, skip_message_ids))
+            .collect();
+        let to_open = files
+            .iter()
+            .zip(&sorted)
+            .filter(|(file, articles)| articles.needs_file(file))
+            .map(|(file, articles)| {
+                let path = partial_path(&config.download.dir.join(&file.filename));
+                (path, file.bytes(), articles.finished == 0)
+            })
+            .collect();
+        let mut opened = create_preallocated_files(to_open).await.into_iter();
+
+        for ((file, start), articles) in files.iter().zip(starts).zip(sorted) {
             let filename = file.filename.clone();
             let final_path = config.download.dir.join(&filename);
-            let partial_path = with_extra_extension(&final_path, "partial");
-            let listed = file.segments.segment.len();
-            let file_bytes = file.bytes();
+            let partial_path = partial_path(&final_path);
+            let listed = file.segments.len();
             self.job.add_articles_total(listed as u64);
             let slot = record.and_then(|r| r.slot(&filename));
 
-            let (done, max_byte) = match start {
+            let max_byte = match start {
                 FileStart::Complete { size } => {
                     // Finished and renamed in an earlier session.
                     file_states.push(Arc::new(FileState::already_complete(
@@ -789,36 +818,17 @@ impl Downloader {
                     )));
                     continue;
                 }
-                FileStart::Partial { done, max_byte } => (Some(done), max_byte),
-                FileStart::Fresh => (None, 0),
+                FileStart::Partial { max_byte, .. } => max_byte,
+                FileStart::Fresh => 0,
             };
-
-            let is_missing = |id: &str| skip_message_ids.is_some_and(|s| s.contains(id));
-            // (position in the file's segment list, message id, encoded bytes)
-            let mut active: Vec<(u32, String, u64)> = Vec::new();
-            let mut holes: Vec<u32> = Vec::new();
-            let (mut finished, mut done_bytes, mut hole_bytes) = (0usize, 0u64, 0u64);
-            let mut malformed = 0usize;
-            for (index, seg) in file.segments.segment.iter().enumerate() {
-                let index = index as u32;
-                if done.as_ref().is_some_and(|d| d.contains(index)) {
-                    finished += 1;
-                    done_bytes += seg.bytes;
-                } else if !seg.has_valid_id() {
-                    // Never sent (it could carry extra commands): missing.
-                    malformed += 1;
-                    holes.push(index);
-                    hole_bytes += seg.bytes;
-                } else if is_missing(&seg.message_id) {
-                    // Drop only the individually-missing segments; every present
-                    // segment still contributes data so PAR2 has the most blocks
-                    // to repair from.
-                    holes.push(index);
-                    hole_bytes += seg.bytes;
-                } else {
-                    active.push((index, seg.message_id.clone(), seg.bytes));
-                }
-            }
+            let Articles {
+                active,
+                holes,
+                malformed,
+                finished,
+                done_bytes,
+                hole_bytes,
+            } = articles;
             if malformed == 1 {
                 self.job.warn(format!(
                     "1 article of {filename} has a malformed message ID in the NZB, so it counts as missing."
@@ -838,8 +848,8 @@ impl Downloader {
             };
             record_failed(&mut holes.iter().copied());
 
-            let group: Arc<str> = match file.groups.group.first() {
-                Some(g) => Arc::from(g.name.as_str()),
+            let group: Arc<str> = match file.groups.first() {
+                Some(g) => Arc::from(g.as_str()),
                 None => {
                     self.job
                         .warn(format!("{filename} lists no newsgroup, so it was skipped."));
@@ -854,14 +864,10 @@ impl Downloader {
                 continue;
             }
 
-            // Pre-allocate (sparse) to the file's encoded size, an upper bound of
-            // its decoded size; finalize truncates to the highest byte written.
-            // A resumed file is reopened without truncation so its finished
-            // articles survive.
+            // Opened above (`Articles::needs_file` picks the files that get
+            // this far).
             let resuming = finished > 0;
-            let partial_file = match create_preallocated_file(&partial_path, file_bytes, !resuming)
-                .await
-            {
+            let partial_file = match opened.next().expect("opened above") {
                 Ok(f) => Arc::new(f),
                 Err(e) => {
                     tracing::debug!("could not create {}: {e}", partial_path.display());
@@ -924,11 +930,7 @@ impl Downloader {
         }
 
         if work.is_empty() {
-            return Ok((
-                file_states.iter().map(|s| s.snapshot()).collect(),
-                Duration::ZERO,
-                0,
-            ));
+            return DownloadOutcome::local(file_states.iter().map(|s| s.snapshot()).collect());
         }
 
         // Article-granularity work distribution:
@@ -1012,8 +1014,7 @@ impl Downloader {
             decode_retry_cap,
             max_transient_retries,
             retry_delay,
-            connected: AtomicUsize::new(0),
-            acquired: AtomicU64::new(0),
+            census: Census::default(),
             queue_closed: queue_closed.clone(),
             losses: losses.clone(),
         });
@@ -1029,7 +1030,6 @@ impl Downloader {
         // workers abandon their work (see `worker_loop`) and incomplete files
         // stay `.partial`, since only fully settled files are finalized.
         let mut pending = total_articles;
-        let mut job_tx_opt = Some(job_tx);
         while pending > 0 {
             let feedback = tokio::select! {
                 biased;
@@ -1041,14 +1041,9 @@ impl Downloader {
                     pending -= 1;
                 }
                 Some(WorkerFeedback::Retry(job)) => {
-                    if let Some(tx) = job_tx_opt.as_ref() {
-                        if tx.send(job).is_err() {
-                            // Receiver gone — workers must have exited.
-                            break;
-                        }
-                    } else {
-                        // Already closed; treat as settled.
-                        pending -= 1;
+                    if job_tx.send(job).is_err() {
+                        // Receiver gone — workers must have exited.
+                        break;
                     }
                 }
                 None => {
@@ -1058,7 +1053,7 @@ impl Downloader {
                 }
             }
         }
-        drop(job_tx_opt.take());
+        drop(job_tx);
         queue_closed.cancel();
 
         for handle in worker_handles {
@@ -1089,11 +1084,11 @@ impl Downloader {
             &config.usenet.server,
         );
 
-        Ok((
-            file_states.iter().map(|s| s.snapshot()).collect(),
+        DownloadOutcome {
+            files: file_states.iter().map(|s| s.snapshot()).collect(),
             transfer_duration,
             actual_wire_bytes,
-        ))
+        }
     }
 
     /// Judge the phase's lost connections. Articles given up because the
@@ -1169,7 +1164,7 @@ impl Downloader {
         file: &NzbFile,
         counted: u64,
     ) -> Arc<FileState> {
-        let listed = file.segments.segment.len();
+        let listed = file.segments.len();
         self.job
             .add_bytes_done(file.bytes().saturating_sub(counted));
         self.job.add_articles_failed(listed as u64);
@@ -1196,13 +1191,70 @@ impl FileStart {
             FileStart::Complete { .. } => file.bytes(),
             FileStart::Partial { done, .. } => file
                 .segments
-                .segment
                 .iter()
                 .enumerate()
                 .filter(|(i, _)| done.contains(*i as u32))
                 .map(|(_, s)| s.bytes)
                 .sum(),
         }
+    }
+}
+
+/// A file's articles as this phase finds them: still to fetch, missing
+/// (holes, settled at once) or written in an earlier session.
+#[derive(Default)]
+struct Articles {
+    /// (position in the file's segment list, message id, encoded bytes)
+    active: Vec<(u32, String, u64)>,
+    holes: Vec<u32>,
+    /// Holes because their message id is malformed.
+    malformed: usize,
+    /// Written in an earlier session.
+    finished: usize,
+    done_bytes: u64,
+    hole_bytes: u64,
+}
+
+impl Articles {
+    /// Sort the articles of `file`, which starts as `start` (a file finished
+    /// in an earlier session has none to sort). Articles in `missing` (the
+    /// pre-flight scan's) are holes.
+    fn sort(file: &NzbFile, start: &FileStart, missing: Option<&HashSet<String>>) -> Self {
+        let done = match start {
+            FileStart::Complete { .. } => return Self::default(),
+            FileStart::Partial { done, .. } => Some(done),
+            FileStart::Fresh => None,
+        };
+        let mut sorted = Self::default();
+        for (index, seg) in file.segments.iter().enumerate() {
+            let index = index as u32;
+            if done.is_some_and(|d| d.contains(index)) {
+                sorted.finished += 1;
+                sorted.done_bytes += seg.bytes;
+            } else if !seg.has_valid_id() {
+                // Never sent (it could carry extra commands): missing.
+                sorted.malformed += 1;
+                sorted.holes.push(index);
+                sorted.hole_bytes += seg.bytes;
+            } else if missing.is_some_and(|s| s.contains(&seg.message_id)) {
+                // Drop only the individually-missing segments; every present
+                // segment still contributes data so PAR2 has the most blocks
+                // to repair from.
+                sorted.holes.push(index);
+                sorted.hole_bytes += seg.bytes;
+            } else {
+                sorted
+                    .active
+                    .push((index, seg.message_id.clone(), seg.bytes));
+            }
+        }
+        sorted
+    }
+
+    /// Whether `file` gets a `.partial` to write: it lists a newsgroup, and
+    /// has articles to fetch or written in an earlier session.
+    fn needs_file(&self, file: &NzbFile) -> bool {
+        !file.groups.is_empty() && (!self.active.is_empty() || self.finished > 0)
     }
 }
 
@@ -1219,14 +1271,14 @@ fn prepare_file(file: &NzbFile, dir: &Path, record: Option<&Arc<JobRecord>>) -> 
         return FileStart::Fresh;
     };
     let final_path = dir.join(&file.filename);
-    let partial_path = with_extra_extension(&final_path, "partial");
+    let partial_path = partial_path(&final_path);
     let file_len = |path: &Path| {
         std::fs::metadata(path)
             .ok()
             .filter(|m| m.is_file())
             .map(|m| m.len())
     };
-    let listed = file.segments.segment.len() as u32;
+    let listed = file.segments.len() as u32;
 
     if prior.finalized {
         if let Some(size) = file_len(&final_path) {
@@ -1279,10 +1331,8 @@ struct WorkerCtx {
     /// Max retries for transient (connection-level / 412) failures.
     max_transient_retries: usize,
     retry_delay: Duration,
-    /// Workers holding a connection right now ([`Held`]).
-    connected: AtomicUsize,
-    /// Connections workers have checked out so far.
-    acquired: AtomicU64,
+    /// The workers' connections ([`Held`]).
+    census: Census,
     /// Cancelled when the coordinator closes the queue: wakes spare workers.
     queue_closed: CancellationToken,
     /// The phase's lost connections ([`Downloader::judge_connection_failures`]).
@@ -1359,36 +1409,27 @@ const SUSPECT_HEAD_TIMEOUT: Duration = Duration::from_secs(15);
 /// on its own goes on to lose it this often.
 const CONNECTIONS_LOST_FLAKY_MAX: u8 = 12;
 
-impl WorkerCtx {
-    /// Whether some other worker reached the server: one holds a connection
-    /// now, or got one since `acquired_before` was read.
-    fn others_connected(&self, acquired_before: u64) -> bool {
-        self.connected.load(Ordering::Acquire) > 0
-            || self.acquired.load(Ordering::Acquire) > acquired_before
-    }
-}
-
-/// A worker's connection, counted in [`WorkerCtx::connected`] while held
-/// (dropped with it, so a stopped or finished worker is uncounted too), and
-/// its bytes counted toward the job's speed as they arrive.
+/// A worker's connection, counted in the [`Census`] while held (dropped
+/// with it, so a stopped or finished worker is uncounted too), and its bytes
+/// counted toward the job's speed as they arrive.
 struct Held<'a> {
+    /// Dropped before the connection is.
+    _holding: Holding<'a>,
     conn: PooledConnection,
-    connected: &'a AtomicUsize,
     job: &'a JobCtx,
     counter: Option<Arc<AtomicU64>>,
 }
 
 impl<'a> Held<'a> {
     fn new(conn: PooledConnection, ctx: &'a WorkerCtx) -> Self {
-        ctx.connected.fetch_add(1, Ordering::AcqRel);
-        ctx.acquired.fetch_add(1, Ordering::AcqRel);
+        let holding = ctx.census.hold();
         let counter = conn.bytes_counter();
         if let Some(counter) = &counter {
             ctx.job.attach_counter(counter.clone());
         }
         Self {
+            _holding: holding,
             conn,
-            connected: &ctx.connected,
             job: &ctx.job,
             counter,
         }
@@ -1397,7 +1438,6 @@ impl<'a> Held<'a> {
 
 impl Drop for Held<'_> {
     fn drop(&mut self) {
-        self.connected.fetch_sub(1, Ordering::AcqRel);
         if let Some(counter) = &self.counter {
             self.job.detach_counter(counter);
         }
@@ -1491,7 +1531,7 @@ const PLACEMENT_PART_MAX: u64 = 4 << 20;
 
 impl Placement {
     fn new(file: &NzbFile) -> Self {
-        let segments = &file.segments.segment;
+        let segments = &file.segments;
         let listed = segments.len() as u64;
         let parts = segments
             .iter()
@@ -1689,7 +1729,7 @@ async fn worker_run(worker_id: usize, ctx: &WorkerCtx) {
 
         // Acquire a connection if we don't have one.
         if connection.is_none() {
-            let acquired_before = ctx.acquired.load(Ordering::Acquire);
+            let acquired_before = ctx.census.acquired();
             // Nothing is in flight without a connection, so once every
             // article has settled (the queue closed) this worker is done: it
             // must not hold the phase open for the rest of a round of
@@ -1710,7 +1750,7 @@ async fn worker_run(worker_id: usize, ctx: &WorkerCtx) {
                 // Paused meanwhile: nothing is lost, and the failure says
                 // nothing about the job (the server may be back on resume).
                 Err(_) if *pause_rx.borrow() => continue,
-                Err(_) if ctx.others_connected(acquired_before) => {
+                Err(_) if ctx.census.others_connected(acquired_before) => {
                     // The server is up but takes no more connections (the
                     // provider allows fewer than configured, or another
                     // device holds some). Not the articles' fault: hand back
@@ -1872,14 +1912,14 @@ async fn worker_run(worker_id: usize, ctx: &WorkerCtx) {
                     .pop_front()
                     .expect("the response read was in flight");
                 match outcome {
-                    ArticleOutcome::Transient { .. } if conn.is_poisoned() => {
+                    ArticleOutcome::Transient if conn.is_poisoned() => {
                         // The connection died mid-response (reset, closed, a
                         // reply out of step, a timeout): this article and the
                         // rest of the window are dealt with below.
                         inflight.push_front(job);
                         dead = true;
                     }
-                    ArticleOutcome::Transient { .. } => {
+                    ArticleOutcome::Transient => {
                         // Connection alive but the server refused the BODY
                         // (e.g. 412 "no newsgroup selected"): force a group
                         // re-selection so a recoverable case recovers. The
@@ -2069,11 +2109,11 @@ async fn handle_outcome(job: ArticleJob, outcome: ArticleOutcome, ctx: &WorkerCt
                 .await;
             let _ = ctx.feedback_tx.send(WorkerFeedback::Settled);
         }
-        ArticleOutcome::Missing { .. } => {
+        ArticleOutcome::Missing => {
             fail_article(job, ctx).await;
         }
-        ArticleOutcome::DecodeFailed { .. } => retry_decode(job, ctx).await,
-        ArticleOutcome::Transient { .. } => {
+        ArticleOutcome::DecodeFailed => retry_decode(job, ctx).await,
+        ArticleOutcome::Transient => {
             // Unreachable: handled by the worker loop. Re-queue defensively.
             retry_transient(job, ctx, true).await;
         }
@@ -2095,7 +2135,7 @@ async fn retry_decode(mut job: ArticleJob, ctx: &WorkerCtx) {
 
 /// Check out a connection, retrying with backoff; the last error after 6
 /// failures. Gives up after the first failure when other workers have
-/// connections (see [`WorkerCtx::others_connected`]): the server is there,
+/// connections (see [`Census::others_connected`]): the server is there,
 /// and hammering it for one more connection won't help. A stop interrupts
 /// the waits through the worker's cancellation race.
 async fn acquire_connection(
@@ -2114,7 +2154,7 @@ async fn acquire_connection(
             Err(e) => {
                 attempt = attempt.saturating_add(1);
                 tracing::debug!("Worker {} connection acquire failed: {}", worker_id, e);
-                if attempt >= 6 || ctx.others_connected(acquired_before) {
+                if attempt >= 6 || ctx.census.others_connected(acquired_before) {
                     return Err(e);
                 }
                 let delay = backoff_delay(ctx.retry_delay, attempt as usize);
@@ -2127,15 +2167,8 @@ async fn acquire_connection(
 /// `base` doubled `attempt` times (at most 16x), kept within 100 ms to 8 s.
 pub(crate) fn backoff_delay(base: Duration, attempt: usize) -> Duration {
     let factor = 1u64 << attempt.min(4) as u64;
-    let computed = base.saturating_mul(factor as u32);
-    let max = Duration::from_secs(8);
-    if computed > max {
-        max
-    } else if computed < Duration::from_millis(100) {
-        Duration::from_millis(100)
-    } else {
-        computed
-    }
+    base.saturating_mul(factor as u32)
+        .clamp(Duration::from_millis(100), Duration::from_secs(8))
 }
 
 // --- Writer ---
@@ -2323,41 +2356,45 @@ async fn finalize_file(file: Arc<FileHandle>, fsync: bool, record: Option<Arc<Jo
     }
 }
 
+/// [`create_preallocated_file`] for each `(path, size, truncate)`, in order,
+/// all in one blocking task.
+async fn create_preallocated_files(
+    files: Vec<(PathBuf, u64, bool)>,
+) -> Vec<std::io::Result<StdFile>> {
+    let count = files.len();
+    tokio::task::spawn_blocking(move || {
+        files
+            .iter()
+            .map(|(path, size, truncate)| create_preallocated_file(path, *size, *truncate))
+            .collect()
+    })
+    .await
+    .unwrap_or_else(|e| {
+        let e = e.to_string();
+        (0..count)
+            .map(|_| Err(std::io::Error::other(e.clone())))
+            .collect()
+    })
+}
+
 /// Open (creating if needed) the `.partial` file and pre-allocate it sparsely
 /// to `size`. A fresh download truncates any leftover; a resumed one keeps the
 /// existing content and only grows the file.
-async fn create_preallocated_file(
-    path: &Path,
-    size: u64,
-    truncate: bool,
-) -> std::io::Result<StdFile> {
-    let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || -> std::io::Result<StdFile> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .read(true)
-            .truncate(truncate)
-            .open(&path)?;
-        // Final size is set later by `set_len(max_byte_position)`.
-        if file.metadata()?.len() < size {
-            file.set_len(size)?;
-        }
-        Ok(file)
-    })
-    .await
-    .map_err(std::io::Error::other)?
-}
-
-/// Append an additional extension component to a path (foo.rar -> foo.rar.partial).
-fn with_extra_extension(path: &Path, extra: &str) -> PathBuf {
-    let mut s = path.as_os_str().to_owned();
-    s.push(".");
-    s.push(extra);
-    PathBuf::from(s)
+fn create_preallocated_file(path: &Path, size: u64, truncate: bool) -> std::io::Result<StdFile> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .read(true)
+        .truncate(truncate)
+        .open(path)?;
+    // Final size is set later by `set_len(max_byte_position)`.
+    if file.metadata()?.len() < size {
+        file.set_len(size)?;
+    }
+    Ok(file)
 }
 
 #[cfg(unix)]
@@ -2383,15 +2420,6 @@ fn write_at(file: &std::fs::File, buf: &[u8], offset: u64) -> std::io::Result<us
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn with_extra_extension_appends() {
-        let p = PathBuf::from("/tmp/a.mkv");
-        assert_eq!(
-            with_extra_extension(&p, "partial"),
-            PathBuf::from("/tmp/a.mkv.partial")
-        );
-    }
 
     #[test]
     fn backoff_increases_then_caps() {

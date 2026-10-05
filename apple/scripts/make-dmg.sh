@@ -13,6 +13,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=common.sh
+source "$SCRIPT_DIR/common.sh"
 APPLE_DIR="$(dirname "$SCRIPT_DIR")"
 
 APP="${1:-$APPLE_DIR/build/direct/dl-nzb.app}"
@@ -51,10 +53,7 @@ fi
 
 if [ "$SIGN_IDENTITY" != "-" ] && [ -n "${NOTARY_KEY_ID:-}" ] && [ -n "${NOTARY_ISSUER_ID:-}" ] && [ -n "${NOTARY_KEY_PATH:-}" ]; then
   echo "==> notarizing the image"
-  xcrun notarytool submit "$DMG" \
-    --key "$NOTARY_KEY_PATH" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" \
-    --wait --timeout 30m
-  xcrun stapler staple "$DMG"
+  notarize_and_staple "$DMG"
 else
   echo "==> skipping notarization of the image (no credentials, or an ad hoc signature)"
 fi

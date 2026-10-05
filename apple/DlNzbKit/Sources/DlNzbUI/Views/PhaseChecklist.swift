@@ -11,10 +11,6 @@ public struct PhaseChecklist: View {
     self.steps = PhaseStep.steps(for: item)
   }
 
-  public init(steps: [PhaseStep]) {
-    self.steps = steps
-  }
-
   public var body: some View {
     VStack(alignment: .leading, spacing: 8) {
       ForEach(steps) { step in

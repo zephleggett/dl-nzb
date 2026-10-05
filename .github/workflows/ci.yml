@@ -123,30 +123,13 @@ jobs:
       - name: Select Xcode
         uses: ./.github/actions/select-xcode
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@master
+      # The one job that saves the Rust build's cache; the other workflows
+      # restore it.
+      - name: Build the xcframework
+        uses: ./.github/actions/rust-engine
         with:
           toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
-          targets: aarch64-apple-darwin, x86_64-apple-darwin, aarch64-apple-ios, aarch64-apple-ios-sim
-
-      # The release-ffi profile is fat LTO for four targets, so a cold build
-      # is most of this job. A source change restores the last build of the
-      # same Cargo.lock and rebuilds only the dl-nzb crates.
-      - name: Cache the Rust build
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: xcframework-${{ env.RUSTUP_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('Cargo.toml', '.cargo/config.toml', 'src/**', 'ffi/**') }}
-          restore-keys: |
-            xcframework-${{ env.RUSTUP_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}-
-            xcframework-${{ env.RUSTUP_TOOLCHAIN }}-
-
-      - name: Build the xcframework
-        run: make -C apple xcframework
+          save-cache: true
 
       - name: Check the Mac library is universal
         run: |

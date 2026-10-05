@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use common::*;
 use dl_nzb::config::UsenetConfig;
-use dl_nzb::engine::{Engine, ErrorKind, JobEvent, JobRequest, Outcome, Preflight};
+use dl_nzb::engine::{Engine, ErrorKind, JobEvent, JobRequest, Outcome};
 use dl_nzb::DlNzbError;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::OwnedWriteHalf;
@@ -166,29 +166,6 @@ impl SlowServer {
             }
         }
         Ok(())
-    }
-}
-
-fn config(port: u16, dir: &Path, connections: u16) -> dl_nzb::Config {
-    let mut config = make_config("127.0.0.1", port, dir.into());
-    config.usenet.connections = connections;
-    config.tuning.max_concurrent_connections = connections as usize;
-    config
-}
-
-fn request(nzb: &Path, out: &Path) -> JobRequest {
-    JobRequest {
-        preflight: Preflight::Never,
-        ..JobRequest::new(nzb, out)
-    }
-}
-
-/// Wait (up to 20 s) until `done`.
-async fn until(what: &str, done: impl Fn() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while !done() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }
 
@@ -439,14 +416,6 @@ where
         }
     });
     port
-}
-
-/// Close `sock` with a reset (RST) rather than an orderly FIN.
-fn reset(sock: TcpStream) {
-    socket2::SockRef::from(&sock)
-        .set_linger(Some(Duration::ZERO))
-        .unwrap();
-    drop(sock);
 }
 
 fn server(port: u16, ssl: bool) -> UsenetConfig {

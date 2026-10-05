@@ -13,14 +13,16 @@ public protocol DownloadEngine: AnyObject, Sendable {
   func setSpeedLimit(bytesPerSecond: Int64?) async
   /// Connects and logs in, and says exactly what went wrong when it cannot.
   func testConnection(_ server: ServerSettings, password: String) async throws -> ServerCheck
-  /// Reads an NZB without touching the network.
-  func inspect(_ nzb: URL) async throws -> NzbInfo
+  /// Reads an NZB without touching the network. `fileName` is the name it
+  /// was opened as when `nzb` is a copy kept under another (the queue's
+  /// `<id>.nzb`): the title falls back to it and a `{{password}}` in it joins
+  /// the passwords, as for the original. Jobs started on the copy see
+  /// neither, so the queue passes both on in the request.
+  func inspect(_ nzb: URL, fileName: String?) async throws -> NzbInfo
   /// Starts a job. Its folder may hold a sidecar from an earlier run, which it continues.
   func start(_ request: JobRequest) async throws -> JobSession
   /// Post-processing only, for a downloaded job that needed a password.
   func reprocess(directory: URL, passwords: [String]) async throws -> JobSession
-  /// The dl-nzb CLI's settings, where the engine can read them.
-  func importCLIConfig() async -> ImportedSettings?
   /// A CLI config file the user picked (the sandboxed Mac app's open panel).
   /// `RustEngine` reads it with the CLI's own parser, the one source of truth
   /// for what the file means; the default here is `CLIConfig`, the Swift

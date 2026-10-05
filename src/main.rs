@@ -18,7 +18,7 @@ use dl_nzb::{
         DownloadFileResult, DownloadSummary, ErrorOutput, FileInfo, NzbInfo as NzbInfoJson,
         PostProcessingResult, TestResult,
     },
-    patterns::is_auxiliary_name,
+    patterns::{is_auxiliary_name, PARTIAL_EXT},
     serde_json,
 };
 
@@ -73,7 +73,7 @@ async fn run(cli: Cli) -> Result<()> {
     dl_nzb::ui::style::init(color_choice, auto_tty);
     dl_nzb::ui::glyph::init();
 
-    init_logging(&cli)?;
+    init_logging(&cli);
 
     // Two-stage Ctrl+C:
     //   1st: stop the running job gracefully: workers abandon their articles,
@@ -209,7 +209,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SuspendingWriter {
     }
 }
 
-fn init_logging(cli: &Cli) -> Result<()> {
+fn init_logging(cli: &Cli) {
     let filter = EnvFilter::try_new(cli.get_log_level())
         .unwrap_or_else(|_| EnvFilter::new("info"))
         .add_directive("par2_rs=off".parse().unwrap());
@@ -224,8 +224,6 @@ fn init_logging(cli: &Cli) -> Result<()> {
     } else {
         subscriber.init();
     }
-
-    Ok(())
 }
 
 async fn handle_command(command: &Commands, cli: &Cli) -> Result<()> {
@@ -304,10 +302,7 @@ async fn handle_command(command: &Commands, cli: &Cli) -> Result<()> {
             println!();
 
             if config_path.exists() {
-                let mut config = Config::load()?;
-                if !config.usenet.password.is_empty() {
-                    config.usenet.password = "********".to_string();
-                }
+                let config = Config::load()?;
                 println!("{}", style::dim(&ui::rule(60)));
                 println!("{}", config.display_toml()?);
                 println!("{}", style::dim(&ui::rule(60)));
@@ -792,18 +787,8 @@ fn print_final_summary(summary: &JobSummary) {
     let results = &summary.nzb_files;
     let total_size: u64 = results.iter().map(|r| r.bytes).sum();
     // A successful PAR2 verify/repair means the payload is whole, so download-
-    // phase segment failures were recovered and are no longer errors. Files that
-    // are non-essential (.nfo/.sfv) and never arrived also aren't errors. So
-    // count only essential payload files still broken after post-processing.
+    // phase segment failures were recovered and are no longer errors.
     let par2_ok = summary.par2.verified_ok;
-    let failed_count = if par2_ok {
-        0
-    } else {
-        results
-            .iter()
-            .filter(|r| r.articles_failed > 0 && !is_auxiliary_name(&r.name))
-            .count()
-    };
 
     // Payload files (what the user actually wanted), failed-first then largest,
     // so the per-file cap never hides a failure.
@@ -813,45 +798,9 @@ fn print_final_summary(summary: &JobSummary) {
         .collect();
     payload.sort_by_key(|r| (r.articles_failed == 0, std::cmp::Reverse(r.bytes)));
 
-    let needs_password = summary.outcome == Outcome::NeedsPassword;
-    let post_issue: Option<String> = match summary.outcome {
-        Outcome::CompletedWithIssues => summary.message.clone(),
-        // The header says a password is needed; add why only when the ones
-        // given were refused ("The password didn't work.").
-        Outcome::NeedsPassword => summary
-            .message
-            .clone()
-            .filter(|m| !m.contains("needs a password")),
-        _ => None,
-    }
-    .map(|m| m.trim_end_matches('.').to_string());
-
+    let (header, note) = verdict_lines(summary.outcome, summary.message.as_deref(), &payload);
     ui::blank();
-
-    // Header line: status verb, plus the file name for a single-file release.
-    let clean = failed_count == 0 && post_issue.is_none();
-    if needs_password {
-        ui::header(ui::warn_line("Archive needs a password"));
-    } else if clean {
-        let verb = ui::ok_line("Complete");
-        if payload.len() == 1 {
-            let name = ui::truncate_middle(&ui::sanitize_display(&payload[0].name), 56);
-            ui::header(format!(
-                "{verb}{}{}",
-                style::dim("  ·  "),
-                style::heading(&name)
-            ));
-        } else {
-            ui::header(verb);
-        }
-    } else if failed_count == 0 {
-        ui::header(ui::warn_line("Completed with issues"));
-    } else {
-        ui::header(ui::warn_line(format!(
-            "Completed — {failed_count} file{} with errors",
-            ui::plural(failed_count)
-        )));
-    }
+    ui::header(header);
 
     // Child tree, built then emitted so exactly the last row gets └─.
     let mut tree = ui::Tree::new();
@@ -879,10 +828,10 @@ fn print_final_summary(summary: &JobSummary) {
         }
     }
 
-    if let Some(issue) = post_issue {
-        tree.push(ui::warn_line(issue));
+    if let Some(note) = note {
+        tree.push(note);
     }
-    if needs_password {
+    if summary.outcome == Outcome::NeedsPassword {
         tree.push(style::dim("Re-run with --password <PW> to extract it").to_string());
     }
 
@@ -903,14 +852,139 @@ fn print_final_summary(summary: &JobSummary) {
     tree.emit();
 }
 
+/// The summary's header and the line under it, both from the engine's
+/// verdict: its outcome and its one-sentence `message`. The header names the
+/// file of a single-file release that completed (`payload` is what the user
+/// wanted from the release).
+fn verdict_lines(
+    outcome: Outcome,
+    message: Option<&str>,
+    payload: &[&FileReport],
+) -> (String, Option<String>) {
+    use dl_nzb::ui::{self, glyph, style};
+    let message = message.map(|m| m.trim_end_matches('.'));
+    match outcome {
+        Outcome::Completed => {
+            let verb = ui::ok_line("Complete");
+            let header = match payload {
+                [only] => format!(
+                    "{verb}{}{}",
+                    style::dim("  ·  "),
+                    style::heading(&ui::truncate_middle(&ui::sanitize_display(&only.name), 56))
+                ),
+                _ => verb,
+            };
+            (header, None)
+        }
+        Outcome::CompletedWithIssues => (
+            ui::warn_line("Completed with issues"),
+            message.map(ui::warn_line),
+        ),
+        // The header says a password is needed; add why only when the ones
+        // given were refused ("The password didn't work.").
+        Outcome::NeedsPassword => (
+            ui::warn_line("Archive needs a password"),
+            message
+                .filter(|m| !m.contains("needs a password"))
+                .map(ui::warn_line),
+        ),
+        Outcome::Failed => (
+            ui::error_line("Download failed"),
+            message.map(ui::error_line),
+        ),
+        Outcome::Unrepairable => (
+            ui::error_line("Not repairable"),
+            message.map(ui::error_line),
+        ),
+        Outcome::Stopped => (
+            style::warn(&format!("{} Interrupted", glyph::INTERRUPTED)).to_string(),
+            message.map(ui::warn_line),
+        ),
+    }
+}
+
 /// Count `*.partial` files left behind in a directory (after an interrupt we
 /// keep them rather than renaming truncated data to final names).
 fn count_partials(dir: &Path) -> usize {
     std::fs::read_dir(dir)
         .map(|rd| {
             rd.filter_map(|e| e.ok())
-                .filter(|e| e.file_name().to_string_lossy().ends_with(".partial"))
+                .filter(|e| e.file_name().to_string_lossy().ends_with(PARTIAL_EXT))
                 .count()
         })
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(name: &str, articles_failed: u64) -> FileReport {
+        FileReport {
+            name: name.to_string(),
+            path: name.into(),
+            bytes: 100,
+            articles_total: 10,
+            articles_failed,
+        }
+    }
+
+    /// The header and the line under it come from the engine's verdict. A
+    /// payload missing articles PAR2 could not repair used to read
+    /// "Completed — 1 file with errors", without the engine's sentence, and
+    /// a download that never finished read "Complete".
+    #[test]
+    fn the_summary_says_what_the_engine_decided() {
+        let (broken, whole) = (file("a.mkv", 3), file("b.mkv", 0));
+        let lines = |outcome, message| verdict_lines(outcome, message, &[&broken, &whole]);
+
+        let (header, note) = lines(
+            Outcome::Failed,
+            Some("12% of articles are missing and PAR2 could not repair them."),
+        );
+        assert!(header.ends_with("Download failed"), "{header}");
+        assert!(
+            note.as_deref().is_some_and(
+                |n| n.ends_with("12% of articles are missing and PAR2 could not repair them")
+            ),
+            "{note:?}"
+        );
+        let (header, note) = verdict_lines(
+            Outcome::Failed,
+            Some("The download did not finish."),
+            &[&whole],
+        );
+        assert!(header.ends_with("Download failed"), "{header}");
+        assert!(note.is_some_and(|n| n.ends_with("The download did not finish")));
+
+        let (header, note) = verdict_lines(Outcome::Completed, None, &[&whole]);
+        assert!(
+            header.contains("Complete") && header.ends_with("b.mkv"),
+            "{header}"
+        );
+        assert_eq!(note, None);
+
+        let (header, note) = lines(
+            Outcome::CompletedWithIssues,
+            Some("1 archive could not be extracted."),
+        );
+        assert!(header.ends_with("Completed with issues"), "{header}");
+        assert!(note.is_some_and(|n| n.ends_with("1 archive could not be extracted")));
+
+        let (header, note) = lines(
+            Outcome::NeedsPassword,
+            Some("This archive needs a password."),
+        );
+        assert!(header.ends_with("Archive needs a password"), "{header}");
+        assert_eq!(note, None);
+        let (_, note) = lines(Outcome::NeedsPassword, Some("The password didn't work."));
+        assert!(note.is_some_and(|n| n.ends_with("The password didn't work")));
+
+        let (header, note) = lines(
+            Outcome::Unrepairable,
+            Some("9% of articles are missing and there is no recovery data."),
+        );
+        assert!(header.ends_with("Not repairable"), "{header}");
+        assert!(note.is_some_and(|n| n.ends_with("there is no recovery data")));
+    }
 }

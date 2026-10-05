@@ -47,30 +47,11 @@ jobs:
         if: env.HAVE_KEY == 'true'
         run: brew install xcodegen
 
-      - name: Install Rust
-        if: env.HAVE_KEY == 'true'
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
-          targets: aarch64-apple-darwin, x86_64-apple-darwin, aarch64-apple-ios, aarch64-apple-ios-sim
-
-      - name: Restore the Rust build
-        if: env.HAVE_KEY == 'true'
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: xcframework-${{ env.RUSTUP_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('Cargo.toml', '.cargo/config.toml', 'src/**', 'ffi/**') }}
-          restore-keys: |
-            xcframework-${{ env.RUSTUP_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}-
-            xcframework-${{ env.RUSTUP_TOOLCHAIN }}-
-
       - name: Build the Rust engine
         if: env.HAVE_KEY == 'true'
-        run: make -C apple xcframework
+        uses: ./.github/actions/rust-engine
+        with:
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
 
       - name: Install the App Store Connect key and the team
         if: env.HAVE_KEY == 'true'

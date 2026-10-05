@@ -1,5 +1,6 @@
 import DlNzbKit
 import Foundation
+import UserNotifications
 
 // The words both apps use outside a row: release names that wrap or are
 // spoken, the version line, the queue-wide alerts and the notifications. Each
@@ -98,6 +99,22 @@ public enum AlertText {
   private static func isWaiting(_ duplicate: DuplicateNZB, in queue: DownloadQueue) -> Bool {
     queue.listedItem(for: duplicate) != nil
   }
+
+  /// "Couldn’t Open “notes.nzb”", or "Couldn’t Open 3 Files" for several.
+  public static func openFailureTitle(_ failures: [OpenFailure], locale: Locale = .autoupdatingCurrent) -> String {
+    failures.count == 1 ? "Couldn’t Open “\(failures[0].fileName)”" : "Couldn’t Open \(Format.count(failures.count, locale: locale)) Files"
+  }
+}
+
+/// A file that could not be added, and why, for the alert that lists them.
+public struct OpenFailure: Equatable, Sendable {
+  public let fileName: String
+  public let message: String
+
+  public init(fileName: String, message: String) {
+    self.fileName = fileName
+    self.message = message
+  }
 }
 
 /// What a notification about an item says: the title what happened, the body
@@ -123,5 +140,33 @@ public struct NotificationText: Equatable, Sendable {
     case .queued, .running, .paused, .stopped:
       return nil
     }
+  }
+}
+
+extension NotificationText {
+  /// Where a notification keeps the id of the item it is about.
+  static let itemKey = "itemID"
+  /// Where the Mac app kept it before, so a notification delivered before
+  /// an update still leads to its item.
+  static let earlierItemKey = "item"
+
+  /// A notification in these words ("Download Finished", "Sintel · 7.6 GB"),
+  /// threaded with the others and tagged with the item for a click or tap
+  /// (`itemID(from:)`). Nil when there is nothing to say. Each app adds its
+  /// own actions.
+  public static func content(for item: DownloadItem, locale: Locale = .autoupdatingCurrent) -> UNMutableNotificationContent? {
+    guard let text = NotificationText(item, locale: locale) else { return nil }
+    let content = UNMutableNotificationContent()
+    content.title = text.title
+    content.body = text.body
+    content.threadIdentifier = "downloads"
+    content.userInfo = [itemKey: item.id.uuidString]
+    return content
+  }
+
+  /// The item a notification from `content(for:)` is about.
+  public static func itemID(from userInfo: [AnyHashable: Any]) -> DownloadItem.ID? {
+    let raw = userInfo[itemKey] ?? userInfo[earlierItemKey]
+    return (raw as? String).flatMap(UUID.init(uuidString:))
   }
 }

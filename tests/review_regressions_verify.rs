@@ -12,7 +12,6 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use common::*;
-use dl_nzb::config::UsenetConfig;
 use dl_nzb::engine::{
     Engine, JobEvent, JobHandle, JobObserver, JobPhase, JobRequest, Outcome, Preflight, Verdict,
 };
@@ -131,33 +130,11 @@ impl Server {
     }
 }
 
-fn config(port: u16, dir: &Path, connections: u16) -> dl_nzb::Config {
-    let mut config = make_config("127.0.0.1", port, dir.into());
-    config.usenet.connections = connections;
-    config.tuning.max_concurrent_connections = connections as usize;
-    config
-}
-
-fn usenet(port: u16) -> UsenetConfig {
-    config(port, Path::new("."), 1).usenet
-}
-
 fn request(nzb: &Path, out: &Path, preflight: Preflight) -> JobRequest {
     JobRequest {
         preflight,
         ..JobRequest::new(nzb, out)
     }
-}
-
-fn names_in(dir: &Path) -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(dir)
-        .map(|r| {
-            r.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-                .collect()
-        })
-        .unwrap_or_default();
-    names.sort();
-    names
 }
 
 /// Records every event, and stops the job the first time `stop_when` holds.
@@ -198,25 +175,6 @@ impl JobObserver for StopWhen {
 }
 
 // --- A stop right after PAR2 deleted its files -------------------------------------
-
-/// A single-part yEnc body without a `pcrc32`, so the wire can't vouch for
-/// the data and PAR2 really verifies it.
-fn article_without_crc(name: &str, plain: &[u8]) -> Vec<u8> {
-    let mut body = Vec::new();
-    body.extend_from_slice(
-        format!(
-            "=ybegin part=1 total=1 line=128 size={} name={}\r\n",
-            plain.len(),
-            name
-        )
-        .as_bytes(),
-    );
-    body.extend_from_slice(format!("=ypart begin=1 end={}\r\n", plain.len()).as_bytes());
-    body.extend_from_slice(&yenc_encode(plain));
-    body.extend_from_slice(b"\r\n");
-    body.extend_from_slice(format!("=yend size={} part=1\r\n", plain.len()).as_bytes());
-    body
-}
 
 /// Two archives and a full PAR2 set for them, posted one article per file.
 struct Release {
@@ -388,43 +346,6 @@ async fn a_stop_right_after_par2_deletes_its_files_still_resumes() {
 
 // --- Article placement with unreliable NZB sizes -----------------------------------
 
-/// A one-part body: `=ybegin` (with `size=` when given), `=ypart`, `pcrc32`.
-fn part_body(ybegin_size: Option<u64>, begin: u64, end: u64, plain: &[u8]) -> Vec<u8> {
-    let mut body = Vec::new();
-    let size = ybegin_size
-        .map(|s| format!(" size={s}"))
-        .unwrap_or_default();
-    body.extend_from_slice(
-        format!("=ybegin part=1 total=1 line=128{size} name=x.bin\r\n").as_bytes(),
-    );
-    body.extend_from_slice(format!("=ypart begin={begin} end={end}\r\n").as_bytes());
-    body.extend_from_slice(&yenc_encode(plain));
-    body.extend_from_slice(b"\r\n");
-    let crc = crc32fast::hash(plain);
-    body.extend_from_slice(
-        format!("=yend size={} part=1 pcrc32={crc:08x}\r\n", plain.len()).as_bytes(),
-    );
-    body
-}
-
-/// An NZB `<file>` whose segments carry the given numbers and sizes.
-fn numbered_nzb(dir: &Path, filename: &str, segments: &[(u32, u64, String)]) -> PathBuf {
-    let mut xml = String::from(r#"<?xml version="1.0" encoding="UTF-8"?>"#);
-    xml.push_str(r#"<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">"#);
-    xml.push_str(&format!(
-        r#"<file poster="t@e.x" date="1700000000" subject="&quot;{filename}&quot; yEnc"><groups><group>alt.binaries.test</group></groups><segments>"#
-    ));
-    for (number, bytes, id) in segments {
-        xml.push_str(&format!(
-            r#"<segment bytes="{bytes}" number="{number}">{id}</segment>"#
-        ));
-    }
-    xml.push_str("</segments></file></nzb>");
-    let path = dir.join("job.nzb");
-    std::fs::write(&path, xml).unwrap();
-    path
-}
-
 /// Download `nzb` into a fresh folder; the summary and the file's bytes
 /// (finished or partial).
 async fn download(
@@ -498,7 +419,7 @@ async fn m1_nzb_with_zero_or_too_small_sizes() {
     for nzb_bytes in [0u64, 9] {
         let server = Server::new(vec![MockArticle {
             message_id: "x@t".into(),
-            body: part_body(Some(10), 1, 10, plain),
+            body: one_part("x.bin", 1, 10, Some(10), plain),
         }]);
         let segments = vec![(1, nzb_bytes, "x@t".to_string())];
         let (summary, got) =
@@ -549,7 +470,7 @@ async fn m1_a_crafted_offset_is_still_rejected_when_nzb_sizes_are_unreliable() {
     for (name, ybegin_size, nzb_bytes) in cases {
         let server = Server::new(vec![MockArticle {
             message_id: "x@t".into(),
-            body: part_body(ybegin_size, far + 1, far + 10, plain),
+            body: one_part("x.bin", far + 1, far + 10, ybegin_size, plain),
         }]);
         let segments = vec![(1, nzb_bytes, "x@t".to_string())];
         let (summary, got) =
@@ -776,16 +697,13 @@ fn body_of(size: usize) -> Vec<u8> {
 async fn a_body_of_exactly_the_size_limit_is_read() {
     let (outcome, poisoned) = body_outcome(body_of(MAX_BODY)).await;
     assert!(
-        matches!(outcome, ArticleOutcome::DecodeFailed { .. }),
+        matches!(outcome, ArticleOutcome::DecodeFailed),
         "{outcome:?}"
     );
     assert!(!poisoned);
 
     let (outcome, poisoned) = body_outcome(body_of(MAX_BODY + 1)).await;
-    assert!(
-        matches!(outcome, ArticleOutcome::Transient { .. }),
-        "{outcome:?}"
-    );
+    assert!(matches!(outcome, ArticleOutcome::Transient), "{outcome:?}");
     assert!(poisoned);
 }
 

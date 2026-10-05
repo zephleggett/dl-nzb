@@ -28,7 +28,7 @@ struct LiveTests {
       EngineSettings(server: imported.server, password: imported.password, processing: imported.processing, advanced: imported.advanced))
     print("live: server \(imported.server.host):\(imported.server.port) ssl=\(imported.server.useSSL) connections=\(imported.server.connections)")
 
-    let info = try await engine.inspect(nzb)
+    let info = try await engine.inspect(nzb, fileName: nil)
     let output = base.appending(path: ReleaseName.folderName(info.title), directoryHint: .isDirectory)
     print("live: \(info.title), \(info.files.count) files, \(info.totalBytes) bytes -> \(output.path(percentEncoded: false))")
 

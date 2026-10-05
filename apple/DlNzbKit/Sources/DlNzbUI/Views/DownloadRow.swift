@@ -36,10 +36,6 @@ public struct DownloadProgressBar: View {
     self.progress = RowProgress.of(item)
   }
 
-  public init(progress: RowProgress) {
-    self.progress = progress
-  }
-
   private var isOnSelection: Bool { backgroundProminence == .increased }
 
   public var body: some View {
@@ -83,13 +79,16 @@ public struct DownloadStatusLine: View {
   /// - Parameters:
   ///   - held: The queue is holding the item back (`DownloadQueue.isHeld`),
   ///     so a waiting row reads "Paused".
-  ///   - lineLimit: Lines the text may take; by default one, or two for a problem.
+  ///   - lineLimit: Lines the text may take; by default one, or two for a
+  ///     problem. `.max` for the whole line, however long.
   public init(_ item: DownloadItem, held: Bool = false, lineLimit: Int? = nil) {
     self.text = StatusText.line(for: item, held: held)
     self.tone = StatusText.tone(for: item)
     self.lineLimit = lineLimit
   }
 
+  /// A line of the app's own wording (the iPhone's shorter row line), as
+  /// the item's would be drawn.
   public init(text: String, tone: StatusTone = .neutral, lineLimit: Int? = nil) {
     self.text = text
     self.tone = tone

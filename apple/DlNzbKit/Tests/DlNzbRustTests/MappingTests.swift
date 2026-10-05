@@ -69,28 +69,14 @@ struct MappingTests {
     #expect(config.server.password == "p@ss word")
     #expect(config.speedLimitBytesPerSecond == 5_000_000)
 
-    let imported = DlNzbKit.ImportedSettings(DlNzbFFI.ImportedConfig(config: config, downloadDir: "/Volumes/Media", source: "/tmp/config.toml"))
+    let imported = DlNzbKit.ImportedSettings(config)
     var expectedServer = settings.server
     expectedServer.host = "news.example.com"
     #expect(imported.server == expectedServer)
     #expect(imported.password == settings.password)
     #expect(imported.processing == settings.processing)
     #expect(imported.advanced == settings.advanced)
-    #expect(imported.downloadDirectory?.path(percentEncoded: false).hasPrefix("/Volumes/Media") == true)
-    #expect(imported.source == URL(filePath: "/tmp/config.toml"))
   }
-
-  #if os(macOS)
-    @Test("a CLI folder under the sandbox's home goes back to the real home")
-    func importedFolderLeavesTheContainer() {
-      let real = CLIConfig.realHomeDirectory.path(percentEncoded: false)
-      let container = "/Users/someone/Library/Containers/com.zephleggett.dl-nzb/Data"
-      let rebased = DlNzbKit.ImportedSettings.outsideContainer(container + "/Downloads/Usenet", home: container)
-      #expect(rebased.hasSuffix("/Downloads/Usenet"))
-      #expect(rebased.hasPrefix(real.hasSuffix("/") ? String(real.dropLast()) : real))
-      #expect(DlNzbKit.ImportedSettings.outsideContainer("/Volumes/Media", home: container) == "/Volumes/Media")
-    }
-  #endif
 
   @Test("values the engine cannot hold are a settings problem")
   func invalidSettings() {

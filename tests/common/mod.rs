@@ -14,7 +14,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 
 use dl_nzb::config::{Config, DownloadConfig, PostProcessingConfig, TuningConfig, UsenetConfig};
-use dl_nzb::engine::{JobEvent, JobHandle, JobObserver, JobPhase, JobProgress, JobSummary};
+use dl_nzb::engine::{
+    JobEvent, JobHandle, JobObserver, JobPhase, JobProgress, JobRequest, JobSummary, Preflight,
+};
 
 /// Pick a free port by binding to :0 in the std listener and asking the OS.
 pub fn pick_free_port() -> u16 {
@@ -33,29 +35,71 @@ pub fn build_part(
     end: u64,
     plain: &[u8],
 ) -> Vec<u8> {
+    yenc_part(name, (part, total), begin, end, Some(end), plain)
+}
+
+/// A one-part body for `name` placed at `begin..=end`: `=ybegin` (claiming
+/// the file is `size` bytes when given), `=ypart`, `pcrc32`.
+pub fn one_part(name: &str, begin: u64, end: u64, size: Option<u64>, plain: &[u8]) -> Vec<u8> {
+    yenc_part(name, (1, 1), begin, end, size, plain)
+}
+
+fn yenc_part(
+    name: &str,
+    (part, total): (u32, u32),
+    begin: u64,
+    end: u64,
+    size: Option<u64>,
+    plain: &[u8],
+) -> Vec<u8> {
+    let size = size.map(|s| format!(" size={s}")).unwrap_or_default();
     let mut body = Vec::new();
-    let line = "=ybegin part=".to_owned()
-        + &part.to_string()
-        + " total="
-        + &total.to_string()
-        + " line=128 size="
-        + &(end).to_string()
-        + " name="
-        + name
-        + "\r\n";
-    body.extend_from_slice(line.as_bytes());
-    let line = format!("=ypart begin={} end={}\r\n", begin, end);
-    body.extend_from_slice(line.as_bytes());
+    body.extend_from_slice(
+        format!("=ybegin part={part} total={total} line=128{size} name={name}\r\n").as_bytes(),
+    );
+    body.extend_from_slice(format!("=ypart begin={begin} end={end}\r\n").as_bytes());
     body.extend_from_slice(&yenc_encode(plain));
     body.extend_from_slice(b"\r\n");
     let crc = crc32fast::hash(plain);
-    let line = format!(
-        "=yend size={} part={} pcrc32={:08x}\r\n",
-        plain.len(),
-        part,
-        crc
+    body.extend_from_slice(
+        format!(
+            "=yend size={} part={part} pcrc32={crc:08x}\r\n",
+            plain.len()
+        )
+        .as_bytes(),
     );
-    body.extend_from_slice(line.as_bytes());
+    body
+}
+
+/// A single-part body: the whole file `name`.
+pub fn single(plain: &[u8], name: &str) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!("=ybegin line=128 size={} name={name}\r\n", plain.len()).as_bytes(),
+    );
+    body.extend_from_slice(&yenc_encode(plain));
+    body.extend_from_slice(b"\r\n");
+    let crc = crc32fast::hash(plain);
+    body.extend_from_slice(format!("=yend size={} crc32={crc:08x}\r\n", plain.len()).as_bytes());
+    body
+}
+
+/// A single-part yEnc body without a `pcrc32`, so the wire can't vouch for
+/// the data and PAR2 really verifies it.
+pub fn article_without_crc(name: &str, plain: &[u8]) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "=ybegin part=1 total=1 line=128 size={} name={}\r\n",
+            plain.len(),
+            name
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(format!("=ypart begin=1 end={}\r\n", plain.len()).as_bytes());
+    body.extend_from_slice(&yenc_encode(plain));
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(format!("=yend size={} part=1\r\n", plain.len()).as_bytes());
     body
 }
 
@@ -229,14 +273,12 @@ pub fn make_config(server: &str, port: u16, download_dir: PathBuf) -> Config {
             ssl: false,
             verify_ssl_certs: false,
             connections: 4,
-            timeout: 5,
             retry_attempts: 2,
             retry_delay: 100,
         },
         download: DownloadConfig {
             dir: download_dir,
             create_subfolders: false,
-            force_redownload: true,
             speed_limit: None,
         },
         post_processing: PostProcessingConfig {
@@ -247,16 +289,56 @@ pub fn make_config(server: &str, port: u16, download_dir: PathBuf) -> Config {
             deobfuscate_file_names: false,
             download_all_par2: false,
         },
-        logging: Default::default(),
         tuning: TuningConfig {
             pipeline_depth: 4,
             decode_retry_cap: 3,
             max_concurrent_connections: 4,
-            large_file_threshold: 1024 * 1024,
             fsync_on_finalize: false,
         },
         notifications: Default::default(),
     }
+}
+
+/// [`make_config`] for the local mock server on `port`, with `connections`
+/// connections (and as many opened at once).
+pub fn config(port: u16, dir: &Path, connections: u16) -> Config {
+    let mut config = make_config("127.0.0.1", port, dir.into());
+    config.usenet.connections = connections;
+    config.tuning.max_concurrent_connections = connections as usize;
+    config
+}
+
+/// The server settings of [`config`].
+pub fn usenet(port: u16) -> UsenetConfig {
+    config(port, Path::new("."), 1).usenet
+}
+
+/// A job for `nzb` into `out` that never scans availability first.
+pub fn request(nzb: &Path, out: &Path) -> JobRequest {
+    JobRequest {
+        preflight: Preflight::Never,
+        ..JobRequest::new(nzb, out)
+    }
+}
+
+/// A summary in one line, for assertion messages.
+pub fn brief(s: &JobSummary) -> String {
+    format!(
+        "{:?} kind={:?} resumable={} failed={}/{} {:?}",
+        s.outcome, s.error_kind, s.resumable, s.articles_failed, s.articles_total, s.message
+    )
+}
+
+/// The names in `dir`, sorted (none when it can't be read).
+pub fn names_in(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .map(|r| {
+            r.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
 }
 
 pub fn build_synthetic_nzb(
@@ -282,6 +364,25 @@ pub fn nzb_xml(files: &[(&str, &[String], &[u64])]) -> String {
 pub fn write_nzb(dir: &Path, name: &str, files: &[(&str, &[String], &[u64])]) -> PathBuf {
     let path = dir.join(format!("{name}.nzb"));
     std::fs::write(&path, nzb_xml(files)).unwrap();
+    path
+}
+
+/// Write `job.nzb` into `dir`: one `<file>` whose segments carry the given
+/// numbers and sizes.
+pub fn numbered_nzb(dir: &Path, filename: &str, segments: &[(u32, u64, String)]) -> PathBuf {
+    let mut xml = String::from(r#"<?xml version="1.0" encoding="UTF-8"?>"#);
+    xml.push_str(r#"<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">"#);
+    xml.push_str(&format!(
+        r#"<file poster="t@e.x" date="1700000000" subject="&quot;{filename}&quot; yEnc"><groups><group>alt.binaries.test</group></groups><segments>"#
+    ));
+    for (number, bytes, id) in segments {
+        xml.push_str(&format!(
+            r#"<segment bytes="{bytes}" number="{number}">{id}</segment>"#
+        ));
+    }
+    xml.push_str("</segments></file></nzb>");
+    let path = dir.join("job.nzb");
+    std::fs::write(&path, xml).unwrap();
     path
 }
 
@@ -357,6 +458,23 @@ pub fn make_file_articles(
         });
     }
     (articles, ids, sizes, full)
+}
+
+/// Wait (up to 20 s) until `done`.
+pub async fn until(what: &str, done: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !done() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// Close `sock` with a reset (RST) rather than an orderly FIN.
+pub fn reset(sock: TcpStream) {
+    socket2::SockRef::from(&sock)
+        .set_linger(Some(Duration::ZERO))
+        .unwrap();
+    drop(sock);
 }
 
 /// Wait for a job, failing the test if it takes longer than `secs`.

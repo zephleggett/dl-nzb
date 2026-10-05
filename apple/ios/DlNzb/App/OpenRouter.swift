@@ -1,4 +1,5 @@
 import DlNzbKit
+import DlNzbUI
 import Foundation
 import Observation
 
@@ -14,15 +15,10 @@ import Observation
 @MainActor
 @Observable
 final class OpenRouter {
-  struct Failure {
-    let fileName: String
-    let message: String
-  }
-
   /// NZBs already in the list or on disk, asked about one at a time.
   private(set) var duplicates: [DuplicateNZB] = []
   /// Files that could not be added, shown together.
-  var failures: [Failure] = []
+  var failures: [OpenFailure] = []
   /// The newest item added, for the iPad to select.
   private(set) var lastAdded: DownloadItem.ID?
 
@@ -61,7 +57,7 @@ final class OpenRouter {
       case .duplicate(let duplicate):
         duplicates.append(duplicate)
       case .failed(let fileName, let message):
-        failures.append(Failure(fileName: fileName, message: message))
+        failures.append(OpenFailure(fileName: fileName, message: message))
       }
     }
     return results
@@ -72,11 +68,7 @@ final class OpenRouter {
     if !duplicates.isEmpty { duplicates.removeFirst() }
   }
 
-  /// One alert for every failure so far.
-  var failureTitle: String {
-    failures.count == 1 ? "Couldn’t Open “\(failures[0].fileName)”" : "Couldn’t Open \(failures.count) Files"
-  }
-
+  /// One alert for every failure so far, under `AlertText.openFailureTitle`.
   var failureMessage: String {
     failures.count == 1 ? failures[0].message : failures.map { "\($0.fileName): \($0.message)" }.joined(separator: "\n")
   }
@@ -84,10 +76,7 @@ final class OpenRouter {
   // MARK: Inbox
 
   func isInInbox(_ url: URL) -> Bool {
-    let inbox = inboxDirectory.resolvingSymlinksInPath().standardizedFileURL.path(percentEncoded: false)
-    let path = url.resolvingSymlinksInPath().standardizedFileURL.path(percentEncoded: false)
-    let prefix = inbox.hasSuffix("/") ? inbox : inbox + "/"
-    return path.hasPrefix(prefix)
+    url.resolvingSymlinksInPath().isInside(inboxDirectory.resolvingSymlinksInPath())
   }
 
   private func removeInboxCopies(of urls: [URL]) {

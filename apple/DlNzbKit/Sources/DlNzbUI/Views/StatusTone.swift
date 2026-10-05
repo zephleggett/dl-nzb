@@ -95,10 +95,12 @@ public struct ToneStyle: ShapeStyle {
 
   public func resolve(in environment: EnvironmentValues) -> AnyShapeStyle {
     if environment.backgroundProminence == .increased { return AnyShapeStyle(.primary) }
-    if let textTone {
-      let color = textTone.textColor(colorScheme: environment.colorScheme, contrast: environment.colorSchemeContrast)
-      return color.map { AnyShapeStyle($0) } ?? AnyShapeStyle(.secondary)
-    }
-    return color.map { AnyShapeStyle($0) } ?? AnyShapeStyle(.secondary)
+    let tint =
+      if let textTone {
+        textTone.textColor(colorScheme: environment.colorScheme, contrast: environment.colorSchemeContrast)
+      } else {
+        color
+      }
+    return tint.map { AnyShapeStyle($0) } ?? AnyShapeStyle(.secondary)
   }
 }

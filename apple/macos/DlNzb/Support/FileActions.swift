@@ -1,5 +1,6 @@
 import AppKit
 import DlNzbKit
+import DlNzbUI
 
 /// Finder's side of a download: what Show in Finder selects, what Open
 /// opens, and the panels that pick files and folders.
@@ -8,7 +9,7 @@ enum FileActions {
   /// Show in Finder selects the main file of a finished download, its folder
   /// while it runs, or the download folder when the job folder is not there yet.
   static func revealTarget(_ item: DownloadItem) -> URL {
-    if item.isFinished, let file = mainFile(of: item), exists(file) { return file }
+    if item.isFinished, let file = item.largestFile, exists(file) { return file }
     if exists(item.outputDirectory) { return item.outputDirectory }
     return item.outputDirectory.deletingLastPathComponent()
   }
@@ -16,22 +17,13 @@ enum FileActions {
   /// Open opens the file when one file is the download (a film, an ISO) and
   /// the folder when it is a set of files.
   static func openTarget(for item: DownloadItem) -> URL {
-    guard let summary = item.summary, let main = mainFile(of: item) else { return item.outputDirectory }
-    let total = summary.files.reduce(Int64(0)) { $0 + $1.bytes }
-    let mainBytes = summary.files.map(\.bytes).max() ?? 0
-    // One file holding nearly everything; sidecars (nfo, sfv) do not count.
-    return total > 0 && Double(mainBytes) / Double(total) >= 0.9 && exists(main) ? main : item.outputDirectory
+    // One file holding nearly everything.
+    item.mainFile(whenShare: { $0 >= 0.9 }) ?? item.outputDirectory
   }
 
-  /// Quick Look shows a finished download's main file, or its folder.
+  /// Quick Look shows a finished download's largest file, or its folder.
   static func previewTarget(_ item: DownloadItem) -> URL {
-    mainFile(of: item) ?? item.outputDirectory
-  }
-
-  /// The largest file a finished job left.
-  static func mainFile(of item: DownloadItem) -> URL? {
-    guard let summary = item.summary, let largest = summary.files.max(by: { $0.bytes < $1.bytes }) else { return nil }
-    return summary.outputDirectory.appending(path: largest.name, directoryHint: .notDirectory)
+    item.largestFile ?? item.outputDirectory
   }
 
   static func reveal(_ urls: [URL]) {

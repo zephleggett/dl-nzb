@@ -256,27 +256,6 @@ jobs:
       - name: Install xcodegen
         run: brew install xcodegen
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
-          targets: aarch64-apple-darwin, x86_64-apple-darwin, aarch64-apple-ios, aarch64-apple-ios-sim
-
-      # CI's build of the same sources, when main has one; a tag cannot save
-      # a cache anyone else could use, so this only restores.
-      - name: Restore the Rust build
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: xcframework-${{ env.RUSTUP_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('Cargo.toml', '.cargo/config.toml', 'src/**', 'ffi/**') }}
-          restore-keys: |
-            xcframework-${{ env.RUSTUP_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}-
-            xcframework-${{ env.RUSTUP_TOOLCHAIN }}-
-
       - name: Report the signing mode
         run: |
           if [ "$HAVE_SIGNING" = true ]; then
@@ -315,8 +294,12 @@ jobs:
           echo "$NOTARY_PRIVATE_KEY_P8_BASE64" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
           echo "NOTARY_KEY_PATH=$RUNNER_TEMP/AuthKey.p8" >> "$GITHUB_ENV"
 
+      # Restores CI's build of the same sources, when main has one; a tag
+      # cannot save a cache anyone else could use.
       - name: Build the Rust engine
-        run: make -C apple xcframework
+        uses: ./.github/actions/rust-engine
+        with:
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
 
       - name: Build and sign the app
         env:

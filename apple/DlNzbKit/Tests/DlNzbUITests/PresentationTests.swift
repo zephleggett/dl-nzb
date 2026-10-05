@@ -1,6 +1,8 @@
 import AppKit
 import Foundation
 import Testing
+import UniformTypeIdentifiers
+import UserNotifications
 
 @testable import DlNzbKit
 @testable import DlNzbUI
@@ -186,6 +188,19 @@ struct PresentationTests {
     }
   }
 
+  @Test("A notification carries its item, which a click finds again from either key")
+  func notificationContent() throws {
+    let content = try #require(NotificationText.content(for: PreviewData.finished, locale: locale))
+    #expect(content.title == "Download Finished")
+    #expect(content.body == "\(PreviewData.sintelTitle) · 8.2 GB")
+    #expect(content.threadIdentifier == "downloads")
+    #expect(NotificationText.itemID(from: content.userInfo) == PreviewData.finished.id)
+    // What the Mac app wrote before both apps shared the key.
+    #expect(NotificationText.itemID(from: ["item": PreviewData.failed.id.uuidString]) == PreviewData.failed.id)
+    #expect(NotificationText.itemID(from: [:]) == nil)
+    #expect(NotificationText.content(for: PreviewData.downloading) == nil)
+  }
+
   @Test("Queue alerts name the server problem and tell a waiting duplicate from a downloaded one")
   @MainActor
   func alerts() {
@@ -194,18 +209,65 @@ struct PresentationTests {
     #expect(AlertText.serverProblemMessage(EngineError(.auth)).hasSuffix(" Downloads are paused until the server works again."))
     let queue = DownloadQueue.preview(items: [PreviewData.queued, PreviewData.finished])
     let folder = URL(filePath: "/Users/me/Downloads/Sintel", directoryHint: .isDirectory)
-    let waiting = DuplicateNZB(title: "Sintel", existingItemID: PreviewData.queued.id, folder: folder, data: Data(), fileName: "Sintel.nzb")
+    let waiting = DuplicateNZB(title: "Sintel", existingItemID: PreviewData.queued.id, folder: folder, data: Data(), fingerprint: "", fileName: "Sintel.nzb")
     #expect(AlertText.duplicateTitle(waiting, in: queue) == "Already in the List")
     #expect(AlertText.duplicateMessage(waiting, in: queue) == "“Sintel” is in the list already.")
     #expect(AlertText.duplicateShowTitle(waiting, in: queue) == "Show in List")
     #expect(queue.listedItem(for: waiting)?.id == PreviewData.queued.id)
-    let done = DuplicateNZB(title: "Sintel", existingItemID: PreviewData.finished.id, folder: folder, data: Data(), fileName: "Sintel.nzb")
+    let done = DuplicateNZB(title: "Sintel", existingItemID: PreviewData.finished.id, folder: folder, data: Data(), fingerprint: "", fileName: "Sintel.nzb")
     #expect(AlertText.duplicateTitle(done, in: queue) == "Already Downloaded")
     #expect(AlertText.duplicateMessage(done, in: queue) == "“Sintel” has been downloaded before. Its files are in the Downloads folder.")
     #expect(AlertText.duplicateShowTitle(done, in: queue) == "Show in Finder")
     #expect(queue.listedItem(for: done) == nil)
-    let long = DuplicateNZB(title: "Tears.of.Steel", existingItemID: nil, folder: folder, data: Data(), fileName: "x.nzb")
+    let long = DuplicateNZB(title: "Tears.of.Steel", existingItemID: nil, folder: folder, data: Data(), fingerprint: "", fileName: "x.nzb")
     #expect(!AlertText.duplicateMessage(long, in: queue).contains("\u{200B}"))
+  }
+
+  @Test("Files that could not be added are named, or counted")
+  func openFailures() {
+    let one = OpenFailure(fileName: "notes.nzb", message: "This is not an NZB.")
+    #expect(AlertText.openFailureTitle([one], locale: locale) == "Couldn’t Open “notes.nzb”")
+    #expect(AlertText.openFailureTitle(Array(repeating: one, count: 1_200), locale: locale) == "Couldn’t Open 1,200 Files")
+  }
+
+  // MARK: Files
+
+  @Test("NZBs are told by their extension and declared as XML")
+  func nzbType() {
+    #expect(URL(filePath: "/tmp/Sintel.NZB").isNZB)
+    #expect(!URL(filePath: "/tmp/Sintel.xml").isNZB)
+    #expect(UTType.nzb.identifier == "com.zephleggett.dl-nzb.nzb")
+    #expect(UTType.nzb.conforms(to: .xml))
+  }
+
+  @Test("The main file is the largest one, when it holds enough of the download and is there")
+  func mainFile() throws {
+    let folder = FileManager.default.temporaryDirectory.appending(path: "dl-nzb-main-file-\(UUID().uuidString)", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    var item = PreviewData.finished
+    item.summary = JobSummary(
+      outcome: .completed, outputDirectory: folder, files: [OutputFile(name: "Film.nfo", bytes: 15), OutputFile(name: "Film.mkv", bytes: 85)])
+    let film = folder.appending(path: "Film.mkv", directoryHint: .notDirectory)
+    #expect(item.largestFile == film)
+    #expect(item.mainFile(whenShare: { $0 > 0.8 }) == nil)
+    try Data().write(to: film)
+    #expect(item.mainFile(whenShare: { $0 > 0.8 }) == film)
+    #expect(item.mainFile(whenShare: { $0 >= 0.9 }) == nil)
+    item.summary?.files = []
+    #expect(item.largestFile == nil)
+    #expect(item.mainFile(whenShare: { _ in true }) == nil)
+  }
+
+  @Test("Progress alone leaves an item equal for the views that do not show it")
+  func equalsIgnoringProgress() {
+    var moved = PreviewData.downloading
+    moved.progress?.bytesDone += 1_000_000
+    #expect(moved != PreviewData.downloading)
+    #expect(moved.equalsIgnoringProgress(PreviewData.downloading))
+    var paused = moved
+    paused.state = .paused
+    #expect(!paused.equalsIgnoringProgress(PreviewData.downloading))
   }
 
   // MARK: Tone
@@ -252,6 +314,6 @@ struct PresentationTests {
 
   @Test("The bundled crate list loads, empty until the engine build fills it")
   func bundledCrates() {
-    #expect(Acknowledgement.bundledRustCrates().allSatisfy { !$0.name.isEmpty && !$0.licence.isEmpty })
+    #expect(Acknowledgement.bundledRustCrates.allSatisfy { !$0.name.isEmpty && !$0.licence.isEmpty })
   }
 }

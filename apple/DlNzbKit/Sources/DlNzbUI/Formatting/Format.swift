@@ -89,8 +89,7 @@ public enum Format {
 
   /// "43%".
   public static func percent(_ fraction: Double, locale: Locale = .autoupdatingCurrent) -> String {
-    let clamped = fraction.isFinite ? min(max(fraction, 0), 1) : 0
-    return clamped.formatted(.percent.precision(.fractionLength(0)).locale(locale))
+    fraction.clampedFraction.formatted(.percent.precision(.fractionLength(0)).locale(locale))
   }
 
   /// "9%", or "Less than 1%" for a share that would round to nothing.

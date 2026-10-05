@@ -38,6 +38,24 @@ pub fn format_percent(part: u64, whole: u64) -> String {
     }
 }
 
+/// Run blocking file work on Tokio's blocking pool and wait for it, so it
+/// doesn't hold up the async threads (and with them another job's
+/// download). A panic in `work` carries on in the caller, as it would have
+/// had `work` run there.
+pub(crate) async fn blocking<T, F>(work: F) -> T
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    match tokio::task::spawn_blocking(work).await {
+        Ok(value) => value,
+        Err(e) => match e.try_into_panic() {
+            Ok(panic) => std::panic::resume_unwind(panic),
+            Err(e) => panic!("blocking work did not finish: {e}"),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

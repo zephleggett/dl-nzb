@@ -14,9 +14,10 @@ use par2_rs::{MessageCallback, MessageLevel, Par2Operation, Par2Repairer, Progre
 type Result<T> = std::result::Result<T, DlNzbError>;
 
 /// Outcome of a PAR2 verify+repair attempt.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Par2Status {
     /// No PAR2 files present.
+    #[default]
     NoPar2Files,
     /// Files verified clean or repair completed successfully.
     Success,
@@ -32,8 +33,6 @@ pub struct Par2Result {
     pub damaged_blocks: u64,
     /// Blocks rebuilt by a successful repair.
     pub repaired_blocks: u64,
-    /// Why it failed, in a few words, when it did.
-    pub error: Option<String>,
 }
 
 impl Par2Result {
@@ -42,7 +41,16 @@ impl Par2Result {
             status,
             damaged_blocks: 0,
             repaired_blocks: 0,
-            error: None,
+        }
+    }
+
+    /// A run that failed, with `damaged_blocks` found; why goes to the debug
+    /// log.
+    fn failed(damaged_blocks: u64, why: impl std::fmt::Display) -> Self {
+        tracing::debug!("PAR2: {why}");
+        Self {
+            damaged_blocks,
+            ..Self::status(Par2Status::Failed)
         }
     }
 }
@@ -88,10 +96,10 @@ pub async fn repair_with_par2(
         job.warn(format!(
             "PAR2 was skipped because the recovery set names a file outside the download folder ({bad})."
         ));
-        return Ok(Par2Result {
-            error: Some("the recovery set names files outside the download folder".into()),
-            ..Par2Result::status(Par2Status::Failed)
-        });
+        return Ok(Par2Result::failed(
+            0,
+            "the recovery set names files outside the download folder",
+        ));
     }
 
     let repairer = Par2Repairer::new(&main_par2).map_err(PostProcessingError::Par2)?;
@@ -179,44 +187,30 @@ pub async fn repair_with_par2(
 
     let repairing = repairing_blocks.load(Ordering::Relaxed);
     let damaged = repairing.max(damaged_seen.load(Ordering::Relaxed));
-    match result {
+    let why = match result {
         Ok(Ok(())) => {
             job.set_fraction(1.0);
-            Ok(Par2Result {
+            return Ok(Par2Result {
                 status: Par2Status::Success,
                 damaged_blocks: damaged,
                 repaired_blocks: repairing,
-                error: None,
-            })
+            });
+        }
+        Ok(Err(par2_rs::Par2Error::InsufficientRecovery { needed, available })) => {
+            return Ok(Par2Result::failed(
+                (needed as u64).max(damaged),
+                format_args!(
+                    "not enough recovery data to repair ({needed} blocks needed, {available} available)"
+                ),
+            ));
         }
         // A cancelled repair is not a real failure; the caller sees the job
         // was stopped and reports that instead.
-        Ok(Err(par2_rs::Par2Error::Cancelled)) => Ok(Par2Result {
-            error: Some("stopped".into()),
-            damaged_blocks: damaged,
-            ..Par2Result::status(Par2Status::Failed)
-        }),
-        Ok(Err(par2_rs::Par2Error::InsufficientRecovery { needed, available })) => {
-            Ok(Par2Result {
-                status: Par2Status::Failed,
-                damaged_blocks: (needed as u64).max(damaged),
-                repaired_blocks: 0,
-                error: Some(format!(
-                    "not enough recovery data to repair ({needed} blocks needed, {available} available)"
-                )),
-            })
-        }
-        Ok(Err(e)) => Ok(Par2Result {
-            error: Some(e.to_string()),
-            damaged_blocks: damaged,
-            ..Par2Result::status(Par2Status::Failed)
-        }),
-        Err(join_err) => Ok(Par2Result {
-            error: Some(format!("internal error: {join_err}")),
-            damaged_blocks: damaged,
-            ..Par2Result::status(Par2Status::Failed)
-        }),
-    }
+        Ok(Err(par2_rs::Par2Error::Cancelled)) => "stopped".to_string(),
+        Ok(Err(e)) => e.to_string(),
+        Err(join_err) => format!("internal error: {join_err}"),
+    };
+    Ok(Par2Result::failed(damaged, why))
 }
 
 fn fraction(current: u64, total: u64) -> f64 {

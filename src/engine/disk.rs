@@ -52,7 +52,7 @@ fn estimate_needed(dir: &Path, nzb: &Nzb, config: &Config, record: &JobRecord) -
             } else {
                 0
             };
-            let segments: Vec<u64> = file.segments.segment.iter().map(|s| s.bytes).collect();
+            let segments: Vec<u64> = file.segments.iter().map(|s| s.bytes).collect();
             to_download(dir, &file.filename, &segments, record) + unpacked
         })
         .sum()
@@ -63,7 +63,7 @@ fn estimate_needed(dir: &Path, nzb: &Nzb, config: &Config, record: &JobRecord) -
 /// on disk), or else the whole file less what is already allocated to it.
 fn to_download(dir: &Path, name: &str, segments: &[u64], record: &JobRecord) -> u64 {
     let final_path = dir.join(name);
-    let partial_path = dir.join(format!("{name}.partial"));
+    let partial_path = crate::patterns::partial_path(&final_path);
     let prior = record.slot(name).and_then(|slot| record.prior(slot));
     if let Some(prior) = prior.filter(|p| !p.done.is_empty()) {
         let kept = if prior.finalized {

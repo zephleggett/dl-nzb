@@ -6,7 +6,7 @@
 //! starts work the moment its own is up; one slow connection holds up only
 //! its worker.
 
-use super::connection::AsyncNntpConnection;
+use super::connection::{native_tls_connector, AsyncNntpConnection};
 use super::{ArticleOutcome, SpeedLimiter};
 use crate::config::UsenetConfig;
 use crate::error::{DlNzbError, DownloadError, NntpError};
@@ -29,15 +29,11 @@ impl NntpConnectionManager {
         max_concurrent_connections: usize,
     ) -> Result<Self, DlNzbError> {
         let tls_connector = if config.ssl {
-            let mut tls_builder = native_tls::TlsConnector::builder();
-            if !config.verify_ssl_certs {
-                tls_builder.danger_accept_invalid_certs(true);
-                tls_builder.danger_accept_invalid_hostnames(true);
-            }
-            let native_connector = tls_builder.build().map_err(|e| NntpError::TlsError {
-                server: config.server.clone(),
-                detail: e.to_string(),
-            })?;
+            let native_connector =
+                native_tls_connector(&config).map_err(|e| NntpError::TlsError {
+                    server: config.server.clone(),
+                    detail: e.to_string(),
+                })?;
             Some(Arc::new(tokio_native_tls::TlsConnector::from(
                 native_connector,
             )))

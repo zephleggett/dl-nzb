@@ -57,7 +57,7 @@ public struct JobProgress: Sendable, Codable, Equatable {
   /// own fraction, clamped to 0...1.
   public var displayFraction: Double {
     let value = phase.isTransfer && bytesTotal > 0 ? Double(bytesDone) / Double(bytesTotal) : fraction
-    return value.isFinite ? min(max(value, 0), 1) : 0
+    return value.clampedFraction
   }
 
   /// The file being worked on, counting from one: the 2 of "2 of 5".

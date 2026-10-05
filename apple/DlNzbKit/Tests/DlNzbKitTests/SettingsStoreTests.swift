@@ -202,7 +202,6 @@ struct SettingsStoreTests {
       #expect(settings.username == "zeph" && settings.password == "secret")
       #expect(settings.connections == 50 && settings.retryAttempts == 4 && !settings.verifyCertificate)
       #expect(!settings.repairWithPar2 && settings.downloadAllRecoveryUpFront && settings.flushFilesWhenFinished)
-      #expect(settings.hasOfferedCLIImport)
       await settings.keychainSettled()
       #expect(passwords.password(for: NNTPAccount(server: "news.example.com", port: 443, username: "zeph")) == "secret")
     }
