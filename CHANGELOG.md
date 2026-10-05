@@ -5,6 +5,24 @@ All notable changes to dl-nzb will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0-rc.2] - 2026-10-05
+
+The second test release: lighter on the Mac while it downloads.
+
+### Fixed
+- On a Mac, menus no longer flicker while something downloads, and the app
+  uses far less CPU to show progress.
+- Both apps use a password in the NZB's file name (`Name{{password}}.nzb`),
+  as the command line does, and leave it out of the download's name.
+- **Command line:** the summary at the end says what happened, with the
+  reason when a download fails, instead of "Completed" with a count of errors.
+
+### Changed
+- Decoding downloads takes less CPU.
+- **Command line:** the config file no longer lists settings that did
+  nothing (`timeout`, `force_redownload`, `large_file_threshold`, `[logging]`).
+  Old config files still load.
+
 ## [0.8.0-rc.1] - 2026-10-05
 
 The first test release of the Mac and iPhone apps.
