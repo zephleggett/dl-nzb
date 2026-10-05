@@ -10,8 +10,9 @@
 //
 // The picture is a download arrow assembled from parts: three segment bars
 // for the shaft, then a solid head, the way an NZB's articles arrive one by one
-// and become a file. Cyan #66cccc on #2d2d2d, the base16-eighties colours the
-// CLI uses. Flat, no gradients; the system supplies the glass.
+// and become a file. The segments run yellow, green and cyan into a cyan head,
+// on #2d2d2d: base16-eighties, the colours of the CLI and the site. Flat, no
+// gradients; the system supplies the glass.
 //
 // The icon is an Icon Composer document (AppIcon.icon): icon.json plus one
 // SVG per layer on Apple's 1024 pt canvas, where the rounded square fills the
@@ -73,7 +74,9 @@ struct RGB {
 
 let ground = RGB(hex: 0x2D2D2D)      // base16-eighties base00
 let groundDark = RGB(hex: 0x1F1F1F)  // a step darker for the Dark appearance
-let cyan = RGB(hex: 0x66CCCC)        // base16-eighties cyan
+let yellow = RGB(hex: 0xFFCC66)      // base16-eighties base0A
+let green = RGB(hex: 0x99CC99)       // base0B
+let cyan = RGB(hex: 0x66CCCC)        // base0C
 let white = RGB(hex: 0xFFFFFF)
 
 // MARK: - Geometry (1024 pt canvas, y down)
@@ -91,6 +94,9 @@ let headHalfWidth: CGFloat = 276        // 45 degree sides, so this is also the 
 let shoulderRadius: CGFloat = 22
 let tipRadius: CGFloat = 34
 let arrowTop: CGFloat = 189
+
+// Top to bottom, so the last segment matches the head.
+let segmentColors = [yellow, green, cyan]
 
 let segments: [CGRect] = (0..<3).map { index in
   CGRect(x: centreX - shaftWidth / 2, y: arrowTop + CGFloat(index) * (segmentHeight + segmentGap),
@@ -142,26 +148,27 @@ func svgDocument(_ body: String) -> String {
 
 // MARK: - AppIcon.icon
 
-// Two layers in one group, so the head and the segments each catch the glass
-// light on their own edges: the segments read as separate pieces even when the
-// system draws the icon as clear or tinted glass.
-let segmentsSVG = svgDocument(segments.map { rect in
-  "  <rect x=\"\(number(rect.minX))\" y=\"\(number(rect.minY))\" width=\"\(number(rect.width))\" " +
-    "height=\"\(number(rect.height))\" rx=\"\(number(segmentRadius))\" fill=\"\(cyan.svg)\"/>"
-}.joined(separator: "\n"))
+// One layer per piece in one group, so each catches the glass light on its own
+// edges: the segments read as separate pieces even when the system draws the
+// icon as clear or tinted glass. Each segment needs its own layer for its own
+// colour too, because a layer's fill replaces the colours in its SVG.
+let segmentSVGs = zip(segments, segmentColors).map { rect, color in
+  svgDocument("  <rect x=\"\(number(rect.minX))\" y=\"\(number(rect.minY))\" width=\"\(number(rect.width))\" " +
+    "height=\"\(number(rect.height))\" rx=\"\(number(segmentRadius))\" fill=\"\(color.svg)\"/>")
+}
 let headSVG = svgDocument("  <path d=\"\(roundedPolygonPathData(head, radii: headRadii))\" fill=\"\(cyan.svg)\"/>")
 
 // The mark is white in the tinted appearance so the system's tint lands at
 // full strength; in clear and tinted the system also replaces the ground.
 // Specular highlights are off: the glass keeps its soft edge and depth without
 // the bright rim, which on a flat mark reads as plastic.
-func layer(_ name: String) -> [String: Any] {
+func layer(_ name: String, _ color: RGB) -> [String: Any] {
   [
     "name": name,
     "image-name": "\(name).svg",
     "glass": true,
     "fill-specializations": [
-      ["value": ["solid": cyan.iconComposer]],
+      ["value": ["solid": color.iconComposer]],
       ["appearance": "tinted", "value": ["solid": white.iconComposer]],
     ],
     "position": ["scale": 1, "translation-in-points": [0, 0]],
@@ -179,7 +186,7 @@ let iconJSON: [String: Any] = [
   "groups": [
     [
       "name": "Arrow",
-      "layers": [layer("head"), layer("segments")],
+      "layers": [layer("head", cyan)] + segmentColors.indices.map { layer("segment-\($0 + 1)", segmentColors[$0]) },
       "lighting": "individual",
       "specular": false,
       "shadow": ["kind": "neutral", "opacity": decimal("0.5")] as [String: Any],
@@ -192,7 +199,9 @@ let iconJSON: [String: Any] = [
 do {
   try? fileManager.removeItem(at: iconDocument)
   let assets = iconDocument.appendingPathComponent("Assets")
-  write(segmentsSVG, to: assets.appendingPathComponent("segments.svg"))
+  for (index, svg) in segmentSVGs.enumerated() {
+    write(svg, to: assets.appendingPathComponent("segment-\(index + 1).svg"))
+  }
   write(headSVG, to: assets.appendingPathComponent("head.svg"))
   let json = try JSONSerialization.data(withJSONObject: iconJSON, options: [.prettyPrinted, .sortedKeys])
   write(String(decoding: json, as: UTF8.self) + "\n", to: iconDocument.appendingPathComponent("icon.json"))

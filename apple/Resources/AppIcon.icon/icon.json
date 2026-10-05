@@ -44,6 +44,56 @@
           "fill-specializations" : [
             {
               "value" : {
+                "solid" : "srgb:1.00000,0.80000,0.40000,1.00000"
+              }
+            },
+            {
+              "appearance" : "tinted",
+              "value" : {
+                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            }
+          ],
+          "glass" : true,
+          "image-name" : "segment-1.svg",
+          "name" : "segment-1",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "srgb:0.60000,0.80000,0.60000,1.00000"
+              }
+            },
+            {
+              "appearance" : "tinted",
+              "value" : {
+                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            }
+          ],
+          "glass" : true,
+          "image-name" : "segment-2.svg",
+          "name" : "segment-2",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
                 "solid" : "srgb:0.40000,0.80000,0.80000,1.00000"
               }
             },
@@ -55,8 +105,8 @@
             }
           ],
           "glass" : true,
-          "image-name" : "segments.svg",
-          "name" : "segments",
+          "image-name" : "segment-3.svg",
+          "name" : "segment-3",
           "position" : {
             "scale" : 1,
             "translation-in-points" : [
