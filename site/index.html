@@ -4,22 +4,20 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>dl-nzb: download, repair and extract NZBs</title>
-<meta name="description" content="Download, repair and extract NZB files quickly. Native apps for Mac, iPhone and iPad and a command line tool, on one Rust core with our own optimized PAR2." />
+<meta name="description" content="Download, repair and extract NZB files. Native apps for Mac, iPhone and iPad and a command line tool, on one Rust core." />
 <link rel="canonical" href="https://dl-nzb.com/" />
 <meta name="color-scheme" content="dark" />
 <meta name="theme-color" content="#2d2d2d" />
 <meta property="og:type" content="website" />
 <meta property="og:site_name" content="dl-nzb" />
 <meta property="og:title" content="dl-nzb: download, repair and extract NZBs" />
-<meta property="og:description" content="Native apps for Mac, iPhone and iPad and a command line tool, on one Rust core with our own optimized PAR2." />
+<meta property="og:description" content="Native apps for Mac, iPhone and iPad and a command line tool, on one Rust core." />
 <meta property="og:url" content="https://dl-nzb.com/" />
 <meta property="og:image" content="https://dl-nzb.com/media/og.png" />
 <meta property="og:image:width" content="1200" />
 <meta property="og:image:height" content="630" />
 <meta property="og:image:alt" content="The dl-nzb Mac app repairing a download." />
 <meta name="twitter:card" content="summary_large_image" />
-<meta name="twitter:title" content="dl-nzb: download, repair and extract NZBs" />
-<meta name="twitter:description" content="Native apps for Mac, iPhone and iPad and a command line tool, on one Rust core with our own optimized PAR2." />
 <meta name="twitter:image" content="https://dl-nzb.com/media/og.png" />
 <link rel="icon" type="image/png" href="favicon.png" />
 <link rel="stylesheet" href="css/styles.css" />
@@ -29,175 +27,98 @@
 <a class="skip" href="#main">Skip to content</a>
 
 <header class="topbar">
-  <a class="id" href="./"><img src="favicon.png" alt="" width="22" height="22" />dl-nzb</a>
+  <a class="id" href="./"><img src="media/icon.png" alt="" width="32" height="32" />dl-nzb</a>
   <nav aria-label="Site">
-    <a href="#requirements">requirements</a>
-    <a href="#apps">get the app</a>
-    <a href="#features">features</a>
+    <a href="#iphone">iPhone and iPad</a>
     <a href="#cli">command line</a>
-    <a href="#latest">latest</a>
-    <a class="ext" href="https://github.com/zephleggett/dl-nzb">github</a>
+    <a href="https://github.com/zephleggett/dl-nzb">github</a>
   </nav>
 </header>
 
 <main id="main">
 
-  <!-- hero -->
-  <div class="hero">
-    <div class="hero-copy">
-      <h1 class="mark"><img src="media/icon.png" alt="" width="256" height="256" />dl-nzb</h1>
-      <p class="tagline">Download, repair and extract NZB files, quickly.</p>
-      <p class="lede">Native apps for Mac, iPhone and iPad, and a command line tool.
-        One Rust core under all three, with our own optimized PAR2.</p>
-      <div class="cta-row">
-        <a class="btn btn--primary" href="https://github.com/zephleggett/dl-nzb/releases/latest">Download for Mac</a>
-        <!-- TODO(owner): TestFlight code. Replace XXXXXXXX (twice on this page), as in the README. -->
-        <a class="btn" href="https://testflight.apple.com/join/XXXXXXXX">iPhone and iPad</a>
-      </div>
+  <section class="hero" aria-labelledby="h-hero">
+    <h1 id="h-hero">Download, repair and extract NZB files.</h1>
+    <p class="lede">Native apps for Mac, iPhone and iPad, and a command line tool.
+      All three run on one Rust core.</p>
+    <div class="cta-row">
+      <a class="btn btn--primary" href="https://github.com/zephleggett/dl-nzb/releases/latest">Download for Mac</a>
+      <!-- TODO(owner): TestFlight code. Replace XXXXXXXX (twice on this page), as in the README. -->
+      <a class="btn" href="https://testflight.apple.com/join/XXXXXXXX">iPhone and iPad</a>
     </div>
-    <figure class="demo hero-art">
-      <video id="heroVideo" muted loop playsinline controls preload="none" width="1920" height="1200"
-             poster="media/mac-demo-poster.png"
-             aria-label="dl-nzb for Mac: an NZB opens into the list, pauses and resumes, then repairs damaged blocks and extracts.">
-        <source src="media/mac-demo.mp4" type="video/mp4" />
-        <a href="media/mac-demo.mp4">Download the Mac demo</a>.
-      </video>
-      <figcaption>
-        <button type="button" class="ctrl" data-video="#heroVideo" hidden>play</button>
-      </figcaption>
-    </figure>
-  </div>
-
-  <!-- requirements -->
-  <section id="requirements" aria-labelledby="h-requirements">
-    <h2 id="h-requirements">what you need</h2>
-    <ul class="bullets">
-      <li>A Usenet account: the server, username and password from your provider.</li>
-      <li>An NZB file.</li>
-      <li>A Mac, an iPhone or iPad, or any computer for the command line:</li>
-    </ul>
-    <dl class="ledger">
-      <div>
-        <dt>Mac</dt>
-        <dd>macOS 26 or later. Apple silicon or Intel.</dd>
-      </div>
-      <div>
-        <dt>iPhone and iPad</dt>
-        <dd>iOS 26 or iPadOS 26 or later.</dd>
-      </div>
-      <div>
-        <dt>Command line</dt>
-        <dd>macOS, Linux or Windows.</dd>
-      </div>
-    </dl>
-  </section>
-
-  <!-- get the app -->
-  <section id="apps" aria-labelledby="h-apps">
-    <h2 id="h-apps">get the app</h2>
-
-    <h3>Mac</h3>
-    <p>Download the DMG and drag dl-nzb to Applications. It keeps itself up to date.</p>
-    <p class="links">
-      <a href="https://github.com/zephleggett/dl-nzb/releases/latest">Download for Mac</a>
+    <p class="fine">
+      <span>v0.8.0-rc.2 for macOS 26 or later.</span>
+      <a href="https://github.com/zephleggett/dl-nzb/blob/main/CHANGELOG.md">Release notes</a>
       <a href="https://github.com/zephleggett/dl-nzb/blob/main/docs/mac-app.md">Mac setup guide</a>
     </p>
+  </section>
 
-    <h3>iPhone and iPad</h3>
-    <p>Get it on TestFlight. Downloads keep going in the background, and your files
-      show up in the Files app.</p>
-    <p class="links">
-      <a class="badge" href="https://testflight.apple.com/join/XXXXXXXX"><img src="media/testflight-badge.svg" alt="Available on TestFlight" width="135" height="40" /></a>
-      <a href="https://github.com/zephleggett/dl-nzb/blob/main/docs/iphone-app.md">iPhone and iPad setup guide</a>
-    </p>
-    <figure class="demo">
-      <video controls playsinline preload="none" width="1920" height="1200"
+  <figure class="stage">
+    <video id="heroVideo" data-autoplay muted loop playsinline controls preload="none" width="1920" height="1200"
+           poster="media/mac-demo-poster.png"
+           aria-label="dl-nzb for Mac: an NZB opens into the list, pauses and resumes, then repairs damaged blocks and extracts.">
+      <source src="media/mac-demo.mp4" type="video/mp4" />
+      <a href="media/mac-demo.mp4">Download the Mac demo</a>.
+    </video>
+    <button type="button" class="ctrl" data-video="#heroVideo" data-name="Mac demo" hidden>play</button>
+  </figure>
+
+  <!-- the same three steps the app shows for every download -->
+  <ol class="steps" aria-label="What happens to an NZB">
+    <li>
+      <h2>download</h2>
+      <p>Checks what the server has before it starts. Decodes with SIMD over many
+        connections, in little memory.</p>
+    </li>
+    <li>
+      <h2>repair</h2>
+      <p>Fixes damaged files with <a href="https://github.com/zephleggett/par2-rs">par2-rs</a>,
+        our own PAR2 in Rust. Fetches recovery data only when it's needed.</p>
+    </li>
+    <li>
+      <h2>extract</h2>
+      <p>Unpacks RAR sets, password-protected ones too, and puts back file names
+        a release scrambled.</p>
+    </li>
+  </ol>
+
+  <section id="iphone" class="platform platform--phone" aria-labelledby="h-iphone">
+    <div class="platform__copy">
+      <h2 id="h-iphone">iPhone and iPad</h2>
+      <p>Downloads keep going in the background. Finished files show up in the Files app.</p>
+      <p class="links">
+        <a class="badge" href="https://testflight.apple.com/join/XXXXXXXX"><img src="media/testflight-badge.svg" alt="Available on TestFlight" width="135" height="40" /></a>
+        <a href="https://github.com/zephleggett/dl-nzb/blob/main/docs/iphone-app.md">Setup guide</a>
+      </p>
+      <p class="fine">iOS 26 or iPadOS 26 or later.</p>
+    </div>
+    <figure class="phone">
+      <video id="phoneVideo" controls playsinline preload="none" width="1920" height="1200"
              poster="media/iphone-demo-poster.png"
              aria-label="dl-nzb for iPhone: an NZB opened from Files downloads, repairs and extracts, then its files appear in the Files app.">
         <source src="media/iphone-demo.mp4" type="video/mp4" />
         <a href="media/iphone-demo.mp4">Download the iPhone demo</a>.
       </video>
+      <button type="button" class="ctrl" data-video="#phoneVideo" data-name="iPhone demo" hidden>play</button>
     </figure>
   </section>
 
-  <!-- features -->
-  <section id="features" aria-labelledby="h-features">
-    <h2 id="h-features">what it does</h2>
-    <dl class="features">
-      <div>
-        <dt>Fast</dt>
-        <dd>Many connections at once and SIMD decoding, with little memory.</dd>
-      </div>
-      <div>
-        <dt>Repairs</dt>
-        <dd>Fixes damaged downloads with
-          <a href="https://github.com/zephleggett/par2-rs">par2-rs</a>, our own optimized PAR2 in Rust.
-          It only fetches recovery data when a download needs it.</dd>
-      </div>
-      <div>
-        <dt>Extracts</dt>
-        <dd>Unpacks RAR archives, password-protected ones too.</dd>
-      </div>
-      <div>
-        <dt>Checks first</dt>
-        <dd>Checks what the server has before downloading, and tells you when a release can't be repaired.</dd>
-      </div>
-      <div>
-        <dt>Resumes</dt>
-        <dd>Quit any time. It picks up where it left off.</dd>
-      </div>
-      <div>
-        <dt>Real file names</dt>
-        <dd>Puts back the real names when a release scrambles them.</dd>
-      </div>
-      <div>
-        <dt>Speed limit</dt>
-        <dd>Caps the download speed so the rest of your network stays usable.</dd>
-      </div>
-      <div>
-        <dt>One engine</dt>
-        <dd>The Mac and iPhone apps and the command line run the same Rust core.</dd>
-      </div>
-    </dl>
-  </section>
-
-  <!-- command line -->
-  <section id="cli" aria-labelledby="h-cli">
-    <h2 id="h-cli">command line</h2>
-    <p class="intro">Install it with Cargo (Rust 1.85 or later), or download a binary from
-      <a href="https://github.com/zephleggett/dl-nzb/releases/latest">Releases</a>.</p>
-    <div class="shell shell--copy">
-      <pre><code><span class="pmt">$ </span><span id="cargoCmd">cargo install --git https://github.com/<wbr>zephleggett/<wbr><span class="nb">dl-nzb</span> <span class="nb">dl-nzb</span></span></code></pre>
+  <section id="cli" class="platform" aria-labelledby="h-cli">
+    <div class="platform__copy">
+      <h2 id="h-cli">Command line</h2>
+      <p>For macOS, Linux and Windows. Install with Cargo, or get a binary from
+        <a href="https://github.com/zephleggett/dl-nzb/releases/latest">Releases</a>.
+        The first run writes a config file for your server.</p>
+      <p class="links">
+        <a href="https://github.com/zephleggett/dl-nzb#command-line">Command line guide</a>
+      </p>
+    </div>
+    <div class="shell">
+      <pre><code><span class="cmd"><span class="pmt">$ </span><span id="cargoCmd">cargo install --git https://github.com/<wbr>zephleggett/<wbr><span class="nb">dl-nzb</span> <span class="nb">dl-nzb</span></span></span><span class="cmd"><span class="pmt">$ </span>dl-nzb Sintel.nzb</span></code></pre>
       <button type="button" class="ctrl copy" data-copy="#cargoCmd" aria-label="Copy the install command" hidden>
         <span class="copy__idle">copy</span><span class="copy__done">copied</span>
       </button>
     </div>
-    <p class="prose">The first run creates a config file. Add your Usenet account to it, then:</p>
-    <div class="shell">
-<pre><code><span class="pmt">$ </span>dl-nzb Sintel.nzb   <span class="com"># download</span>
-<span class="pmt">$ </span>dl-nzb test         <span class="com"># test the server</span>
-<span class="pmt">$ </span>dl-nzb config       <span class="com"># show the config</span></code></pre>
-    </div>
-    <p class="links">
-      <a href="https://github.com/zephleggett/dl-nzb#command-line">Command line guide</a>
-    </p>
-  </section>
-
-  <!-- latest releases, from CHANGELOG.md -->
-  <section id="latest" aria-labelledby="h-latest">
-    <h2 id="h-latest">latest release</h2>
-    <p class="rel-line">
-      <b class="ver">v0.8.0-rc.2</b>
-      <a href="https://github.com/zephleggett/dl-nzb/releases/tag/v0.8.0-rc.2"><time datetime="2026-10-05">2026-10-05</time></a>
-      <span>Mac, iPhone, iPad, command line</span>
-    </p>
-    <ul class="bullets">
-      <li>On a Mac, menus no longer flicker while something downloads, and the app uses far less CPU.</li>
-      <li>Decoding downloads takes less CPU.</li>
-      <li>Both apps use a password in the NZB's file name, as the command line does.</li>
-      <li>The command line's summary says what happened, with the reason when a download fails.</li>
-    </ul>
-    <p class="links"><a href="https://github.com/zephleggett/dl-nzb/blob/main/CHANGELOG.md">All release notes</a></p>
   </section>
 
 </main>
@@ -209,10 +130,8 @@
   <nav class="foot-links" aria-label="Project links">
     <a href="https://github.com/zephleggett/dl-nzb">github</a>
     <a href="https://github.com/zephleggett/dl-nzb/releases">releases</a>
-    <a href="https://github.com/zephleggett/dl-nzb/blob/main/docs/mac-app.md">Mac guide</a>
-    <a href="https://github.com/zephleggett/dl-nzb/blob/main/docs/iphone-app.md">iPhone and iPad guide</a>
+    <a href="https://github.com/zephleggett/dl-nzb/blob/main/CHANGELOG.md">release notes</a>
     <a href="privacy.html">privacy</a>
-    <a href="https://github.com/zephleggett/par2-rs">par2-rs</a>
   </nav>
 </footer>
 

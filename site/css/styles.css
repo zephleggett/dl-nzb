@@ -16,6 +16,7 @@
   --dim: var(--base04);       /* captions, dates, notes */
   --deco: var(--base03);      /* decoration only */
   --accent: var(--base0C);
+  --done: var(--base0B);      /* the app's green "done" dot */
 
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Consolas,
@@ -24,7 +25,6 @@
   --fs-label: 0.8rem;
   --fs-small: 0.9rem;
   --fs-text: 1rem;
-  --fs-title: 1.1rem;
 
   --col: 64rem;
   --gutter: 1.5rem;
@@ -61,47 +61,37 @@ code, pre { font-family: var(--mono); }
 code { font-size: 0.92em; }
 img, video { max-width: 100%; }
 
-h1, h2, h3, .tagline { text-wrap: balance; }
-p, li, dd, figcaption { text-wrap: pretty; }
+h1, h2 { text-wrap: balance; }
+p, li { text-wrap: pretty; }
 
 .skip { position: absolute; top: -5rem; left: 1rem; z-index: 1; padding: 0.5rem 1rem;
   background: var(--accent); color: var(--bg); font-weight: 700; text-decoration: none; }
 .skip:focus { top: 1rem; }
 
-/* ── top bar ─────────────────────────────────────────────────────────── */
+/* ── top bar: the name on the left, three links on the right ─────────── */
 .topbar {
   display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
-  gap: 0.5rem 1.4rem; padding: 1.1rem var(--edge) 1rem;
-  border-bottom: 1px solid var(--line);
+  gap: 0.5rem 1.4rem; padding: 1.4rem var(--edge);
   font-family: var(--mono);
 }
 .topbar .id {
-  display: flex; align-items: center; gap: 0.55rem;
-  color: var(--head); font-weight: 700; font-size: 0.95rem; text-decoration: none;
+  display: flex; align-items: center; gap: 0.6rem;
+  color: var(--head); font-weight: 700; font-size: 1.05rem; text-decoration: none;
 }
-.topbar .id img { display: block; width: 22px; height: 22px; }
-.topbar nav { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.3rem 1.3rem; font-size: var(--fs-label); }
+.topbar .id img { display: block; width: 32px; height: 32px; }
+.topbar nav { display: flex; flex-wrap: wrap; gap: 0.3rem 1.4rem; font-size: var(--fs-label); }
 .topbar nav a { color: var(--dim); text-decoration: none; }
 .topbar nav a:hover { color: var(--head); }
-.topbar nav a.ext { color: var(--head); }
-.topbar nav a:not(.ext) + a.ext { margin-left: 0.6rem; }
 
-/* ── hero: name and pitch on the left, the Mac app on the right ─────── */
-.hero {
-  display: grid; grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
-  align-items: center; gap: 2.5rem 3rem;
-  padding: 4rem var(--edge) 1rem;
+/* ── hero: what it does, then the two buttons ────────────────────────── */
+.hero { padding: 4.5rem var(--edge) 0; }
+.hero h1 {
+  max-width: 15em;
+  font-family: var(--mono); font-weight: 700; letter-spacing: -0.035em; line-height: 1.12;
+  font-size: clamp(1.9rem, 4.6vw, 3.1rem); color: var(--head);
 }
-h1.mark {
-  display: flex; align-items: center; gap: 0.4em;
-  font-family: var(--mono); font-weight: 700; letter-spacing: -0.03em; line-height: 1;
-  font-size: clamp(2.4rem, 5vw, 3.3rem); color: var(--head);
-}
-h1.mark img { display: block; width: 1.3em; height: 1.3em; flex: none; }
-.tagline { margin-top: 1.4rem; font-size: clamp(1.15rem, 2vw, 1.35rem); font-weight: 600;
-  line-height: 1.35; color: var(--head); }
-.lede { margin-top: 0.8rem; max-width: 30em; }
-.cta-row { margin-top: 1.8rem; display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; }
+.lede { margin-top: 1.1rem; max-width: 34em; font-size: 1.1rem; }
+.cta-row { margin-top: 2rem; display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; }
 
 .btn {
   display: inline-block; padding: 0.6rem 1rem; white-space: nowrap;
@@ -115,94 +105,86 @@ h1.mark img { display: block; width: 1.3em; height: 1.3em; flex: none; }
 .btn--primary::before, .btn--primary::after { color: rgba(45, 45, 45, 0.55); }
 .btn--primary:hover { background: var(--base0D); border-color: var(--base0D); color: var(--bg); }
 
-/* ── demos ───────────────────────────────────────────────────────────── */
-.demo video {
+/* small print under buttons: requirements and a couple of links */
+.fine {
+  margin-top: 0.9rem; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.2rem 1.2rem;
+  font-size: var(--fs-label); color: var(--dim);
+}
+.fine a { color: var(--dim); }
+.fine a:hover { color: var(--accent); }
+
+/* ── the Mac app, as wide as the column ──────────────────────────────── */
+.stage { margin: 3.5rem var(--edge) 0; }
+.stage video, .phone video {
   display: block; width: 100%; height: auto;
   background: #08090a;        /* the video's own stage, so the poster gap never flashes */
-  border: 1px solid var(--line); border-radius: 4px;
+  border: 1px solid var(--line); border-radius: 6px;
 }
-.demo figcaption {
-  display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0.3rem 1rem;
-  margin-top: 0.6rem; font-size: var(--fs-label); color: var(--dim);
-}
+.stage, .phone { position: relative; }
+.stage .ctrl, .phone .ctrl { position: absolute; right: 0.8rem; bottom: 0.8rem; }
 .ctrl {
   font-family: var(--mono); font-size: var(--fs-label); color: var(--text); cursor: pointer;
-  background: transparent; border: 1px solid var(--base02); border-radius: 3px; padding: 0.1rem 0.6rem;
+  background: rgba(8, 9, 10, 0.7); border: 1px solid var(--base02); border-radius: 3px; padding: 0.1rem 0.6rem;
 }
 .ctrl:hover { color: var(--accent); border-color: var(--accent); }
 .ctrl[hidden] { display: none; }
-main > section .demo { margin-top: 1.4rem; max-width: 46rem; }
 
-/* ── sections: plain flow ────────────────────────────────────────────── */
-main > section { padding: 3.6rem var(--edge) 0.4rem; scroll-margin-top: 1rem; }
-main h2 {
-  font-family: var(--mono); font-weight: 700; letter-spacing: -0.03em; line-height: 1.1;
-  font-size: clamp(1.5rem, 3vw, 1.9rem); color: var(--head);
+/* ── download, repair, extract: the app's own steps, one line each ──── */
+.steps {
+  list-style: none; margin: 2.2rem var(--edge) 0;
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.4rem 2.5rem;
 }
-main h3 { margin-top: 2rem; font-size: 1.2rem; font-weight: 600; color: var(--head); }
-main h3 + p, .prose { margin-top: 0.5rem; max-width: 44em; }
-.intro { margin-top: 0.7rem; max-width: 44em; }
+.steps h2 {
+  display: flex; align-items: center; gap: 0.6rem;
+  font-family: var(--mono); font-size: 1rem; font-weight: 700; color: var(--head);
+}
+.steps h2::before {
+  content: ""; flex: none; width: 0.6rem; height: 0.6rem; border-radius: 50%; background: var(--done);
+}
+.steps p { margin-top: 0.4rem; color: var(--text); }
 
-/* a row of plain links under a paragraph */
-.links { margin-top: 0.8rem; display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1.3rem;
+/* ── the other two ways to run it ────────────────────────────────────── */
+.platform {
+  display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); align-items: center;
+  gap: 2rem 3.5rem; margin: 6rem var(--edge) 0; scroll-margin-top: 1.5rem;
+}
+.platform--phone { grid-template-columns: minmax(0, 1fr) 20rem; }
+.platform h2 {
+  font-family: var(--mono); font-weight: 700; letter-spacing: -0.03em; line-height: 1.15;
+  font-size: clamp(1.4rem, 2.6vw, 1.75rem); color: var(--head);
+}
+.platform__copy > p:not(.links, .fine) { margin-top: 0.7rem; max-width: 30em; }
+
+/* the iPhone demo, cropped to the phone */
+.phone { width: 100%; }
+.phone video { aspect-ratio: 4 / 5; object-fit: cover; }
+
+.links { margin-top: 1rem; display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1.3rem;
   font-size: var(--fs-small); }
 .links .badge { display: inline-flex; border-radius: 7px; }
 .links .badge img { display: block; height: 40px; width: auto; }
 
-/* bullets: one short line each, a small cyan square */
-ul.bullets { list-style: none; display: grid; gap: 0.45rem; margin-top: 1rem; max-width: 46em; }
-ul.bullets li { position: relative; padding-left: 1.1rem; }
-ul.bullets li::before {
-  content: ""; position: absolute; left: 0; top: 0.62em; width: 5px; height: 5px;
-  background: var(--accent); opacity: 0.8;
-}
-
-/* what you need: one hairline row per platform */
-dl.ledger { margin-top: 1.4rem; border-top: 1px solid var(--line); max-width: 52rem; }
-dl.ledger > div {
-  display: grid; grid-template-columns: minmax(10rem, 14rem) 1fr; gap: 0.3rem 2rem;
-  padding: 0.9rem 0 1rem; border-bottom: 1px solid var(--line);
-}
-dl.ledger dt { font-weight: 600; font-size: var(--fs-title); color: var(--head); }
-
-/* what it does: two columns of plain text, one rule on top */
-dl.features {
-  margin-top: 1.6rem; padding-top: 1.5rem; border-top: 1px solid var(--line);
-  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.6rem 3rem;
-}
-dl.features dt { font-weight: 600; font-size: var(--fs-title); color: var(--head); }
-dl.features dd { margin-top: 0.3rem; max-width: 32em; }
-
 /* command line */
 .shell {
-  margin-top: 1rem; max-width: 46rem;
-  background: var(--well); border: 1px solid var(--line); border-radius: 4px;
+  position: relative; min-width: 0;
+  background: var(--well); border: 1px solid var(--line); border-radius: 6px;
 }
 .shell pre {
-  padding: 0.85rem 1rem; overflow-x: auto; font-size: 0.88rem; line-height: 1.7; color: var(--text);
+  padding: 1rem 4.8rem 1rem 1.1rem; font-size: 0.88rem; line-height: 1.8; color: var(--text);
+  white-space: pre-wrap; overflow-wrap: break-word;
 }
-.shell--copy { display: flex; align-items: center; gap: 0.75rem; padding-right: 0.6rem; }
-.shell--copy pre { flex: 1; min-width: 0; }
+.shell .copy { position: absolute; top: 0.75rem; right: 0.7rem; }
+/* a long command wraps under itself, past the prompt */
+.cmd { display: block; padding-left: 2ch; text-indent: -2ch; }
 .nb { white-space: nowrap; }
-.pmt { color: var(--base0B); user-select: none; -webkit-user-select: none; }
-.com { color: var(--dim); }
-.copy .copy__done { display: none; color: var(--base0B); }
+.pmt { color: var(--done); user-select: none; -webkit-user-select: none; }
+.copy .copy__done { display: none; color: var(--done); }
 .copy.is-done .copy__idle { display: none; }
 .copy.is-done .copy__done { display: inline; }
 
-/* latest releases */
-.rel-line {
-  margin-top: 0.9rem; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.3rem 1rem;
-  font-family: var(--mono); font-size: var(--fs-label);
-}
-.rel-line .ver { color: var(--accent); font-weight: 700; font-family: var(--mono); }
-.rel-line a { color: var(--dim); text-decoration: none; }
-.rel-line a:hover { color: var(--head); }
-.rel-line span { color: var(--dim); }
-
 /* ── footer: the base16 colours, flat, sign the page off ────────────── */
 .bands {
-  margin-top: 5rem; height: 3px;
+  margin-top: 6rem; height: 3px;
   background: linear-gradient(90deg,
     var(--base08) 0 16.66%, var(--base0A) 0 33.33%, var(--base0B) 0 50%,
     var(--base0C) 0 66.66%, var(--base0D) 0 83.33%, var(--base0E) 0 100%);
@@ -222,21 +204,25 @@ dl.features dd { margin-top: 0.3rem; max-width: 32em; }
 .doc .meta { margin-top: 0.6rem; font-size: var(--fs-small); color: var(--dim); }
 .doc h2 { margin-top: 2.4rem; font-family: var(--mono); font-size: 1.2rem; letter-spacing: -0.02em; }
 .doc h2 + p { margin-top: 0.5rem; }
-.doc ul.bullets { margin-top: 1.6rem; }
+ul.bullets { list-style: none; display: grid; gap: 0.45rem; margin-top: 1.6rem; max-width: 46em; }
+ul.bullets li { position: relative; padding-left: 1.1rem; }
+ul.bullets li::before {
+  content: ""; position: absolute; left: 0; top: 0.62em; width: 5px; height: 5px;
+  background: var(--accent); opacity: 0.8;
+}
 
 /* ── responsive ──────────────────────────────────────────────────────── */
 @media (max-width: 860px) {
-  .hero { grid-template-columns: 1fr; padding-top: 2.8rem; }
-  dl.features { grid-template-columns: 1fr; gap: 1.3rem; }
-  dl.ledger > div { grid-template-columns: 1fr; gap: 0.2rem; }
-  main > section { padding-top: 2.8rem; }
+  .hero { padding-top: 3rem; }
+  .steps { grid-template-columns: 1fr; }
+  .platform, .platform--phone { grid-template-columns: 1fr; margin-top: 4.5rem; }
+  .phone { justify-self: center; width: min(17rem, 100%); }
 }
 @media (max-width: 600px) {
   :root { --gutter: 1rem; }
-  .topbar nav a:not(.ext):nth-child(n + 3) { display: none; }
+  .topbar nav a:not(:last-child) { display: none; }
   .cta-row .btn { flex: 1 1 auto; text-align: center; }
-  .shell pre { font-size: 0.84rem; padding-inline: 0.8rem; }
-  /* the install line wraps at the URL's slashes (the <wbr>s) instead of scrolling */
-  .shell--copy { align-items: flex-start; padding-top: 0.6rem; }
-  .shell--copy pre { padding-top: 0.25rem; white-space: pre-wrap; overflow-wrap: break-word; }
+  .stage { margin-top: 2.5rem; }
+  /* the copy button sits above the wrapped install line, not beside it */
+  .shell pre { font-size: 0.84rem; padding: 2.6rem 0.8rem 0.9rem; }
 }

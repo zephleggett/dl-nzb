@@ -6,8 +6,9 @@
   const $ = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
 
-  /* hero video: plays muted on a loop, unless the visitor prefers reduced
-     motion. Our own play/pause button replaces the native controls. */
+  /* demo videos: our own play/pause button replaces the native controls.
+     The hero (data-autoplay) plays muted on a loop, unless the visitor
+     prefers reduced motion; the others wait for play. */
   $$(".ctrl[data-video]").forEach((btn) => {
     const video = $(btn.dataset.video);
     if (!video) return;
@@ -15,7 +16,8 @@
     const label = () => {
       const playing = !video.paused;
       btn.textContent = playing ? "pause" : "play";
-      btn.setAttribute("aria-label", playing ? "Pause the Mac demo" : "Play the Mac demo");
+      const name = btn.dataset.name || "demo";
+      btn.setAttribute("aria-label", (playing ? "Pause the " : "Play the ") + name);
     };
     video.removeAttribute("controls");
     btn.hidden = false;
@@ -23,7 +25,7 @@
     video.addEventListener("pause", label);
     btn.addEventListener("click", () => (video.paused ? video.play().catch(() => {}) : video.pause()));
     still.addEventListener?.("change", () => { if (still.matches) video.pause(); });
-    if (!still.matches) {
+    if (video.hasAttribute("data-autoplay") && !still.matches) {
       video.preload = "auto";
       video.play().catch(() => {});
     }

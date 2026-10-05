@@ -10,9 +10,9 @@ cp docs/images/iphone-demo.mp4 docs/images/iphone-demo-poster.png site/media/
 
 | File | Used as |
 | --- | --- |
-| `icon.png` | the icon beside the name in the hero (256px, `docs/images/icon.png`) |
+| `icon.png` | the icon beside the name in the header (256px, `docs/images/icon.png`) |
 | `mac-demo.mp4`, `mac-demo-poster.png` | the hero video and its poster |
-| `iphone-demo.mp4`, `iphone-demo-poster.png` | the iPhone demo in "get the app" |
+| `iphone-demo.mp4`, `iphone-demo-poster.png` | the iPhone demo, cropped to the phone |
 | `testflight-badge.svg` | the TestFlight badge (`docs/images/testflight-badge.svg`) |
 | `og.png` | link preview, 1200×630: the Mac poster scaled to 630 high, centred |
 
