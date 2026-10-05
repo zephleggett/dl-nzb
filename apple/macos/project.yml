@@ -98,11 +98,14 @@ targetTemplates:
         # .nzb is imported, not exported: dl-nzb did not invent the format,
         # and another app may declare it too. Viewer at Default rank, so the
         # app is offered for NZBs without claiming them from the user's choice.
+        # While dl-nzb opens NZBs, Finder draws them as a page with the app
+        # icon and the extension, which macOS makes from the app icon.
         CFBundleDocumentTypes:
           - CFBundleTypeName: NZB File
             CFBundleTypeRole: Viewer
             LSHandlerRank: Default
             LSItemContentTypes: [com.zephleggett.dl-nzb.nzb]
+            CFBundleTypeIconSystemGenerated: true
         UTImportedTypeDeclarations:
           - UTTypeIdentifier: com.zephleggett.dl-nzb.nzb
             UTTypeDescription: NZB File

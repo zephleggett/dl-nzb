@@ -5,6 +5,12 @@ All notable changes to dl-nzb will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- On a Mac, NZB files show the dl-nzb icon in Finder while dl-nzb is the
+  app that opens them.
+
 ## [0.8.0-rc.2] - 2026-10-05
 
 The second test release: lighter on the Mac while it downloads.
