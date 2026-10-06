@@ -5,11 +5,40 @@ All notable changes to dl-nzb will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.8.0] - 2026-10-05
+
+dl-nzb for Mac, iPhone and iPad, on the same engine as the command line.
 
 ### Added
+- **dl-nzb for Mac.** An app for macOS 26 or later, on Apple silicon and Intel.
+  Open an NZB or drop it on the window; pause, resume, or set a speed limit.
+  Downloads carry on after you quit and reopen. The app offers each new release
+  and installs it when you agree.
+- **dl-nzb for iPhone and iPad**, on TestFlight. Open an NZB from Files or
+  Safari. Downloads keep going in the background and land in the Files app.
+- On a Mac, the app can import your server from the command line's `config.toml`.
+- Both apps ask for a RAR password when an archive needs one, and use a
+  password in the NZB's file name (`Name{{password}}.nzb`), as the command
+  line does.
 - On a Mac, NZB files show the dl-nzb icon in Finder while dl-nzb is the
   app that opens them.
+- **Command line:** run the same command again to pick up an interrupted
+  download where it stopped.
+- **Command line:** `--password` for password-protected archives (passwords in
+  the NZB are used by themselves), and `--limit-rate` or `speed_limit` in the
+  config to cap the download speed.
+
+### Changed
+- Decoding downloads takes less CPU.
+- Clearer errors: a wrong password, an unreachable server and a connection that
+  keeps dropping each say so.
+- **Command line:** the summary at the end says what happened, with the
+  reason when a download fails, instead of "Completed" with a count of errors.
+- **Command line:** the config file no longer lists settings that did
+  nothing (`timeout`, `force_redownload`, `large_file_threshold`, `[logging]`).
+  Old config files still load.
+- Each release has a `SHA256SUMS` file for checking downloads.
+- Safer with untrusted NZBs and servers.
 
 ## [0.8.0-rc.2] - 2026-10-05
 
