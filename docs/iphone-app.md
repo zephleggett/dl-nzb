@@ -8,11 +8,9 @@
 
 ## 1. Install dl-nzb
 
-<!-- TODO(owner): replace XXXXXXXX with the public TestFlight code. -->
+<a href="https://testflight.apple.com/join/T8BBgDcK"><img src="images/testflight-badge.svg" alt="Available on TestFlight" height="40"></a>
 
-<a href="https://testflight.apple.com/join/XXXXXXXX"><img src="images/testflight-badge.svg" alt="Available on TestFlight" height="40"></a>
-
-1. Open **[the dl-nzb beta](https://testflight.apple.com/join/XXXXXXXX)** on the iPhone or iPad.
+1. Open **[the dl-nzb beta](https://testflight.apple.com/join/T8BBgDcK)** on the iPhone or iPad.
 2. Install **TestFlight** if asked, then tap **Accept** and **Install**.
 3. Open **dl-nzb**.
 

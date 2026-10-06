@@ -67,8 +67,8 @@ App Store Connect has no API for the first two.
    account in the review notes, or say what a reviewer can check without one.
 4. Create an external group named **Public** and turn on its public link.
    Put the link in `TESTFLIGHT_LINK` at the top of
-   `.github/workflows/release.yml`. Until then it is `XXXXXXXX`, and the
-   release notes leave out the iPhone app.
+   `.github/workflows/release.yml`. While it is the placeholder
+   (`XXXXXXXX`), the release notes leave out the iPhone app.
 
 ## iPhone app on TestFlight
 

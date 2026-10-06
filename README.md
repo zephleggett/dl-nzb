@@ -8,12 +8,10 @@
 
 You need a Usenet server account and an NZB file.
 
-<!-- TODO(owner): replace XXXXXXXX in both TestFlight links with the public beta code. -->
-
 | Platform | Get it | Guide |
 | --- | --- | --- |
 | Mac | [DMG from Releases](https://github.com/zephleggett/dl-nzb/releases/latest) | [Set up a Mac](docs/mac-app.md) |
-| iPhone and iPad | [TestFlight](https://testflight.apple.com/join/XXXXXXXX) | [Set up iPhone or iPad](docs/iphone-app.md) |
+| iPhone and iPad | [TestFlight](https://testflight.apple.com/join/T8BBgDcK) | [Set up iPhone or iPad](docs/iphone-app.md) |
 | Command line | `cargo install` or [release binaries](https://github.com/zephleggett/dl-nzb/releases/latest) | [Command line](#command-line) |
 
 Open the app and add an NZB. It downloads, repairs and extracts; then you're
@@ -34,7 +32,7 @@ Simulator demos.
 
 <a href="docs/images/iphone-demo.mp4"><img src="docs/images/iphone-demo.webp" width="100%" alt="dl-nzb for iPhone: an NZB opened from Files downloads, repairs 12 damaged blocks and extracts, then its files appear in the Files app. Simulated engine, sped up where marked."></a>
 
-<a href="https://testflight.apple.com/join/XXXXXXXX"><img src="docs/images/testflight-badge.svg" alt="Available on TestFlight" height="40"></a>
+<a href="https://testflight.apple.com/join/T8BBgDcK"><img src="docs/images/testflight-badge.svg" alt="Available on TestFlight" height="40"></a>
 
 ## Command line
 

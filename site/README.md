@@ -40,4 +40,3 @@ and keeps the workers.dev address on.
   both keep their native controls.
 - The version under the hero's buttons is set by hand. Update it with each
   release.
-- TODO: the TestFlight code (`XXXXXXXX`, twice in `index.html`).

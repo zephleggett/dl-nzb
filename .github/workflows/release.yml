@@ -32,7 +32,7 @@ env:
   # OWNER: the TestFlight public link of the Public group (App Store Connect >
   # TestFlight > Public > Public Link). While it is the placeholder, the notes
   # leave the iPhone badge out.
-  TESTFLIGHT_LINK: https://testflight.apple.com/join/XXXXXXXX
+  TESTFLIGHT_LINK: https://testflight.apple.com/join/T8BBgDcK
 
 jobs:
   check:
